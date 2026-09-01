@@ -1187,6 +1187,22 @@ def _stream_download_once(url, dest, expected_size=None):
     sys.stdout.write("\r" + " " * 60 + "\r")
     sys.stdout.flush()
 
+    # A connection that closes cleanly part-way through looks exactly like a
+    # finished download: read() returns b"" and nothing raises. Without this
+    # check the short .part was renamed into place and reported as SUCCESS, so
+    # the retry-and-resume machinery below never engaged at all, and the caller
+    # only discovered the problem later by hashing - which is how a pool fills
+    # up with files that are an exact multiple of the chunk size.
+    #
+    # Returning False instead keeps the .part and lets the retry resume from
+    # where it stopped, which is what the resume support was for.
+    want = total or expected_size
+    if want and downloaded < want:
+        LOG.warning("  [WARN] %s ended early at %s of %s; resuming.",
+                    os.path.basename(dest), human_bytes(downloaded),
+                    human_bytes(want))
+        return False
+
     try:
         if os.path.exists(dest):
             os.remove(dest)

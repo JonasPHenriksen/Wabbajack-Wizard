@@ -761,17 +761,25 @@ def choose_game(games_present, preset=None):
     sys.exit(2)
 
 
+def resolve_preset(modlists_map, preset):
+    """A --list value as a modlist name, or None if it matches nothing.
+
+    Accepts a menu number or a name, case-insensitively."""
+    if preset in modlists_map:
+        return modlists_map[preset]
+    by_name = {nm.lower(): nm for nm in modlists_map.values()}
+    return by_name.get(str(preset).lower())
+
+
 def choose_modlist(modlists_map, preset=None):
     """Resolve the target modlist to stage. Returns a list name.
 
     A valid modlist selection is now required: the cleanup/reset pass runs
     automatically beforehand, so it is no longer offered here as a choice."""
     if preset is not None:
-        if preset in modlists_map:
-            return modlists_map[preset]
-        by_name = {nm.lower(): nm for nm in modlists_map.values()}
-        if preset.lower() in by_name:
-            return by_name[preset.lower()]
+        name = resolve_preset(modlists_map, preset)
+        if name:
+            return name
         LOG.error("[ERROR] Preset list selector '%s' is not valid. Known lists: %s",
                   preset, ", ".join(sorted(modlists_map.values())))
         sys.exit(2)
@@ -1039,6 +1047,18 @@ def main():
                       "Rename the .wabbajack file.", rec["name"])
             sys.exit(1)
         modlists_map[str(i + 1)] = rec["name"]
+
+    # Check --list now, before the cleanup pass. Cleanup runs first by design
+    # and it MOVES FILES: a mistyped list name used to trigger a full pool
+    # reshuffle - pulling the shared archives back out of a list you had just
+    # staged - and only report the bad argument afterwards, by which time the
+    # damage was done and the run exited non-zero having quietly undone your
+    # preparation.
+    if args.preset is not None and resolve_preset(modlists_map, args.preset) is None:
+        LOG.error("[TERMINATED] --list '%s' is not one of: %s",
+                  args.preset, ", ".join(sorted(modlists_map.values())))
+        LOG.error("             Nothing has been moved.")
+        sys.exit(2)
 
     # ---- Build demand (independent of which list we end up staging) --
     file_demands = defaultdict(list)
