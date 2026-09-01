@@ -307,6 +307,16 @@ def stem_of(filename):
     return os.path.splitext(filename)[0]
 
 
+def fit(values, minimum=4):
+    """Width that shows every one of `values` in full.
+
+    Fixed widths meant "Skyrim Special Edition" and "Enderal Special Edition"
+    both arrived as "Skyrim Speci", which is not much use when the point of the
+    column is telling the games apart. Sizing from the rows costs nothing and
+    cannot truncate."""
+    return max([len(str(v)) for v in values] + [minimum])
+
+
 # ----------------------------------------------------------------------
 # Stage 1 - updates
 # ----------------------------------------------------------------------
@@ -398,22 +408,26 @@ def stage_incomplete(records, assist):
     if not rows:
         out("    none - every modlist has all the archives this tool can fetch.")
     else:
-        out(f"    {'#':>3}  {'modlist':<38}{'game':<13}{'absent':>7}"
-            f"{'wrong sz':>9}{'size':>10}  clicks")
+        nw = fit([stem_of(fn) for fn, _s in rows], 7) + 2
+        gw = fit([A.WJ.game_label(s["game"]) for _f, s in rows], 4) + 2
+        out(f"    {'#':>3}  {'modlist':<{nw}}{'game':<{gw}}{'absent':>7}"
+            f"{'wrong sz':>9}{'size':>10}{'nexus':>7}")
         for i, (fn, st) in enumerate(rows, 1):
-            clicks = f"{st['nexus']} Nexus" if st["nexus"] else "-"
-            out(f"    {i:>3}  {stem_of(fn)[:37]:<38}"
-                f"{A.WJ.game_label(st['game'])[:12]:<13}"
+            out(f"    {i:>3}  {stem_of(fn):<{nw}}"
+                f"{A.WJ.game_label(st['game']):<{gw}}"
                 f"{st['missing'] - st['stale']:>7}{st['stale'] or '-':>9}"
-                f"{human(st['bytes']):>10}  {clicks}")
+                f"{human(st['bytes']):>10}{st['nexus'] or '-':>7}")
         total_stale = sum(st["stale"] for _f, st in rows)
         if total_stale:
             out()
-            out(f"    'wrong sz' means the file is on disk under the right name but")
-            out(f"    is not the size the manifest states - {total_stale} in total. Usually a")
-            out(f"    download that was finalised short by an older version of these")
-            out(f"    scripts. Wabbajack would reject them at install time; fetching")
-            out(f"    the list replaces them.")
+            out(f"    absent    = no file of that name anywhere in the game's pools.")
+            out(f"    wrong sz  = a file of that name IS there, but not the number of")
+            out(f"                bytes the manifest says it should be ({total_stale} of them).")
+            out(f"                Wabbajack verifies every archive before installing, so")
+            out(f"                those would be rejected at install time - they count as")
+            out(f"                missing. Mostly downloads cut short by an older version")
+            out(f"                of these scripts. Fetching the list overwrites them; you")
+            out(f"                do not have to do anything about them yourself.")
 
     out()
     out(f"  COMPLETE ({len(complete)})")
@@ -492,10 +506,12 @@ def stage_prepare(records):
         return False
 
     out()
-    out(f"    {'#':>3}  {'modlist':<40}{'game':<16}{'on disk':>9}{'missing':>9}")
+    nw = fit([stem_of(fn) for fn, _s in rows], 7) + 2
+    gw = fit([A.WJ.game_label(s["game"]) for _f, s in rows], 4) + 2
+    out(f"    {'#':>3}  {'modlist':<{nw}}{'game':<{gw}}{'on disk':>9}{'missing':>9}")
     for i, (fn, st) in enumerate(rows, 1):
-        out(f"    {i:>3}  {stem_of(fn)[:39]:<40}"
-            f"{A.WJ.game_label(st['game'])[:15]:<16}"
+        out(f"    {i:>3}  {stem_of(fn):<{nw}}"
+            f"{A.WJ.game_label(st['game']):<{gw}}"
             f"{st['present']:>9}{st['missing']:>9}")
 
     picks = choose(len(rows), "modlist", allow_all=False, single=True)
@@ -550,19 +566,24 @@ def show_space(lists, masters):
     out()
     out(f"  MODLIST MANIFESTS ({human(sum(x['manifest_bytes'] for x in lists))} "
         f"across {len(lists)} file(s))")
-    out(f"    {'#':>3}  {'modlist':<40}{'game':<16}{'manifest':>10}{'its archives':>14}")
+    nw = fit([stem_of(x["file"]) for x in lists], 7) + 2
+    gw = fit([A.WJ.game_label(x["game"]) if x["game"] else "?"
+              for x in lists], 4) + 2
+    out(f"    {'#':>3}  {'modlist':<{nw}}{'game':<{gw}}{'manifest':>10}"
+        f"{'its archives':>14}")
     for i, x in enumerate(lists, 1):
-        out(f"    {i:>3}  {stem_of(x['file'])[:39]:<40}"
-            f"{(A.WJ.game_label(x['game']) if x['game'] else '?')[:15]:<16}"
+        out(f"    {i:>3}  {stem_of(x['file']):<{nw}}"
+            f"{(A.WJ.game_label(x['game']) if x['game'] else '?'):<{gw}}"
             f"{human(x['manifest_bytes']):>10}"
             f"{human(x['folder_bytes']) + ' ' if x['folder_files'] else '- ':>14}")
     out()
     out(f"  MASTER POOLS ({human(sum(m['bytes'] for m in masters))}, of which "
         f"{human(sum(m['free_bytes'] for m in masters))} is reclaimable)")
-    out(f"    {'#':>3}  {'game':<26}{'files':>8}{'size':>11}"
+    gw = fit([A.WJ.game_label(m["game"]) for m in masters], 4) + 2
+    out(f"    {'#':>3}  {'game':<{gw}}{'files':>8}{'size':>11}"
         f"{'reclaimable':>13}{'still needed':>14}")
     for i, m in enumerate(masters, 1):
-        out(f"    {i:>3}  {A.WJ.game_label(m['game'])[:25]:<26}"
+        out(f"    {i:>3}  {A.WJ.game_label(m['game']):<{gw}}"
             f"{m['files']:>8}{human(m['bytes']):>11}"
             f"{human(m['free_bytes']):>13}{m['kept_files']:>10} file(s)")
 
@@ -739,8 +760,9 @@ def stage_space(state, records):
         _lists, masters = gather_space(records)
         out()
         out("  MASTER POOLS after the rebuild")
+        gw = fit([A.WJ.game_label(m["game"]) for m in masters], 4) + 2
         for m in masters:
-            out(f"    {A.WJ.game_label(m['game'])[:25]:<26}"
+            out(f"    {A.WJ.game_label(m['game']):<{gw}}"
                 f"{m['files']:>9}{human(m['bytes']):>12}")
 
     # ---- 4b: clear Master --------------------------------------------
@@ -757,10 +779,11 @@ def stage_space(state, records):
         return deleted_any
 
     out()
-    out(f"    {'#':>3}  {'game':<26}{'reclaimable':>13}{'files':>8}"
+    gw = fit([A.WJ.game_label(m["game"]) for m in masters], 4) + 2
+    out(f"    {'#':>3}  {'game':<{gw}}{'reclaimable':>13}{'files':>8}"
         f"{'protected':>12}")
     for i, m in enumerate(masters, 1):
-        out(f"    {i:>3}  {A.WJ.game_label(m['game'])[:25]:<26}"
+        out(f"    {i:>3}  {A.WJ.game_label(m['game']):<{gw}}"
             f"{human(m['free_bytes']):>13}{m['free_files']:>8}"
             f"{m['kept_files']:>7} file(s)")
 
