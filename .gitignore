@@ -42,3 +42,6 @@ desktop.ini
 # The dedicated Firefox profile assist mode drives. Holds a live Nexus
 # session, so it must never be committed.
 .assist-profile/
+
+# Backups taken by a live test before damaging real archives.
+.test_backup/
