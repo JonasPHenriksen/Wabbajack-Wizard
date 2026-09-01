@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Run every sandbox suite and report a combined total.
+
+    ..\.venv-win\Scripts\python.exe tests\run_all.py
+
+Nothing here touches the live archive pools. ARCHIVE_ROOT is "../Mod Archive"
+resolved against the SCRIPT folder, so each suite copies the scripts into a
+temporary directory and they operate on a temporary pool instead. The two HTTP
+suites serve their own localhost server, so no suite needs the internet except
+where it is explicitly checking a real feed.
+"""
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SUITES = [
+    ("t1_sorter.py", "sorter: aborts, collisions, reserved names, dry-run"),
+    ("t2_download.py", "downloads: hard vs transient failures, resume, verify"),
+    ("t3_cdn.py", "CDN multi-part: broken definitions, bad parts, resume"),
+    ("t4_updater.py", "updater: state recovery, matching, start-up guards"),
+    ("t5_wizard.py", "wizard: empty data, missing folders, odd names"),
+    ("t6_planning.py", "planning, manifest cache, backup pruning"),
+]
+
+total_pass = total_fail = 0
+failed_suites = []
+for script, blurb in SUITES:
+    print()
+    print("#" * 72)
+    print("#  %s  -  %s" % (script, blurb))
+    print("#" * 72)
+    proc = subprocess.run([sys.executable, os.path.join(HERE, script)],
+                          capture_output=True, text=True, errors="replace")
+    out = proc.stdout + proc.stderr
+    print(out.rstrip())
+    for line in out.split("\n"):
+        if "passed," in line and "failed" in line:
+            try:
+                bits = line.split()
+                total_pass += int(bits[0])
+                total_fail += int(bits[2])
+            except (ValueError, IndexError):
+                pass
+    if proc.returncode != 0:
+        failed_suites.append(script)
+
+print()
+print("=" * 72)
+print("  TOTAL: %d passed, %d failed, across %d suites"
+      % (total_pass, total_fail, len(SUITES)))
+if failed_suites:
+    print("  suites with failures: " + ", ".join(failed_suites))
+print("=" * 72)
+sys.exit(1 if failed_suites else 0)

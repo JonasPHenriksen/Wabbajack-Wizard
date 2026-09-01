@@ -1,0 +1,227 @@
+"""Wabbajack CDN multi-part protocol: failure and resume handling."""
+import os
+import sys
+
+# Derive the repo root from this file so the suite runs from anywhere, rather
+# than being pinned to whatever drive letter the share happens to have.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
+import gzip
+import io
+import json
+import os
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+from harness import check, summary
+import logging
+import wabbajack_cdn as C
+C.LOG.setLevel(logging.CRITICAL)
+
+TMP = os.path.join(os.environ["TEMP"], "wj_t3")
+os.makedirs(TMP, exist_ok=True)
+
+PART = 1000
+NPARTS = 4
+WHOLE = b"".join(bytes([65 + i]) * PART for i in range(NPARTS))
+BROKEN = {"parts": set(), "shortparts": set(), "definition": "ok"}
+HITS = {}
+
+
+def definition(size=None, parts=NPARTS, whole_hash=None):
+    entries = []
+    for i in range(parts):
+        chunk = WHOLE[i * PART:(i + 1) * PART]
+        entries.append({"Index": i, "Offset": i * PART, "Size": PART,
+                        "Hash": C.wj_hash(chunk)})
+    return {"Size": len(WHOLE) if size is None else size,
+            "Hash": C.wj_hash(WHOLE) if whole_hash is None else whole_hash,
+            "MungedName": "test.bin", "Parts": entries}
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        HITS[self.path] = HITS.get(self.path, 0) + 1
+        if self.path.endswith("/definition.json.gz"):
+            mode = BROKEN["definition"]
+            if mode == "404":
+                return self.send_error(404)
+            if mode == "notgzip":
+                body = b"plain nonsense, not gzip and not json"
+            elif mode == "badjson":
+                body = gzip.compress(b'{"Size": 1, "Parts": ')
+            elif mode == "noparts":
+                body = gzip.compress(json.dumps(
+                    {"Size": 10, "Hash": "x", "Parts": []}).encode())
+            elif mode == "badwholehash":
+                body = gzip.compress(json.dumps(
+                    definition(whole_hash="AAAAAAAAAAA=")).encode())
+            else:
+                body = gzip.compress(json.dumps(definition()).encode())
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
+        if "/parts/" in self.path:
+            idx = int(self.path.rsplit("/", 1)[1])
+            data = WHOLE[idx * PART:(idx + 1) * PART]
+            if idx in BROKEN["parts"]:
+                data = b"Z" * PART          # right length, wrong bytes
+            if idx in BROKEN["shortparts"]:
+                data = data[:10]            # wrong length
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return self.wfile.write(data)
+        self.send_error(404)
+
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+BASE = "http://127.0.0.1:%d/file" % srv.server_port
+C.PART_RETRIES = 2          # keep the test quick
+
+print("=" * 70)
+print("  T3  CDN MULTI-PART")
+print("=" * 70)
+
+
+def clean(name="cdn.bin"):
+    p = os.path.join(TMP, name)
+    for suffix in ("", ".part", ".parts.json"):
+        try:
+            os.remove(p + suffix)
+        except OSError:
+            pass
+    return p
+
+
+def reset():
+    BROKEN["parts"] = set()
+    BROKEN["shortparts"] = set()
+    BROKEN["definition"] = "ok"
+    HITS.clear()
+
+
+# ---------------------------------------------------------------- 3.1
+print("\n 3.1  happy path")
+reset()
+p = clean()
+ok, h = C.download(BASE, p, progress=False, expected_size=len(WHOLE),
+                   expected_hash=C.wj_hash(WHOLE), detail=True)
+check("returns True", ok is True)
+check("file assembled byte-exact", io.open(p, "rb").read() == WHOLE)
+check("returns the hash it computed", h == C.wj_hash(WHOLE))
+check("resume sidecar cleaned up", not os.path.exists(p + ".parts.json"))
+check("no .part left behind", not os.path.exists(p + ".part"))
+
+# ---------------------------------------------------------------- 3.2
+print("\n 3.2  a broken definition is refused, in every shape")
+for mode, label in (("404", "HTTP 404"), ("notgzip", "not gzip or JSON"),
+                    ("badjson", "truncated JSON"), ("noparts", "no parts listed")):
+    reset()
+    BROKEN["definition"] = mode
+    p = clean()
+    ok = C.download(BASE, p, progress=False)
+    check("refuses definition: %-18s" % label, ok is False)
+    check("  and writes no output file", not os.path.exists(p))
+
+# ---------------------------------------------------------------- 3.3
+print("\n 3.3  a part with the wrong BYTES is caught by its own hash")
+reset()
+BROKEN["parts"] = {2}
+p = clean()
+ok = C.download(BASE, p, progress=False)
+check("download fails", ok is False)
+check("the bad part was retried before giving up",
+      HITS.get("/file/parts/2", 0) > 1, "attempts=%s" % HITS.get("/file/parts/2"))
+check("no file published under the real name", not os.path.exists(p))
+check("the .part is kept for a resume", os.path.exists(p + ".part"))
+check("progress recorded in a sidecar", os.path.exists(p + ".parts.json"))
+
+# ---------------------------------------------------------------- 3.4
+print("\n 3.4  ...and it resumes from what it already had")
+reset()
+sidecar = json.load(io.open(p + ".parts.json", encoding="utf-8"))
+kept = len(sidecar.get("done", []))
+check("sidecar remembers the good parts (%d of %d)" % (kept, NPARTS),
+      0 < kept < NPARTS)
+ok, h = C.download(BASE, p, progress=False, detail=True)
+check("second run completes", ok is True)
+check("assembled file is byte-exact", io.open(p, "rb").read() == WHOLE)
+check("only the missing parts were refetched",
+      HITS.get("/file/parts/2", 0) >= 1 and
+      sum(v for k, v in HITS.items() if "/parts/" in k) < NPARTS + 2,
+      "fetches=%s" % {k: v for k, v in HITS.items() if "/parts/" in k})
+
+# ---------------------------------------------------------------- 3.5
+print("\n 3.5  a part with the wrong LENGTH is caught too")
+reset()
+BROKEN["shortparts"] = {1}
+p = clean()
+ok = C.download(BASE, p, progress=False)
+check("download fails", ok is False)
+check("no file published", not os.path.exists(p))
+
+# ---------------------------------------------------------------- 3.6
+print("\n 3.6  a whole-file hash mismatch discards everything")
+reset()
+BROKEN["definition"] = "badwholehash"
+p = clean()
+ok = C.download(BASE, p, progress=False)
+check("download fails on the assembled hash", ok is False)
+check("the .part is discarded (not resumable - the bytes are suspect)",
+      not os.path.exists(p + ".part"))
+check("the resume sidecar is cleared too",
+      not os.path.exists(p + ".parts.json"))
+check("nothing published under the real name", not os.path.exists(p))
+
+# ---------------------------------------------------------------- 3.7
+print("\n 3.7  a sidecar from a different file must be ignored")
+reset()
+p = clean()
+io.open(p + ".part", "wb").write(b"?" * len(WHOLE))
+json.dump({"url": "http://somewhere.else/other", "size": len(WHOLE),
+           "done": [0, 1, 2, 3]},
+          io.open(p + ".parts.json", "w", encoding="utf-8"))
+ok = C.download(BASE, p, progress=False)
+check("download still succeeds", ok is True)
+check("every part was refetched, not trusted",
+      sum(v for k, v in HITS.items() if "/parts/" in k) == NPARTS,
+      "fetches=%s" % sum(v for k, v in HITS.items() if "/parts/" in k))
+check("file is byte-exact", io.open(p, "rb").read() == WHOLE)
+
+# ---------------------------------------------------------------- 3.8
+print("\n 3.8  a sidecar claiming more than the .part actually holds")
+reset()
+p = clean()
+io.open(p + ".part", "wb").write(b"A" * 500)       # far too short
+json.dump({"url": BASE, "size": len(WHOLE), "done": [0, 1, 2, 3]},
+          io.open(p + ".parts.json", "w", encoding="utf-8"))
+ok = C.download(BASE, p, progress=False)
+check("the impossible resume claim is rejected", ok is True)
+check("all parts refetched",
+      sum(v for k, v in HITS.items() if "/parts/" in k) == NPARTS,
+      "fetches=%s" % sum(v for k, v in HITS.items() if "/parts/" in k))
+check("file is byte-exact", io.open(p, "rb").read() == WHOLE)
+
+# ---------------------------------------------------------------- 3.9
+print("\n 3.9  detail= keeps its contract on every exit")
+reset()
+BROKEN["definition"] = "404"
+p = clean()
+r = C.download(BASE, p, progress=False, detail=True)
+check("failure with detail=True is a 2-tuple",
+      isinstance(r, tuple) and len(r) == 2 and r[0] is False, str(r))
+r = C.download(BASE, p, progress=False)
+check("failure with detail=False is a bare bool", r is False, str(r))
+
+srv.shutdown()
+sys.exit(summary())

@@ -141,6 +141,33 @@ Put it in `nexus_api_key.txt` (gitignored) or `NEXUS_API_KEY`.
 | `wabbajack_archive_sorter_v2.py` | moves archives between pools |
 | `wabbajack_cdn.py` | the Wabbajack CDN's multi-part protocol |
 
+## Tests
+
+```
+.venv-win\Scripts\python.exe testsun_all.py
+```
+
+203 checks across six suites. None of them touch the live archive pools:
+`ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
+each suite copies the scripts into a temporary directory where they operate on
+a temporary pool, with no changes to the code under test. The download suites
+serve their own localhost HTTP server, so they need no internet and can force
+exactly the failure they want to check.
+
+| suite | covers |
+| --- | --- |
+| `t1_sorter` | aborting on an unreadable manifest, reserved names, demand-based pooling, staging, size-checked collisions, dry-run purity, bad arguments |
+| `t2_download` | hard vs transient HTTP failures, retry and resume, truncated transfers, verification, `.meta` sidecars, URL encoding |
+| `t3_cdn` | broken definitions in four shapes, bad part bytes and lengths, whole-file hash mismatch, resume from a partial download, stale and impossible sidecars |
+| `t4_updater` | filename-to-feed-key matching, negative-cache expiry, damaged state files, odd feed shapes, the start-up guards |
+| `t5_wizard` | empty data in every stage, missing folders, deleting a modlist whose pieces are already gone, awkward filenames |
+| `t6_planning` | present vs stale vs absent decisions, `--force`, foreign-installer exclusion, manifest cache invalidation, backup pruning |
+
+Two real bugs were found this way and are covered by regression checks: a
+connection closing part-way through a download was reported as success (so the
+resume logic never engaged), and the sorter validated `--list` only after its
+cleanup pass had already moved files.
+
 ## Requirements
 
 Python 3.8+ and `xxhash`. Without `xxhash` only sizes can be compared, so the
