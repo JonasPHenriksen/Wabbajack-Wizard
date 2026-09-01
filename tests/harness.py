@@ -14,7 +14,7 @@ import zipfile
 
 REAL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = os.path.join(REAL, ".venv-win", "Scripts", "python.exe")
-SCRIPTS = ("wj_autoupdate.py", "wj_wizard.py",
+SCRIPTS = ("wj_autoupdate.py", "wj_wizard.py", "wj_config.py",
            "wabbajack_archive_downloader.py",
            "wabbajack_archive_sorter_v2.py", "wabbajack_cdn.py")
 

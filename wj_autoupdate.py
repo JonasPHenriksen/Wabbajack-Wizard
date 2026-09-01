@@ -377,14 +377,20 @@ WJ = None  # populated in main()
 
 
 def check_script_consistency():
-    """The downloader and the sorter each carry their own copy of ARCHIVE_ROOT,
-    GAME_FOLDERS and EXCLUDE_POOL_DIRS.
+    """Confirm the downloader and the sorter really do share one layout.
 
-    They have to agree. The downloader decides where an archive is written; the
-    sorter decides where it is moved to. If the two disagree about the pool root
-    or about which folder a game maps to, every run quietly works across two
-    different directory trees: files get downloaded into one, sorted out of the
-    other, and each tool reports success. Cheap to check, miserable to debug."""
+    Both now take ARCHIVE_ROOT, GAME_FOLDERS and EXCLUDE_POOL_DIRS from
+    wj_config.py, so this should be true by construction. It is still checked
+    on every run, cheaply, because the failure it guards against is silent and
+    expensive: the downloader decides where an archive is WRITTEN and the
+    sorter decides where it is MOVED TO, so a local override re-added to one of
+    them sends every run across two different directory trees while both report
+    success."""
+    cfg = os.path.join(HERE, "wj_config.py")
+    if not os.path.isfile(cfg):
+        LOG.error("[TERMINATED] wj_config.py is missing from %s. It defines the "
+                  "archive layout and is not optional.", HERE)
+        return False
     path = os.path.join(HERE, SORTER_SCRIPT)
     if not os.path.isfile(path):
         LOG.error("[TERMINATED] %s not found next to this script.", SORTER_SCRIPT)
@@ -896,9 +902,15 @@ def load_plan_records(progress=None, files=None):
             "stamp": stamp,
             "game": rec["game"],
             "readable": rec["readable"],
-            "archives": [{"name": a["name"], "size": a["size"],
-                          "kind": WJ.state_type(a["state"])}
-                         for a in rec["archives"]],
+            # The raw $type is kept only for the entries we could not
+            # classify, so the cache stays small while an unrecognised
+            # downloader can still be named in a report.
+            "archives": [
+                dict({"name": a["name"], "size": a["size"], "kind": k},
+                     **({"raw": WJ.state_type_raw(a["state"])}
+                        if k == "unknown" else {}))
+                for a, k in ((a, WJ.state_type(a["state"]))
+                             for a in rec["archives"])],
         }
         cache[fn] = entry
         out[fn] = entry
@@ -1101,6 +1113,157 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
                   "Use 'skip' on Linux.")
         return 1
     return 0
+
+
+# ----------------------------------------------------------------------
+# Format assumptions
+# ----------------------------------------------------------------------
+def cmd_selftest():
+    """Check that the formats this tooling reads still look the way it expects.
+
+    Everything here is Wabbajack's own undocumented internals - the shape of
+    repositories.json, of a feed entry, of the JSON inside a .wabbajack, of a
+    CDN definition, and the set of downloader type names. None of it is a
+    published contract, so any of it can change without notice.
+
+    The point is not to prevent that. It is to make it ANNOUNCE itself. Without
+    this, a feed that stops carrying machineURL shows up as "Following 0
+    list(s)", and an archive type that gets renamed shows up as files quietly
+    reclassified as unsupported - both of which look like your problem rather
+    than an upstream change."""
+    banner("SELF TEST: FORMAT ASSUMPTIONS")
+    ok_count = bad_count = 0
+
+    def verdict(label, ok, detail=""):
+        nonlocal ok_count, bad_count
+        if ok:
+            ok_count += 1
+            LOG.info("  [OK]      %s", label)
+        else:
+            bad_count += 1
+            LOG.error("  [CHANGED] %s", label)
+        if detail:
+            LOG.info("            %s", detail)
+
+    # -- 1. the registry -----------------------------------------------
+    try:
+        repos = http_json(REPOSITORIES_URL)
+    except Exception as e:
+        verdict("repositories.json is reachable", False, str(e))
+        repos = None
+    if repos is not None:
+        verdict("repositories.json is an object of name -> feed URL",
+                isinstance(repos, dict) and repos
+                and all(isinstance(v, str) for v in repos.values()),
+                "%d repo(s) listed" % (len(repos) if isinstance(repos, dict) else 0))
+
+    # -- 2. a feed entry ------------------------------------------------
+    feeds, complete = load_feeds(None)
+    verdict("every feed loaded", complete,
+            "a feed that fails is a warning, not a format change")
+    verdict("feeds yield modlist entries", bool(feeds),
+            "%d list(s) indexed" % len(feeds))
+    if feeds:
+        with_machine = sum(1 for e in feeds.values() if e["machine"])
+        with_dl = sum(1 for e in feeds.values() if e["download"])
+        with_size = sum(1 for e in feeds.values() if e["size"])
+        with_hash = sum(1 for e in feeds.values() if e["hash"])
+        n = len(feeds)
+        verdict("entries carry machineURL", with_machine == n,
+                "%d of %d" % (with_machine, n))
+        verdict("entries carry a download link", with_dl > n * 0.9,
+                "%d of %d" % (with_dl, n))
+        verdict("entries carry download_metadata Size", with_size > n * 0.9,
+                "%d of %d - Size is what makes the cheap 'is this already the "
+                "published build' check possible" % (with_size, n))
+        verdict("entries carry download_metadata Hash", with_hash > n * 0.9,
+                "%d of %d" % (with_hash, n))
+
+    # -- 3. the inside of a .wabbajack ----------------------------------
+    files = WJ.list_manifest_files(MANIFESTS)
+    if not files:
+        verdict("a local manifest is available to inspect", False,
+                "no .wabbajack files in %s" % MANIFESTS)
+    else:
+        records = load_plan_records()
+        readable = [f for f, e in records.items() if e.get("readable")]
+        verdict("manifests open and contain a 'modlist' member",
+                len(readable) == len(records),
+                "%d of %d readable" % (len(readable), len(records)))
+        with_game = [f for f in readable if records[f].get("game")]
+        verdict("manifests declare a GameType", len(with_game) == len(readable),
+                "%d of %d" % (len(with_game), len(readable)))
+        total = sum(len(records[f]["archives"]) for f in readable)
+        sized = sum(1 for f in readable for a in records[f]["archives"]
+                    if a.get("size") is not None)
+        verdict("archive entries carry a Size", total and sized > total * 0.95,
+                "%d of %d entries" % (sized, total))
+
+        # -- 4. downloader type names ----------------------------------
+        kinds = {}
+        for f in readable:
+            for a in records[f]["archives"]:
+                kinds[a["kind"]] = kinds.get(a["kind"], 0) + 1
+        unknown = kinds.get("unknown", 0)
+        verdict("every archive's State type is one we recognise", unknown == 0,
+                "; ".join("%s:%d" % kv for kv in sorted(kinds.items())))
+        if unknown:
+            raws = {}
+            for f in readable:
+                for a in records[f]["archives"]:
+                    if a["kind"] == "unknown":
+                        raws[a.get("raw", "(unrecorded)")] = \
+                            raws.get(a.get("raw", "(unrecorded)"), 0) + 1
+            LOG.error("            %d archive(s) use a State $type this tooling "
+                      "does not know:", unknown)
+            for raw, n in sorted(raws.items(), key=lambda kv: -kv[1]):
+                LOG.error("              %-42s %d archive(s)", raw, n)
+            LOG.error("            Wabbajack has added or renamed a downloader. "
+                      "Add it to state_type() in the downloader: as a fetchable "
+                      "kind if this tooling can handle it, or as a recognised "
+                      "one (like 'mega') if it should just be reported.")
+
+    # -- 5. a CDN definition -------------------------------------------
+    if not _HAVE_CDN:
+        verdict("wabbajack_cdn.py is present", False, "manifests cannot be fetched")
+    elif feeds:
+        cdn_entry = next((e for e in feeds.values()
+                          if e["download"] and CDN.is_cdn_url(e["download"])), None)
+        if cdn_entry is None:
+            verdict("a CDN-hosted manifest exists to probe", False,
+                    "no feed entry points at the Wabbajack CDN")
+        else:
+            d = CDN.get_definition(cdn_entry["download"])
+            if d is None:
+                # A single 404 is an upstream publishing problem, not a format
+                # change, so say which it is rather than guessing.
+                verdict("the CDN definition for '%s' parses" % cdn_entry["title"],
+                        False,
+                        "this can be one dead upload rather than a format "
+                        "change - try --selftest again later, or check another list")
+            else:
+                parts = CDN._field(d, "Parts", default=[])
+                first = parts[0] if parts else {}
+                fields = [CDN._field(first, f) is not None
+                          for f in ("Index", "Offset", "Size", "Hash")]
+                verdict("CDN definitions still list Parts", bool(parts),
+                        "%d part(s) in '%s'" % (len(parts), cdn_entry["title"]))
+                verdict("each part carries Index, Offset, Size and Hash",
+                        all(fields),
+                        "missing: %s" % ", ".join(
+                            f for f, present in zip(
+                                ("Index", "Offset", "Size", "Hash"), fields)
+                            if not present) or "none")
+
+    banner("SELF TEST COMPLETE")
+    LOG.info("  %d assumption(s) hold, %d changed.", ok_count, bad_count)
+    if bad_count:
+        LOG.error("")
+        LOG.error("  Something upstream reads differently than this tooling "
+                  "expects. Nothing is broken by itself - but until the lines "
+                  "marked CHANGED are understood, treat the run's own reports "
+                  "as unreliable rather than as facts about your collection.")
+    return 1 if bad_count else 0
 
 
 # ----------------------------------------------------------------------
@@ -1693,6 +1856,12 @@ def main():
                     help="Show how every local .wabbajack matches up against the "
                          "published feeds, including ambiguous ones. Purely "
                          "informational; tracking is automatic.")
+    ap.add_argument("--selftest", action="store_true",
+                    help="Check that Wabbajack's feed, manifest and CDN formats "
+                         "still look the way this tooling reads them, and that "
+                         "every archive type is one it recognises. Use it when "
+                         "results look implausible: it separates 'upstream "
+                         "changed' from 'your collection is odd'.")
     ap.add_argument("--check", action="store_true",
                     help="Report which tracked lists have updates. Changes nothing.")
     ap.add_argument("--only", metavar="LIST",
@@ -1740,7 +1909,7 @@ def main():
     # - a modifier, not an action - down the non-interactive path, which is
     # exactly the sort of surprise a scheduled run should never spring.
     actions = (args.check, args.discover, args.only, args.force, args.dry_run,
-               args.no_download, args.no_sort, args.rediscover)
+               args.no_download, args.no_sort, args.rediscover, args.selftest)
     if args.wizard or not any(actions):
         import wj_wizard
         return wj_wizard.run(verbose=args.verbose, nexus_mode=args.nexus_mode,
@@ -1752,6 +1921,8 @@ def main():
     if rc:
         return rc
 
+    if args.selftest:
+        return cmd_selftest()
     if args.discover:
         return cmd_discover()
 

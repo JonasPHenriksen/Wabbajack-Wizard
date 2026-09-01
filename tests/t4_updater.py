@@ -156,12 +156,17 @@ for script in ("wabbajack_archive_downloader.py",
     check("  and names the variable rather than guessing",
           "WJ_MANIFEST_DIR" in out)
 
-# GAME_FOLDERS disagreeing between the two scripts
+# GAME_FOLDERS disagreeing between the two scripts. Both now take it from
+# wj_config.py, so the way it can still go wrong is a local override added
+# back into one of them - which is exactly what the check exists to catch.
 sp = os.path.join(box.tools, "wabbajack_archive_sorter_v2.py")
 s = io.open(sp, encoding="utf-8").read()
+anchor = "MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR"
+assert anchor in s, "config import block not found in the sorter"
+override = ("GAME_FOLDERS = dict(GAME_FOLDERS, "
+            "SkyrimSpecialEdition=" + chr(34) + "SkyrimSE" + chr(34) + ")")
 io.open(sp, "w", encoding="utf-8", newline="").write(
-    s.replace('"SkyrimSpecialEdition": "Skyrim",',
-              '"SkyrimSpecialEdition": "SkyrimSE",', 1))
+    s.replace(anchor, anchor + chr(10) + override, 1))
 rc, out = box.run("wj_autoupdate.py", ["--check", "--nexus-mode", "skip"])
 check("mismatched GAME_FOLDERS stops the run", rc == 2, "exit %d" % rc)
 check("  and names the setting", "GAME_FOLDERS" in out)

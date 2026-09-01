@@ -200,6 +200,39 @@ def dir_size(path):
     return total, count
 
 
+def wanted_builds(records, game):
+    """{ name_lower: set(sizes) or None } for everything this game's lists want.
+
+    A value of None means "some list wants this name but states no size", in
+    which case every copy has to be protected. Keyed by name AND size because
+    a name does not identify content: with only names, a junk build of
+    Synthesis.zip that no list wants reads as still needed purely because some
+    OTHER build of that name is wanted, and stage 4b then refuses to free it."""
+    want = {}
+    for e in records.values():
+        if e.get("game") != game:
+            continue
+        for a in e["archives"]:
+            low = a["name"].lower()
+            size = a.get("size")
+            if size is None:
+                want[low] = None
+            elif low in want:
+                if want[low] is not None:
+                    want[low].add(size)
+            else:
+                want[low] = {size}
+    return want
+
+
+def is_wanted(want, name, size):
+    """Is this exact file one that a remaining modlist asks for?"""
+    if name.lower() not in want:
+        return False
+    sizes = want[name.lower()]
+    return sizes is None or size in sizes
+
+
 def master_report(game, records):
     """Master's contents for one game, split into kept and reclaimable.
 
@@ -208,11 +241,7 @@ def master_report(game, records):
     promise space that stage 4b will then refuse to free, because it re-checks
     every file against the surviving lists' demands. So measure what is
     actually reclaimable and show that."""
-    keep = set()
-    for e in records.values():
-        if e.get("game") == game:
-            for a in e["archives"]:
-                keep.add(a["name"].lower())
+    keep = wanted_builds(records, game)
     _b, master, _s = A.WJ.resolve_game_dirs(game)
     r = {"game": game, "path": master, "bytes": 0, "files": 0,
          "free_bytes": 0, "free_files": 0, "kept_files": 0}
@@ -227,7 +256,7 @@ def master_report(game, records):
                     continue
                 r["bytes"] += size
                 r["files"] += 1
-                if x.name.lower() in keep:
+                if is_wanted(keep, x.name, size):
                     r["kept_files"] += 1
                 else:
                     r["free_bytes"] += size
@@ -644,14 +673,17 @@ def delete_modlist(state, entry):
     return moved, redundant, freed
 
 
-def clear_master(game, keep_names):
+def clear_master(game, keep_builds):
     """Delete Master files that no remaining modlist demands.
 
-    keep_names is the union of every surviving list's archive names for this
-    game. It is recomputed here rather than trusted from earlier in the run:
-    between selecting and confirming, a cleanup pass has moved files about,
-    and deleting something a list still needs would mean re-downloading it
-    one Nexus click at a time."""
+    keep_builds maps name -> the sizes a surviving list asks for, from
+    wanted_builds(). It is recomputed rather than trusted from earlier in the
+    run: between selecting and confirming, a cleanup pass has moved files
+    about, and deleting something a list still needs would mean re-downloading
+    it one Nexus click at a time.
+
+    Matching on name and size together means a junk build of a shared name is
+    still reclaimable, while the build a list actually wants is not."""
     _b, master, _s = A.WJ.resolve_game_dirs(game)
     deleted, kept, freed = [], 0, 0
     try:
@@ -664,12 +696,22 @@ def clear_master(game, keep_names):
         if not os.path.isfile(path):
             continue
         low = name.lower()
-        owner = low[:-5] if low.endswith(".meta") else low
-        if owner in keep_names:
+        owner = name[:-5] if low.endswith(".meta") else name
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        # A .meta rides along with its archive, so judge it by the archive.
+        judge_size = size
+        if low.endswith(".meta"):
+            try:
+                judge_size = os.path.getsize(os.path.join(master, owner))
+            except OSError:
+                judge_size = None
+        if judge_size is not None and is_wanted(keep_builds, owner, judge_size):
             kept += 1
             continue
         try:
-            size = os.path.getsize(path)
             os.remove(path)
             deleted.append((name, size))
             freed += size
@@ -810,11 +852,7 @@ def stage_space(state, records):
         grand = 0
         for m in chosen:
             game = m["game"]
-            keep = set()
-            for e in records.values():
-                if e.get("game") == game:
-                    for a in e["archives"]:
-                        keep.add(a["name"].lower())
+            keep = wanted_builds(records, game)
             out(f"  Clearing Master for {A.WJ.game_label(game)} "
                 f"({len(keep)} archive name(s) still demanded and protected)...")
             deleted, kept, freed = clear_master(game, keep)

@@ -21,6 +21,7 @@ SUITES = [
     ("t4_updater.py", "updater: state recovery, matching, start-up guards"),
     ("t5_wizard.py", "wizard: empty data, missing folders, odd names"),
     ("t6_planning.py", "planning, manifest cache, backup pruning"),
+    ("t7_identity.py", "one filename, several builds"),
 ]
 
 total_pass = total_fail = 0

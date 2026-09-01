@@ -73,6 +73,7 @@ run.bat --only <list>                 do the archive work for one list only
 run.bat --dry-run                     plan everything, change nothing
 run.bat --rediscover                  re-match local manifests against the feeds
 run.bat --nexus-mode skip             leave Nexus files to Wabbajack
+run.bat --selftest                    check upstream formats still read as expected
 ```
 
 Exit codes: `0` clean, `1` finished with problems, `2` could not start,
@@ -90,11 +91,13 @@ At the top of `wj_autoupdate.py`:
 | `REQUIRE_HASH` | refuse to run rather than silently degrade to size-only checks |
 | `KEEP_BACKUP_DAYS` | how long superseded manifests are kept |
 
-`ARCHIVE_ROOT`, `GAME_FOLDERS` and `EXCLUDE_POOL_DIRS` live in
-`wabbajack_archive_downloader.py` **and** `wabbajack_archive_sorter_v2.py` and
-must match. A run refuses to start if they differ — the downloader decides where
-an archive is written and the sorter decides where it is moved to, so a mismatch
-means the two work on different trees while both report success.
+The archive layout lives in **`wj_config.py`** — `ARCHIVE_ROOT`,
+`GAME_FOLDERS`, `GAME_DISPLAY`, `POOL_FOLDERS`, `EXCLUDE_POOL_DIRS`. Both the
+downloader and the sorter import it, so there is one place to edit. A start-up
+check still compares the two, because the downloader decides where an archive is
+written and the sorter decides where it is moved to: a local override re-added
+to one of them would send every run across two directory trees while both
+reported success.
 
 ## Nexus accounts
 
@@ -131,10 +134,32 @@ session, which is the only thing that actually works.
 An API key is required either way — it is what redeems the key from each click.
 Put it in `nexus_api_key.txt` (gitignored) or `NEXUS_API_KEY`.
 
+## When results look wrong
+
+```
+run.bat --selftest
+```
+
+Everything this tooling reads is Wabbajack's own undocumented internals: the
+shape of `repositories.json`, of a feed entry, of the JSON inside a
+`.wabbajack`, of a CDN definition, and the set of downloader type names. None of
+it is a published contract, so any of it can change without notice.
+
+`--selftest` checks thirteen of those assumptions against live data and says
+which, if any, now read differently. The point is not to prevent upstream
+change but to make it announce itself: without it, a feed that stops carrying
+`machineURL` shows up as "Following 0 list(s)", and a renamed downloader shows
+up as files quietly reclassified as unsupported — both of which look like your
+problem rather than an upstream one.
+
+It found `MegaDownloader` on its first run, which is why `mega` is now a
+recognised (if unfetchable) source rather than "unknown".
+
 ## Files
 
 | file | role |
 | --- | --- |
+| `wj_config.py` | the archive layout: one place, imported by the rest |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_wizard.py` | the interactive four-stage front end |
 | `wabbajack_archive_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |

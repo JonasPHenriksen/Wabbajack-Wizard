@@ -60,67 +60,27 @@ from datetime import datetime
 from collections import defaultdict
 
 # ============================ CONFIGURATION ============================
-# All pools live under a single root, one sub-tree per game:
-#
-#   <ARCHIVE_ROOT>\<GameFolder>\Master
-#   <ARCHIVE_ROOT>\<GameFolder>\Shared
-#   <ARCHIVE_ROOT>\<GameFolder>\<Modlist name>
-#
-# The game is read from each .wabbajack manifest ("GameType"). GAME_FOLDERS lets
-# you pin a folder name per game; anything not listed uses the GameType verbatim.
-# The defaults keep an existing Skyrim layout (Z:\Mod Archive\Skyrim\...) intact.
-ARCHIVE_ROOT = "../Mod Archive"
+# ---------------------------------------------------------------------
+# Layout settings come from wj_config.py, which both this script and
+# wabbajack_archive_sorter_v2.py import. They used to be duplicated here and
+# there: editing one copy and forgetting the other left the downloader writing
+# into one directory tree while the sorter moved files out of another, with
+# both reporting success. Edit wj_config.py.
+# ---------------------------------------------------------------------
+try:
+    import wj_config as CFG
+except ImportError:
+    sys.stderr.write(
+        "wj_config.py is missing from the folder holding these scripts. It "
+        "defines ARCHIVE_ROOT and the game/pool layout and is not optional.\n")
+    raise SystemExit(2)
 
-# A relative ARCHIVE_ROOT is resolved against THIS SCRIPT's folder, never the
-# current working directory, so the tree survives a different drive letter or a
-# UNC path no matter where the script is launched from. e.g. with the scripts in
-# Z:\Wabbajack_Tools, r"..\Mod Archive" resolves to Z:\Mod Archive.
-def _looks_absolute(_p):
-    return (os.path.isabs(_p) or _p.startswith("\\\\") or _p.startswith("//")
-            or (len(_p) > 1 and _p[1] == ":"))
-
-if not _looks_absolute(ARCHIVE_ROOT):
-    ARCHIVE_ROOT = os.path.normpath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), ARCHIVE_ROOT))
-
-GAME_FOLDERS = {
-    "SkyrimSpecialEdition": "Skyrim",
-    "Skyrim":               "Skyrim",
-    # Maps a GameType onto an existing pool folder whose name is not the
-    # GameType itself. Without this a Dark Souls 3 list would create a fresh
-    # "DarkSouls3" folder and orphan the "DARK SOULS 3" one already on the
-    # share. Inert if the GameType turns out to be spelled differently.
-    "DarkSouls3":           "DARK SOULS 3",
-}
-
-# Cosmetic only - friendly labels for the game menu. Unknown games fall back to
-# the raw GameType string.
-GAME_DISPLAY = {
-    "SkyrimSpecialEdition":  "Skyrim Special Edition",
-    "Skyrim":                "Skyrim (Legendary Edition)",
-    "Fallout4":              "Fallout 4",
-    "FalloutNewVegas":       "Fallout: New Vegas",
-    "Fallout3":              "Fallout 3",
-    "Oblivion":              "Oblivion",
-    "Morrowind":             "Morrowind",
-    "StardewValley":         "Stardew Valley",
-    "Enderal":               "Enderal",
-    "EnderalSpecialEdition": "Enderal Special Edition",
-    "BaldursGate3":          "Baldur's Gate 3",
-    "Cyberpunk2077":         "Cyberpunk 2077",
-    "Witcher3":              "The Witcher 3",
-    "DarkSouls3":            "Dark Souls III",
-}
-
-# Folders directly under the game root that belong to a DIFFERENT installer and
-# must never be indexed, moved, or counted as demand. Nolvus has its own
-# installer and its own archive layout; touching it would break that install.
-# Matched case-insensitively against the folder name.
-EXCLUDE_POOL_DIRS = {"nolvus"}
-
-# Where the .wabbajack manifests live, relative to this script, when
-# WJ_MANIFEST_DIR is not set.
-MANIFEST_SUBDIR = "modlists"
+ARCHIVE_ROOT = CFG.resolved_archive_root()
+GAME_FOLDERS = CFG.GAME_FOLDERS
+GAME_DISPLAY = CFG.GAME_DISPLAY
+POOL_FOLDERS = CFG.POOL_FOLDERS
+EXCLUDE_POOL_DIRS = CFG.EXCLUDE_POOL_DIRS
+MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR
 
 # Shared with wj_autoupdate.py: one archive-moving job at a time. Skipped when
 # WJ_LOCK_HELD is set, which the parent sets for the children it launches.
@@ -448,8 +408,16 @@ def build_disk_index(search_locations, protected_names):
     """Index every real file across the search locations.
 
     Returns:
-        index:      { name_lower: (abs_src_path, actual_case_name) }   (first wins)
-        duplicates: { name_lower: [paths...] }                          (>=2 copies)
+        index:      { name_lower: [(abs_src_path, actual_case_name), ...] }
+        duplicates: { name_lower: [paths...] }                   (>=2 copies)
+
+    EVERY copy is kept, not just the first one found. A filename does not
+    identify content here: several modlists legitimately pin different builds
+    of a file with the same generic name - Synthesis.zip exists five times in
+    the live pools at five different sizes, one per list. A first-wins index
+    made staging hand a list whichever build happened to be scanned first,
+    which is then rejected by Wabbajack while the correct build sits untouched
+    in another list's folder.
     """
     index = {}
     duplicates = defaultdict(list)
@@ -493,10 +461,11 @@ def build_disk_index(search_locations, protected_names):
             counted += 1
             if low in index:
                 if not duplicates[low]:
-                    duplicates[low].append(index[low][0])
+                    duplicates[low].append(index[low][0][0])
                 duplicates[low].append(full)
+                index[low].append((full, name))
             else:
-                index[low] = (full, name)
+                index[low] = [(full, name)]
 
         LOG.info("  -> Indexed %d file(s) in '%s'", counted, short(loc))
 
@@ -506,12 +475,34 @@ def build_disk_index(search_locations, protected_names):
 # ----------------------------------------------------------------------
 # Plan building
 # ----------------------------------------------------------------------
-def build_plan(target_modlist, file_demands, disk_index):
+def pick_copy(copies, wanted_sizes):
+    """Choose which copy of a name to move, given what the destination wants.
+
+    `copies` is [(path, name)] and `wanted_sizes` the set of byte sizes the
+    receiving modlist's manifest states for that name. The copy that matches is
+    the one that list can actually install; without this the first copy scanned
+    wins, which is arbitrary and frequently wrong when two lists pin different
+    builds under one name. Falls back to the first copy when nothing matches or
+    nothing is known, leaving the existing size-checked collision handling to
+    sort out what it can."""
+    if len(copies) == 1 or not wanted_sizes:
+        return copies[0]
+    for path, name in copies:
+        try:
+            if os.path.getsize(path) in wanted_sizes:
+                return path, name
+        except OSError:
+            continue
+    return copies[0]
+
+
+def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
     """Compute the list of intended moves without touching disk.
 
     Returns a list of dicts: {src, dst, name, reason}.
     """
     plan = []
+    list_sizes = list_sizes or {}
 
     if target_modlist:
         candidates = [low for low in disk_index
@@ -520,25 +511,43 @@ def build_plan(target_modlist, file_demands, disk_index):
         candidates = list(disk_index.keys())
 
     for low in candidates:
-        src, name = disk_index[low]
+        copies = disk_index[low]
         lists = file_demands.get(low, [])
 
         if target_modlist:
             dest_dir = os.path.join(OUTPUT_BASE_DIR, target_modlist)
             reason = "needed by target"
+            wanted = list_sizes.get(target_modlist, {}).get(low)
         else:
             n = len(lists)
             if n >= 2:
                 dest_dir, reason = SHARED_DIR, f"shared by {n} lists"
+                # Two lists wanting one name at different sizes cannot both be
+                # served from Shared; leave the choice to the first copy and
+                # let the duplicate report say so.
+                wanted = None
             elif n == 1:
                 dest_dir, reason = os.path.join(OUTPUT_BASE_DIR, lists[0]), f"only '{lists[0]}'"
+                wanted = list_sizes.get(lists[0], {}).get(low)
             else:
                 dest_dir, reason = MASTER_ARCHIVE_DIR, "unused -> master"
+                wanted = None
 
+        src, name = pick_copy(copies, wanted)
         dst = os.path.join(dest_dir, name)
         plan.append({"src": src, "dst": dst, "name": name, "reason": reason})
 
     return plan
+
+
+def build_list_sizes(records_in_scope):
+    """{ list_name: { name_lower: set(expected sizes) } }.
+
+    Per-list rather than pooled, so a move can pick the build the receiving
+    list actually wants instead of any build that some list somewhere wants."""
+    return {rec["name"]: {low: set(sizes)
+                          for low, sizes in rec["sizes"].items()}
+            for rec in records_in_scope}
 
 
 def build_expected_sizes(records_in_scope, target_modlist):
@@ -834,7 +843,8 @@ def validate_environment():
 
 
 def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
-              modlists_map, protected, chosen_game, args, gamefile_names=frozenset()):
+              modlists_map, protected, chosen_game, args, gamefile_names=frozenset(),
+              list_sizes=None):
     """Scan disk, build, and (unless --dry-run) execute the plan for ONE pass.
 
     target_modlist is None for the automatic cleanup/reset pass, or a list name
@@ -865,7 +875,7 @@ def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
                     "found is treated as authoritative; collisions are resolved by size "
                     "during the move:", len(duplicates))
         for low, paths in sorted(duplicates.items()):
-            LOG.warning("  * %s", disk_index[low][1])
+            LOG.warning("  * %s", disk_index[low][0][1])
             for p in paths:
                 LOG.warning("      - %s", p)
 
@@ -876,7 +886,7 @@ def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
     else:
         LOG.info("RESET MODE: rebuilding pools from current demand.")
 
-    plan = build_plan(target_modlist, file_demands, disk_index)
+    plan = build_plan(target_modlist, file_demands, disk_index, list_sizes)
     moves = [m for m in plan if not same_path(m["src"], m["dst"])]
     stats["already_in_place"] = len(plan) - len(moves)
 
@@ -1090,8 +1100,10 @@ def main():
     # list, so the staging pass below starts from a clean, correctly-sorted state.
     banner("STEP 3: AUTOMATIC CLEANUP / RESET")
     reset_expected = build_expected_sizes(in_scope, None)
+    list_sizes = build_list_sizes(in_scope)
     reset_stats = run_stage("CLEANUP", None, file_demands, reset_expected,
-                            modlists_map, protected, chosen_game, args)
+                            modlists_map, protected, chosen_game, args,
+                            list_sizes=list_sizes)
 
     if args.cleanup_only:
         c = reset_stats["counters"]
@@ -1111,7 +1123,8 @@ def main():
     target_rec = next((r for r in in_scope if r["name"] == target_modlist), None)
     stage_stats = run_stage(f"STAGE '{target_modlist}'", target_modlist, file_demands,
                             target_expected, modlists_map, protected, chosen_game, args,
-                            gamefile_names=(target_rec or {}).get("gamefile", frozenset()))
+                            gamefile_names=(target_rec or {}).get("gamefile", frozenset()),
+                            list_sizes=list_sizes)
 
     if args.dry_run:
         LOG.info("\n[DRY-RUN COMPLETE] Re-run without --dry-run to apply.")

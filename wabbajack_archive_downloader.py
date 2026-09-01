@@ -114,67 +114,32 @@ except Exception:
     _HAVE_WINREG = False
 
 # ============================ CONFIGURATION ============================
-# Kept deliberately identical to wabbajack_archive_sorter.py so the two tools
-# agree on where archives live.
-ARCHIVE_ROOT = "../Mod Archive"
+# ---------------------------------------------------------------------
+# Layout settings come from wj_config.py, which both this script and
+# wabbajack_archive_sorter_v2.py import. They used to be duplicated here and
+# there: editing one copy and forgetting the other left the downloader writing
+# into one directory tree while the sorter moved files out of another, with
+# both reporting success. Edit wj_config.py.
+# ---------------------------------------------------------------------
+try:
+    import wj_config as CFG
+except ImportError:
+    sys.stderr.write(
+        "wj_config.py is missing from the folder holding these scripts. It "
+        "defines ARCHIVE_ROOT and the game/pool layout and is not optional.\n")
+    raise SystemExit(2)
 
-# A relative ARCHIVE_ROOT is resolved against THIS SCRIPT's folder, never the
-# current working directory, so the tree survives a different drive letter or a
-# UNC path no matter where the script is launched from. e.g. with the scripts in
-# Z:\Wabbajack_Tools, r"..\Mod Archive" resolves to Z:\Mod Archive.
-def _looks_absolute(_p):
-    return (os.path.isabs(_p) or _p.startswith("\\\\") or _p.startswith("//")
-            or (len(_p) > 1 and _p[1] == ":"))
-
-if not _looks_absolute(ARCHIVE_ROOT):
-    ARCHIVE_ROOT = os.path.normpath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), ARCHIVE_ROOT))
-
-GAME_FOLDERS = {
-    "SkyrimSpecialEdition": "Skyrim",
-    "Skyrim":               "Skyrim",
-    # Maps a GameType onto an existing pool folder whose name is not the
-    # GameType itself. Without this a Dark Souls 3 list would create a fresh
-    # "DarkSouls3" folder and orphan the "DARK SOULS 3" one already on the
-    # share. Inert if the GameType turns out to be spelled differently.
-    "DarkSouls3":           "DARK SOULS 3",
-}
-
-GAME_DISPLAY = {
-    "SkyrimSpecialEdition":  "Skyrim Special Edition",
-    "Skyrim":                "Skyrim (Legendary Edition)",
-    "Fallout4":              "Fallout 4",
-    "FalloutNewVegas":       "Fallout: New Vegas",
-    "Fallout3":              "Fallout 3",
-    "Oblivion":              "Oblivion",
-    "Morrowind":             "Morrowind",
-    "StardewValley":         "Stardew Valley",
-    "Enderal":               "Enderal",
-    "EnderalSpecialEdition": "Enderal Special Edition",
-    "BaldursGate3":          "Baldur's Gate 3",
-    "Cyberpunk2077":         "Cyberpunk 2077",
-    "Witcher3":              "The Witcher 3",
-    "DarkSouls3":            "Dark Souls III",
-}
-
-# Pool sub-folders that exist alongside the list folders (mirrors the sorter).
-POOL_FOLDERS = ("Master", "Shared")
-
-# Folders directly under the game root that belong to a DIFFERENT installer and
-# must be left completely alone: not indexed, not counted as "already present",
-# never staged or relocated. Nolvus ships its own installer and its own archive
-# layout, so its files are none of our business. Matched case-insensitively.
-EXCLUDE_POOL_DIRS = {"nolvus"}
-
-# Where the .wabbajack manifests live, relative to this script, when
-# WJ_MANIFEST_DIR is not set. Falls back to the script folder if absent, so
-# running this script by hand finds the same manifests wj_autoupdate.py uses.
-MANIFEST_SUBDIR = "modlists"
+ARCHIVE_ROOT = CFG.resolved_archive_root()
+GAME_FOLDERS = CFG.GAME_FOLDERS
+GAME_DISPLAY = CFG.GAME_DISPLAY
+POOL_FOLDERS = CFG.POOL_FOLDERS
+EXCLUDE_POOL_DIRS = CFG.EXCLUDE_POOL_DIRS
+MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR
 
 # Hash verification is the whole point of downloading a pinned revision. When
 # the optional xxhash package is absent this script can only compare sizes,
 # which passes a file that is the right length but the wrong content. Rather
-# than quietly downgrading (the same command gives you different guarantees
+# than quietly downgrading (the same command giving different guarantees
 # depending on which Python picked it up), stop and say so. --allow-size-only
 # is the deliberate opt-out.
 REQUIRE_HASH = True
@@ -423,6 +388,11 @@ def parse_manifest(wj_path):
     return record
 
 
+# Sources this tooling can fetch itself, and sources it recognises but cannot.
+# The distinction matters in reporting: "Mega, download it yourself" is a fact
+# about the file, while "unknown" means Wabbajack has a downloader this tooling
+# has never heard of - which is a reason to look at state_type(), not at your
+# collection.
 def state_type(state):
     t = (state or {}).get("$type", "")
     if t.startswith("NexusDownloader"):           return "nexus"
@@ -432,7 +402,16 @@ def state_type(state):
     if t.startswith("GameFileSourceDownloader"):  return "gamefile"
     if t.startswith("GoogleDriveDownloader"):     return "googledrive"
     if t.startswith("ManualDownloader"):          return "manual"
+    # Recognised, but not fetchable here: Mega needs its own client and key
+    # handling, so these are reported for you to download by hand.
+    if t.startswith("MegaDownloader"):            return "mega"
     return "unknown"
+
+
+def state_type_raw(state):
+    """The State's declared $type, for when 'unknown' needs explaining."""
+    t = (state or {}).get("$type", "")
+    return t.split(",", 1)[0].strip() or "(no $type)"
 
 
 def nexus_domain(archive):
@@ -1721,7 +1700,9 @@ def main():
         elif kind in ("http", "wabbajackcdn", "mediafire"):
             direct_items.append((kind, a))
         else:
-            unsupported.append((kind, a["name"]))
+            label = kind if kind != "unknown" else (
+                "unknown:" + state_type_raw(a["state"]))
+            unsupported.append((label, a["name"]))
 
     if args.skip_nexus and nexus_items:
         LOG.info("[INFO] --skip-nexus: ignoring %d Nexus file(s).", len(nexus_items))
