@@ -38,3 +38,7 @@ nxm_captured.txt
 ._*
 Thumbs.db
 desktop.ini
+
+# The dedicated Firefox profile assist mode drives. Holds a live Nexus
+# session, so it must never be committed.
+.assist-profile/

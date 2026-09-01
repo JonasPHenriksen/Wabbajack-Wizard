@@ -88,6 +88,7 @@ import zipfile
 import logging
 import argparse
 import platform
+import subprocess
 import http.client
 import webbrowser
 import urllib.error
@@ -213,7 +214,19 @@ NXM_CLICK_TIMEOUT = 180          # seconds to wait per file for a click
 # Assist mode opens one download page per file. Over a 300-file list that
 # stacks 300 tabs in whatever browser you were already using, so the tab is
 # closed again once its click has been captured. Set False to leave them open.
-CLOSE_TAB_AFTER_CLICK = True
+# Assist mode drives its OWN Firefox window over Marionette, Firefox's built-in
+# automation protocol, using a profile of its own. One window, one tab,
+# re-navigated for each file, so nothing piles up in the browser you are
+# actually using and no focus is taken from it. "default" uses your normal
+# browser instead, which means one tab per file. "auto" prefers the dedicated
+# window and falls back if Firefox cannot be found or Marionette does not answer.
+ASSIST_BROWSER = "auto"          # "auto" | "firefox" | "default"
+ASSIST_PROFILE_DIR = ".assist-profile"   # persists between runs: holds the login
+ASSIST_MARIONETTE_PORT = 2830
+
+# Only relevant to the "default" fallback, where a tab really is opened per
+# file. The dedicated window re-uses one tab and does not need this.
+CLOSE_TAB_AFTER_CLICK = False
 BROWSER_PROCESSES = ("firefox.exe", "chrome.exe", "msedge.exe", "brave.exe",
                      "opera.exe", "vivaldi.exe", "chromium.exe", "iexplore.exe")
 TAB_SETTLE_S = 0.7               # let the new tab take focus before noting it
@@ -1078,6 +1091,182 @@ def nexus_file_page(domain, mod_id, file_id):
 
 
 # ----------------------------------------------------------------------
+# A Firefox window of our own, driven over Marionette
+# ----------------------------------------------------------------------
+def firefox_candidates():
+    """Likely firefox.exe locations, built from the environment rather than
+    hard-coded drive paths."""
+    out = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        root = os.environ.get(var)
+        if root:
+            out.append(os.path.join(root, "Mozilla Firefox", "firefox.exe"))
+    return [p for p in out if os.path.isfile(p)]
+
+
+# Prefs seeded into our own profile. The protocol-handler three matter most:
+# they let Firefox hand an nxm:// link straight to the registered OS handler
+# instead of raising a "choose an application" dialog for every single file.
+# That dialog is also what defeated closing tabs with a keystroke - at the
+# moment the click landed, the focused window was the dialog, not the page.
+ASSIST_PREFS = (
+    ("network.protocol-handler.external.nxm", "true"),
+    ("network.protocol-handler.warn-external.nxm", "false"),
+    ("network.protocol-handler.expose.nxm", "false"),
+    ("browser.shell.checkDefaultBrowser", "false"),
+    ("browser.aboutwelcome.enabled", "false"),
+    ("datareporting.policy.dataSubmissionEnabled", "false"),
+    ("browser.tabs.warnOnClose", "false"),
+    ("browser.sessionstore.resume_from_crash", "false"),
+)
+
+
+class AssistBrowser:
+    """A Firefox instance this script owns and steers.
+
+    Marionette is Firefox's own automation protocol - length-prefixed JSON over
+    a TCP socket - so this needs nothing outside the standard library and no
+    driver binary. One tab is re-navigated for each file in turn, which is what
+    stops 300 download pages becoming 300 tabs.
+
+    The profile persists between runs deliberately: it is where the Nexus login
+    lives, and signing in every session would be worse than the tab spam."""
+
+    def __init__(self, script_dir):
+        self.script_dir = script_dir
+        self.profile = os.path.join(script_dir, ASSIST_PROFILE_DIR)
+        self.proc = None
+        self.sock = None
+        self.counter = 0
+        self.port = ASSIST_MARIONETTE_PORT
+        self.fresh = not os.path.isdir(self.profile)
+
+    # -- wire protocol -------------------------------------------------
+    def _recv(self):
+        buf = b""
+        while b":" not in buf:
+            ch = self.sock.recv(1)
+            if not ch:
+                raise IOError("marionette closed the connection")
+            buf += ch
+        want = int(buf.split(b":")[0])
+        data = b""
+        while len(data) < want:
+            chunk = self.sock.recv(want - len(data))
+            if not chunk:
+                raise IOError("marionette closed the connection")
+            data += chunk
+        return json.loads(data.decode("utf-8"))
+
+    def _cmd(self, name, params=None):
+        self.counter += 1
+        body = json.dumps([0, self.counter, name, params or {}]).encode("utf-8")
+        self.sock.sendall(str(len(body)).encode("ascii") + b":" + body)
+        return self._recv()
+
+    # -- lifecycle -----------------------------------------------------
+    def start(self):
+        exes = firefox_candidates()
+        if not exes:
+            LOG.info("  [INFO] Firefox not found; using your default browser.")
+            return False
+        try:
+            os.makedirs(self.profile, exist_ok=True)
+            lines = ['user_pref("%s", %s);' % kv for kv in ASSIST_PREFS]
+            lines.append('user_pref("marionette.port", %d);' % self.port)
+            with open(os.path.join(self.profile, "user.js"), "w",
+                      encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError as e:
+            LOG.warning("  [WARN] Cannot prepare the assist profile (%s); "
+                        "using your default browser.", e)
+            return False
+
+        env = dict(os.environ, MOZ_MARIONETTE_PORT=str(self.port))
+        try:
+            self.proc = subprocess.Popen(
+                [exes[0], "-marionette", "-no-remote", "-profile", self.profile,
+                 "-new-window", "about:blank"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            LOG.warning("  [WARN] Could not start Firefox (%s); using your "
+                        "default browser.", e)
+            return False
+
+        for _ in range(45):
+            if self.proc.poll() is not None:
+                LOG.warning("  [WARN] The assist Firefox exited at once; using "
+                            "your default browser.")
+                return False
+            try:
+                self.sock = socket.create_connection(("127.0.0.1", self.port),
+                                                     timeout=3)
+                break
+            except OSError:
+                time.sleep(1)
+        if not self.sock:
+            LOG.warning("  [WARN] Marionette did not answer on port %d; using "
+                        "your default browser.", self.port)
+            self.stop()
+            return False
+        try:
+            self.sock.settimeout(120)
+            self._recv()                       # handshake
+            self._cmd("WebDriver:NewSession", {})
+        except (IOError, OSError, ValueError) as e:
+            LOG.warning("  [WARN] Marionette handshake failed (%s); using your "
+                        "default browser.", e)
+            self.stop()
+            return False
+        return True
+
+    def navigate(self, url):
+        """Point the one tab at `url`. False if the browser has gone away."""
+        if not self.sock:
+            return False
+        try:
+            self._cmd("WebDriver:Navigate", {"url": url})
+            return True
+        except (IOError, OSError, ValueError) as e:
+            LOG.warning("  [WARN] Lost the assist browser (%s); falling back "
+                        "to your default browser.", e)
+            self.sock = None
+            return False
+
+    def stop(self):
+        if self.sock:
+            try:
+                self._cmd("Marionette:Quit", {})
+            except Exception:
+                pass
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=10)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        self.proc = None
+
+
+def open_assist_browser(script_dir):
+    """An AssistBrowser if one can be had, else None (use the default browser)."""
+    if ASSIST_BROWSER == "default":
+        return None
+    browser = AssistBrowser(script_dir)
+    if browser.start():
+        return browser
+    return None
+
+
+# ----------------------------------------------------------------------
 # Closing the tab we opened (Windows)
 # ----------------------------------------------------------------------
 _WINKEY = None
@@ -1625,10 +1814,30 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
         LOG.warning("[WARN] Not on Windows: nxm registration skipped. Clicks will only be "
                     "captured if something else forwards them to this listener.")
 
+    browser = open_assist_browser(script_dir)
     listener = NxmListener(script_dir)
     LOG.info("Capture listener on %s:%d. For each file, your browser opens the Nexus "
              "download page - click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
     LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
+    if browser:
+        LOG.info("A separate Firefox window has opened, with its own profile. It "
+                 "re-uses one tab for every file, so nothing accumulates in the "
+                 "browser you were using and it will not steal focus from it.")
+        if browser.fresh:
+            LOG.info("")
+            LOG.info("That profile is new, so it is not signed in to Nexus yet - "
+                     "and free downloads need a signed-in session. Signing in "
+                     "once is enough; the profile is kept between runs.")
+            browser.navigate("https://users.nexusmods.com/auth/sign_in")
+            try:
+                input("  Sign in in that window, then press Enter to begin: ")
+            except (EOFError, KeyboardInterrupt):
+                LOG.info("  [ABORT] Nothing downloaded.")
+                browser.stop()
+                listener.close()
+                if platform.system() == "Windows":
+                    unregister_nxm(script_dir)
+                return
     if CLOSE_TAB_AFTER_CLICK:
         LOG.info("Each page is closed again once its click is captured, so the "
                  "tabs do not stack up. Stay in the browser window while "
@@ -1661,15 +1870,23 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
                 LOG.info("  [NOTE] %s", dom_note)
             LOG.info("  Opening: %s", page)
             tab_hwnd = None
-            try:
-                webbrowser.open(page)
-                if CLOSE_TAB_AFTER_CLICK:
-                    # Note which window the tab landed in, so the Ctrl+W later
-                    # can refuse to fire if focus has moved somewhere else.
-                    time.sleep(TAB_SETTLE_S)
-                    tab_hwnd, _n, _t = foreground_browser_window()
-            except Exception:
-                LOG.info("  (Could not auto-open a browser; open the URL above manually.)")
+            shown = False
+            if browser:
+                # Re-navigate the one tab we own. No new tab, no focus grab.
+                shown = browser.navigate(page)
+                if not shown:
+                    browser = None      # it died; fall back for the rest
+            if not shown:
+                try:
+                    webbrowser.open(page)
+                    if CLOSE_TAB_AFTER_CLICK:
+                        # Note which window the tab landed in, so the Ctrl+W
+                        # later can refuse to fire if focus moved elsewhere.
+                        time.sleep(TAB_SETTLE_S)
+                        tab_hwnd, _n, _t = foreground_browser_window()
+                except Exception:
+                    LOG.info("  (Could not open a browser; open the URL above "
+                             "by hand.)")
             LOG.info("  Waiting up to %ds for your click... (Ctrl+C to stop)", NXM_CLICK_TIMEOUT)
             url = listener.wait(NXM_CLICK_TIMEOUT)
             # Close the page as soon as its click is in, not after the download:
@@ -1691,6 +1908,8 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
         LOG.info("\n[ABORT] Capture interrupted by user.")
     finally:
         listener.close()
+        if browser:
+            browser.stop()
         # Hand the nxm:// handler back to whatever owned it (normally
         # Wabbajack). Without this, every "download with manager" click on
         # Nexus keeps landing on this script until you notice and fix it by
