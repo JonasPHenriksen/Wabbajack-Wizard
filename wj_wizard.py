@@ -716,6 +716,26 @@ def offer_install(state, filename, st):
 # ----------------------------------------------------------------------
 # Stage 4 - disk space
 # ----------------------------------------------------------------------
+def orphan_sidecars():
+    """.metadata files whose .wabbajack is no longer there.
+
+    Wabbajack writes one beside every modlist it downloads. They are tiny, so
+    these are reported rather than deleted: an orphan is usually the last trace
+    of a list that went missing, which is worth seeing rather than tidying
+    away."""
+    try:
+        names = os.listdir(A.MANIFESTS)
+    except OSError:
+        return []
+    out_list = []
+    for n in names:
+        if not n.lower().endswith(".metadata"):
+            continue
+        if not os.path.isfile(os.path.join(A.MANIFESTS, n[:-len(".metadata")])):
+            out_list.append(n)
+    return sorted(out_list)
+
+
 def gather_space(records):
     """Manifest sizes, per-list pool folder sizes, and Master per game."""
     out("  Measuring... (walking the pools on the share)")
@@ -757,6 +777,17 @@ def show_space(lists, masters):
             f"{(A.WJ.game_label(x['game']) if x['game'] else '?'):<{gw}}"
             f"{human(x['manifest_bytes']):>10}"
             f"{human(x['folder_bytes']) + ' ' if x['folder_files'] else '- ':>14}")
+    orphans = orphan_sidecars()
+    if orphans:
+        out()
+        out(f"  {len(orphans)} .metadata sidecar(s) whose modlist is gone. Tiny, and")
+        out(f"  left alone: an orphan is usually the last trace of a list that")
+        out(f"  went missing, which is worth seeing.")
+        for n in orphans[:5]:
+            out(f"    {n}")
+        if len(orphans) > 5:
+            out(f"    ... and {len(orphans) - 5} more")
+
     out()
     out(f"  MASTER POOLS ({human(sum(m['bytes'] for m in masters))}, of which "
         f"{human(sum(m['free_bytes'] for m in masters))} is reclaimable)")
@@ -809,14 +840,26 @@ def delete_modlist(state, entry):
             except OSError:
                 pass  # not empty (subfolders, or a move failed) - leave it
 
+    # The manifest, its .metadata sidecar, and any superseded copy parked in
+    # manifest_backups. Leaving the sidecar behind is how the folder ends up
+    # with records of lists that no longer exist; leaving the .bak behind keeps
+    # a rollback for a version update that can no longer happen, and those run
+    # to hundreds of megabytes each.
     freed = 0
-    path = os.path.join(A.MANIFESTS, fn)
-    try:
-        freed = os.path.getsize(path)
-        os.remove(path)
-    except OSError as e:
-        out(f"    could not delete {fn}: {e}")
-        freed = 0
+    leftovers = [os.path.join(A.MANIFESTS, fn),
+                 os.path.join(A.MANIFESTS, fn + ".metadata")]
+    if A.BACKUPS != A.MANIFESTS:
+        leftovers += [os.path.join(A.BACKUPS, fn + ".bak"),
+                      os.path.join(A.BACKUPS, fn + ".rejected")]
+    for path in leftovers:
+        if not os.path.isfile(path):
+            continue
+        try:
+            size = os.path.getsize(path)
+            os.remove(path)
+            freed += size
+        except OSError as e:
+            out(f"    could not delete {os.path.basename(path)}: {e}")
 
     for k, v in list(state.get("lists", {}).items()):
         if v.get("file") == fn:

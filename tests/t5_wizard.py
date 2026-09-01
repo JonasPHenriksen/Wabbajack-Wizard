@@ -146,4 +146,47 @@ lists, masters = quiet(W.gather_space, recs)[0]
 check("gather_space handles it", any(x["file"].startswith("weird") for x in lists),
       str([x["file"] for x in lists]))
 
+# ---------------------------------------------------------------- 5.9
+print("\n 5.9  deleting a modlist takes its paperwork with it")
+box3 = Sandbox(BOX + "c")
+A.MANIFESTS = box3.manifests
+A.WJ.ARCHIVE_ROOT = box3.archives
+A.HERE = box3.tools
+A.BACKUPS = os.path.join(box3.tools, "manifest_backups")
+os.makedirs(A.BACKUPS, exist_ok=True)
+fn = "Doomed_@@_x.wabbajack"
+sizes = {os.path.join(A.MANIFESTS, fn): 500,
+         os.path.join(A.MANIFESTS, fn + ".metadata"): 40,
+         os.path.join(A.BACKUPS, fn + ".bak"): 9000,
+         os.path.join(A.BACKUPS, fn + ".rejected"): 70,
+         os.path.join(A.MANIFESTS, "Keep_@@_y.wabbajack"): 100,
+         os.path.join(A.MANIFESTS, "Keep_@@_y.wabbajack.metadata"): 20}
+for path, sz in sizes.items():
+    io.open(path, "wb").write(b"x" * sz)
+box3.pool_file(G, "Doomed_@@_x", "a.7z", 300)
+_m, _r, freed = W.delete_modlist({"lists": {}, "map": {}},
+                                 {"file": fn, "game": G})
+check("the manifest is gone", not os.path.exists(os.path.join(A.MANIFESTS, fn)))
+check("its .metadata sidecar is gone too",
+      not os.path.exists(os.path.join(A.MANIFESTS, fn + ".metadata")))
+check("its superseded .bak is gone",
+      not os.path.exists(os.path.join(A.BACKUPS, fn + ".bak")))
+check("its .rejected copy is gone",
+      not os.path.exists(os.path.join(A.BACKUPS, fn + ".rejected")))
+check("all four are counted as freed", freed == 500 + 40 + 9000 + 70,
+      "freed=%d" % freed)
+check("another list is untouched",
+      os.path.isfile(os.path.join(A.MANIFESTS, "Keep_@@_y.wabbajack")))
+check("  and so is ITS sidecar",
+      os.path.isfile(os.path.join(A.MANIFESTS, "Keep_@@_y.wabbajack.metadata")))
+check("its archive was moved to Master, not deleted",
+      os.path.isfile(os.path.join(box3.archives, G, "Master", "a.7z")))
+
+io.open(os.path.join(A.MANIFESTS, "Ghost.wabbajack.metadata"), "wb").write(b"z")
+orphans = W.orphan_sidecars()
+check("an orphaned sidecar is reported", "Ghost.wabbajack.metadata" in orphans,
+      str(orphans))
+check("  and a sidecar with its manifest present is not",
+      "Keep_@@_y.wabbajack.metadata" not in orphans, str(orphans))
+
 sys.exit(summary())
