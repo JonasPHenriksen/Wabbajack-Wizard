@@ -74,6 +74,7 @@ run.bat --dry-run                     plan everything, change nothing
 run.bat --rediscover                  re-match local manifests against the feeds
 run.bat --nexus-mode skip             leave Nexus files to Wabbajack
 run.bat --selftest                    check upstream formats still read as expected
+run.bat --order largest               fetch the big files first for one run
 ```
 
 Exit codes: `0` clean, `1` finished with problems, `2` could not start,
@@ -90,6 +91,7 @@ At the top of `wj_autoupdate.py`:
 | `EXCLUDE` | lists to ignore, by feed key or filename stem |
 | `REQUIRE_HASH` | refuse to run rather than silently degrade to size-only checks |
 | `KEEP_BACKUP_DAYS` | how long superseded manifests are kept |
+| `DOWNLOAD_ORDER` | `smallest` (default), `largest`, or `manifest` — see below |
 
 The archive layout lives in **`wj_config.py`** — `ARCHIVE_ROOT`,
 `GAME_FOLDERS`, `GAME_DISPLAY`, `POOL_FOLDERS`, `EXCLUDE_POOL_DIRS`. Both the
@@ -133,6 +135,20 @@ session, which is the only thing that actually works.
 
 An API key is required either way — it is what redeems the key from each click.
 Put it in `nexus_api_key.txt` (gitignored) or `NEXUS_API_KEY`.
+
+## Download order
+
+Archives are fetched **smallest first** by default. On a free Nexus account,
+where every file costs a click, that means the count of finished files climbs
+quickly, an interruption costs the least, and the long tail of small mods is out
+of the way before a multi-gigabyte download monopolises the session. In practice
+that runs from a few hundred bytes up to a few gigabytes.
+
+`DOWNLOAD_ORDER` in `wabbajack_archive_downloader.py` (or `--order` for one run)
+takes `smallest`, `largest`, or `manifest`. Archives whose manifest states no
+size always go last, whichever order is chosen: there is nowhere sensible to put
+them. `nexus_todo_<list>.csv` follows the same order, so it can be worked through
+top to bottom alongside a run.
 
 ## When results look wrong
 

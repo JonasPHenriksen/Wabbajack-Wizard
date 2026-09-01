@@ -175,6 +175,10 @@ KEEP_BACKUP_DAYS = 14
 # comparing sizes. Same reasoning as the downloader's own REQUIRE_HASH.
 REQUIRE_HASH = True
 
+# Order archives are fetched in; see DOWNLOAD_ORDER in the downloader.
+# None leaves the downloader's own default alone.
+DOWNLOAD_ORDER = None            # None | "smallest" | "largest" | "manifest"
+
 # Refuse to start a download batch that would leave less than this much free.
 FREE_SPACE_MARGIN_GB = 20
 
@@ -1002,7 +1006,9 @@ def write_nexus_todo(record, nexus_items):
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["archive", "size_bytes", "download_page"])
-            for a in nexus_items:
+            # Same order the downloader will work in, so the CSV can be
+            # followed top to bottom alongside a run.
+            for a in sorted(nexus_items, key=WJ.size_key):
                 # The site slug, not the raw manifest value: these links are
                 # meant to be clicked, and nexusmods.com/skyrimse/... 404s.
                 dom = WJ.nexus_url_domain(WJ.nexus_domain(a))
@@ -1021,7 +1027,11 @@ def write_nexus_todo(record, nexus_items):
 # ----------------------------------------------------------------------
 def child_flags(args):
     """Flags that must reach the child scripts so they behave like the parent."""
-    return ["--allow-size-only"] if args.allow_size_only else []
+    flags = ["--allow-size-only"] if args.allow_size_only else []
+    order = getattr(args, "order", None) or DOWNLOAD_ORDER
+    if order:
+        flags += ["--order", order]
+    return flags
 
 
 def run_script(script, args, label, interactive=False):
@@ -1895,6 +1905,10 @@ def main():
                          "Nexus page and waits for your click (needs you at the "
                          "keyboard); 'skip' leaves Nexus files to Wabbajack and "
                          "is the only mode that works unattended.")
+    ap.add_argument("--order", choices=("smallest", "largest", "manifest"),
+                    help="Order archives are fetched in. 'smallest' finishes "
+                         "the most files soonest and loses the least to an "
+                         "interruption.")
     ap.add_argument("--allow-size-only", action="store_true",
                     help="Proceed without xxhash, checking sizes only.")
     ap.add_argument("-v", "--verbose", action="store_true")

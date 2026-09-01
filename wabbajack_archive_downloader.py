@@ -144,6 +144,22 @@ MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR
 # is the deliberate opt-out.
 REQUIRE_HASH = True
 
+# The order archives are fetched in.
+#
+#   "smallest"  - smallest first. The count of finished files climbs quickly,
+#                 an interruption costs the least, and the long tail of small
+#                 mods is out of the way before a multi-gigabyte download
+#                 monopolises the session. On a free Nexus account, where every
+#                 file is a click, it also means the clicks that finish fastest
+#                 come first.
+#   "largest"   - largest first. Gets the risky, slow files done while you are
+#                 paying attention.
+#   "manifest"  - the order the modlist itself lists them, which is arbitrary.
+#
+# Archives whose manifest states no size always go last: there is no way to
+# place them sensibly, and they are rare.
+DOWNLOAD_ORDER = "smallest"
+
 # Nexus API tuning -----------------------------------------------------
 NEXUS_API_BASE   = "https://api.nexusmods.com/v1"
 APP_NAME         = "WJArchiveDownloader"
@@ -313,6 +329,24 @@ def human_bytes(n):
         if n < 1024 or unit == "TB":
             return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
         n /= 1024
+
+
+def size_key(archive, largest_first=False):
+    """Sort key for download order. Unknown sizes always sort last."""
+    size = archive.get("size")
+    if size is None:
+        return (1, 0)
+    return (0, -size if largest_first else size)
+
+
+def order_downloads(direct_items, nexus_items, order):
+    """Sort both work lists in place. Returns a human label, or None."""
+    if order not in ("smallest", "largest"):
+        return None
+    largest = order == "largest"
+    direct_items.sort(key=lambda pair: size_key(pair[1], largest))
+    nexus_items.sort(key=lambda a: size_key(a, largest))
+    return "largest first" if largest else "smallest first"
 
 
 def parse_meta(meta_text):
@@ -1567,6 +1601,10 @@ def main():
                         help="List what would be downloaded but fetch nothing.")
     parser.add_argument("--force", action="store_true",
                         help="Re-download even if a correct-size copy already exists.")
+    parser.add_argument("--order", choices=("smallest", "largest", "manifest"),
+                        help="Order archives are fetched in (default: %s). "
+                             "'smallest' finishes the most files soonest and "
+                             "loses the least to an interruption." % DOWNLOAD_ORDER)
     parser.add_argument("--limit", type=int, default=0,
                         help="Stop after N downloads (handy for testing).")
     parser.add_argument("--skip-nexus", action="store_true",
@@ -1707,6 +1745,11 @@ def main():
     if args.skip_nexus and nexus_items:
         LOG.info("[INFO] --skip-nexus: ignoring %d Nexus file(s).", len(nexus_items))
         nexus_items = []
+
+    order = args.order or DOWNLOAD_ORDER
+    label = order_downloads(direct_items, nexus_items, order)
+    if label:
+        LOG.info("Order:          %s", label)
 
     by_kind = defaultdict(int)
     for kind, _ in direct_items:

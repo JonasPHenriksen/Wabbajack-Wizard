@@ -22,6 +22,7 @@ SUITES = [
     ("t5_wizard.py", "wizard: empty data, missing folders, odd names"),
     ("t6_planning.py", "planning, manifest cache, backup pruning"),
     ("t7_identity.py", "one filename, several builds"),
+    ("t8_order.py", "download order: smallest, largest, manifest"),
 ]
 
 total_pass = total_fail = 0

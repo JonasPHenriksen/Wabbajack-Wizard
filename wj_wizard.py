@@ -492,6 +492,8 @@ def stage_incomplete(records, assist):
             out("  Not enough free space for this list. Skipping it.")
             continue
         flag = ["--nxm-assist"] if assist else ["--skip-nexus"]
+        if A.DOWNLOAD_ORDER:
+            flag += ["--order", A.DOWNLOAD_ORDER]
         rc = A.run_script(A.DOWNLOADER_SCRIPT,
                           ["--game", st["game"], "--list", stem_of(fn), "--yes"] + flag,
                           "downloader", interactive=assist)
