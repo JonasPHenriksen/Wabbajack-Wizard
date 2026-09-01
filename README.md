@@ -144,7 +144,7 @@ Put it in `nexus_api_key.txt` (gitignored) or `NEXUS_API_KEY`.
 ## Tests
 
 ```
-.venv-win\Scripts\python.exe testsun_all.py
+.venv-win\Scripts\python.exe tests\run_all.py
 ```
 
 203 checks across six suites. None of them touch the live archive pools:
