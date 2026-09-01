@@ -298,11 +298,17 @@ def sanitize_url(url):
 
 
 def is_junk_name(name):
-    """AppleDouble sidecars and dotfiles that a Mac leaves on an SMB share.
+    """OS litter that must never be mistaken for an archive or a manifest.
 
-    '._Foo.wabbajack' ends with '.wabbajack' and would otherwise be picked up
-    as a real manifest, parsed as a broken zip, and counted as a modlist."""
-    return name.startswith("._") or name.startswith(".")
+    Deliberately NOT "anything starting with a dot". Nexus filenames routinely
+    begin with one - ".45 Auto Pistol Ha_ru anims-21142-1-2-1.zip", ".30 Carbine
+    Pistol-71955-...", ".1130 _ResourcePack Fixes-..." - and excluding those made
+    13 archives that are present on disk report as absent, and hid them from the
+    sorter so they would never be staged. Only the AppleDouble prefix and a
+    named list of OS files are junk."""
+    low = name.lower()
+    return low.startswith("._") or low in (
+        ".ds_store", "thumbs.db", "desktop.ini", ".localized")
 
 
 def list_manifest_files(directory):
@@ -490,10 +496,19 @@ def invalidate_existing_cache():
 def index_existing(game_base):
     """Index every archive already sitting in this game's pools.
 
-    Returns { name_lower: (abs_path, size_bytes) }. The size is what makes the
-    "already present" test meaningful: a name match alone would treat a
-    truncated or wrong-version file as done forever, and you would only find
-    out when Wabbajack hash-verifies it at install time.
+    Returns { name_lower: [(abs_path, size_bytes), ...] } - EVERY copy, not
+    just the first one found.
+
+    The size is what makes the "already present" test meaningful: a name match
+    alone would treat a truncated or wrong-version file as done forever, and
+    you would only find out when Wabbajack hash-verifies it at install time.
+
+    Keeping every copy matters because a filename does not identify content
+    here. Several modlists pin different builds of a file with the same generic
+    name - "Synthesis.zip" appears in four of these lists at four different
+    sizes - so each list legitimately has its own copy in its own folder.
+    Collapsing them to whichever turned up first meant judging one list's
+    requirement against another list's file.
 
     Folders listed in EXCLUDE_POOL_DIRS (e.g. Nolvus) are skipped entirely, so
     another installer's archives are neither claimed nor disturbed."""
@@ -533,12 +548,11 @@ def index_existing(game_base):
                     continue
                 if is_junk_name(name) or not os.path.isfile(full):
                     continue
-                if low in index:
-                    continue
                 try:
-                    index[low] = (full, os.path.getsize(full))
+                    size = os.path.getsize(full)
                 except OSError:
-                    index[low] = (full, None)
+                    size = None
+                index.setdefault(low, []).append((full, size))
         except OSError as e:
             LOG.warning("  [WARN] Cannot read %s: %s", loc, e)
     _EXISTING_CACHE[cache_key] = index
@@ -548,19 +562,26 @@ def index_existing(game_base):
 def present_match(existing, archive):
     """Decide whether `archive` is already on disk.
 
-    Returns (path, why) when it counts as present, or (None, why_not). The
-    manifest's Size is authoritative when it has one; without a size we can
-    only go on the name, and say so."""
-    hit = existing.get(archive["name"].lower())
-    if not hit:
+    Returns (path, why) when it counts as present, or (None, why_not). Any copy
+    of the right size satisfies the requirement, wherever it sits in the pools;
+    it takes every copy being the wrong size to call the archive missing."""
+    copies = existing.get(archive["name"].lower()) or []
+    if not copies:
         return None, "absent"
-    path, size = hit
     want = archive.get("size")
-    if want is None or size is None:
-        return path, "name match (no size to check)"
-    if size == want:
-        return path, "size match"
-    return None, "on disk at %s but the manifest expects %s" % (size, want)
+    if want is None:
+        return copies[0][0], "name match (manifest states no size)"
+    for path, size in copies:
+        if size == want:
+            return path, "size match"
+    known = [s for _p, s in copies if s is not None]
+    if not known:
+        return copies[0][0], "name match (size unreadable)"
+    if len(known) == 1:
+        return None, "on disk at %s but the manifest expects %s" % (known[0], want)
+    return None, ("%d cop%s on disk (%s), none of them the expected %s"
+                  % (len(known), "y" if len(known) == 1 else "ies",
+                     ", ".join(str(s) for s in sorted(known)), want))
 
 
 # ----------------------------------------------------------------------

@@ -253,9 +253,17 @@ def acquire_pool_lock(script_dir):
 
 
 def is_junk_name(name):
-    """AppleDouble sidecars and dotfiles a Mac leaves on an SMB share.
-    '._Foo.wabbajack' would otherwise be treated as a real manifest."""
-    return name.startswith("._") or name.startswith(".")
+    """OS litter that must never be mistaken for an archive or a manifest.
+
+    Deliberately NOT "anything starting with a dot". Nexus filenames routinely
+    begin with one - ".45 Auto Pistol Ha_ru anims-21142-1-2-1.zip", ".30 Carbine
+    Pistol-71955-...", ".1130 _ResourcePack Fixes-..." - and excluding those made
+    13 archives that are present on disk report as absent, and hid them from the
+    sorter so they would never be staged. Only the AppleDouble prefix and a
+    named list of OS files are junk."""
+    low = name.lower()
+    return low.startswith("._") or low in (
+        ".ds_store", "thumbs.db", "desktop.ini", ".localized")
 
 
 def list_manifest_files(directory):

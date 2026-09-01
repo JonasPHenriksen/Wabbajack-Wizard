@@ -273,16 +273,23 @@ def list_status(entry):
         return None
     base, _, _ = A.WJ.resolve_game_dirs(game)
     existing = A.WJ.index_existing(base)
-    st = {"game": game, "present": 0, "gamefile": 0, "other": 0,
+    st = {"game": game, "present": 0, "gamefile": 0, "other": 0, "stale": 0,
           "nexus": 0, "nexus_bytes": 0, "direct": 0, "direct_bytes": 0}
     for a in entry["archives"]:
         kind = a.get("kind")
         if kind == "gamefile":
             st["gamefile"] += 1
             continue
-        if A.WJ.present_match(existing, a)[0]:
+        hit, why = A.WJ.present_match(existing, a)
+        if hit:
             st["present"] += 1
             continue
+        # "absent" and "there but wrong" are both missing, but they are not the
+        # same problem: a wrong-size copy is usually a download that was
+        # finalised short, and it is the reason a list can look complete for
+        # months and then fail in Wabbajack.
+        if not why.startswith("absent"):
+            st["stale"] += 1
         if kind == "nexus":
             st["nexus"] += 1
             st["nexus_bytes"] += a["size"] or 0
@@ -391,12 +398,22 @@ def stage_incomplete(records, assist):
     if not rows:
         out("    none - every modlist has all the archives this tool can fetch.")
     else:
-        out(f"    {'#':>3}  {'modlist':<40}{'game':<14}{'missing':>8}{'size':>10}  clicks")
+        out(f"    {'#':>3}  {'modlist':<38}{'game':<13}{'absent':>7}"
+            f"{'wrong sz':>9}{'size':>10}  clicks")
         for i, (fn, st) in enumerate(rows, 1):
             clicks = f"{st['nexus']} Nexus" if st["nexus"] else "-"
-            out(f"    {i:>3}  {stem_of(fn)[:39]:<40}"
-                f"{A.WJ.game_label(st['game'])[:13]:<14}"
-                f"{st['missing']:>8}{human(st['bytes']):>10}  {clicks}")
+            out(f"    {i:>3}  {stem_of(fn)[:37]:<38}"
+                f"{A.WJ.game_label(st['game'])[:12]:<13}"
+                f"{st['missing'] - st['stale']:>7}{st['stale'] or '-':>9}"
+                f"{human(st['bytes']):>10}  {clicks}")
+        total_stale = sum(st["stale"] for _f, st in rows)
+        if total_stale:
+            out()
+            out(f"    'wrong sz' means the file is on disk under the right name but")
+            out(f"    is not the size the manifest states - {total_stale} in total. Usually a")
+            out(f"    download that was finalised short by an older version of these")
+            out(f"    scripts. Wabbajack would reject them at install time; fetching")
+            out(f"    the list replaces them.")
 
     out()
     out(f"  COMPLETE ({len(complete)})")
