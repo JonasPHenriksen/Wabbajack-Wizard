@@ -23,6 +23,7 @@ SUITES = [
     ("t6_planning.py", "planning, manifest cache, backup pruning"),
     ("t7_identity.py", "one filename, several builds"),
     ("t8_order.py", "download order: smallest, largest, manifest"),
+    ("t9_wabbajack.py", "handing a staged list to Wabbajack"),
 ]
 
 total_pass = total_fail = 0

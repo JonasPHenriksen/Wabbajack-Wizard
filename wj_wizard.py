@@ -33,6 +33,12 @@ import shutil
 from datetime import datetime, timezone
 
 import wj_autoupdate as A
+import wj_wabbajack as WB
+
+try:
+    import wj_config as CFG
+except ImportError:
+    CFG = None
 
 
 class Quit(Exception):
@@ -81,6 +87,26 @@ def ask(question, allowed):
         if raw in ("q", "quit", "exit"):
             raise Quit()
         out(f"  '{raw}' is not one of {opts}.")
+
+
+def ask_path(question, default=None):
+    """Prompt for a filesystem path. Empty means skip; Ctrl+C means stop."""
+    suffix = ("\n   [Enter] to accept %s, or 's' to skip" % default) if default \
+        else "\n   [Enter] or 's' to skip"
+    out()
+    out("   " + question + suffix)
+    try:
+        raw = input("> ").strip().strip('"')
+    except (EOFError, KeyboardInterrupt):
+        out()
+        raise Quit()
+    if raw.lower() in ("q", "quit", "exit"):
+        raise Quit()
+    if raw.lower() in ("s", "skip"):
+        return None
+    if not raw:
+        return default
+    return os.path.expandvars(os.path.expanduser(raw))
 
 
 def parse_selection(text, count):
@@ -520,7 +546,7 @@ def stage_incomplete(records, assist):
 # ----------------------------------------------------------------------
 # Stage 3 - prepare one modlist for Wabbajack
 # ----------------------------------------------------------------------
-def stage_prepare(records):
+def stage_prepare(records, state=None):
     stage_header(3, "PREPARE A MODLIST FOR WABBAJACK")
     out("  Gathers everything one modlist needs into its own folder, so")
     out("  Wabbajack can install it. Only one at a time: staging a second")
@@ -560,6 +586,122 @@ def stage_prepare(records):
                       ["--game", st["game"], "--list", stem_of(fn), "--yes"],
                       "sorter")
     out(f"  Sorter exited {rc}.")
+    if rc == 0 and state is not None:
+        A.WJ.invalidate_existing_cache()
+        fresh = list_status(records[fn]) or st
+        offer_install(state, fn, fresh)
+    return rc == 0
+
+
+def offer_install(state, filename, st):
+    """Hand a freshly staged list to Wabbajack.
+
+    Everything Wabbajack needs is now in one folder, so the only outstanding
+    decisions are where to install and whether to go. The check that matters
+    most happens before any of that: Wabbajack cannot install a list for a game
+    it cannot find, because a modlist copies files out of the base game rather
+    than downloading them, and finding that out after committing to an install
+    is a waste of an evening."""
+    mode = getattr(CFG, "INSTALL_MODE", "cli") if CFG else "cli"
+    if mode == "off":
+        return False
+
+    stem = stem_of(filename)
+    wj = WB.find_wabbajack()
+    out()
+    rule()
+    out("  Hand it to Wabbajack?")
+    if not wj:
+        out("  Wabbajack was not found. Set WABBAJACK_DIR in wj_config.py if it")
+        out("  is installed somewhere other than beside this folder.")
+        return False
+
+    downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
+    manifest = os.path.join(A.MANIFESTS, filename)
+    out(f"    Wabbajack   {wj['dir']}" + (f"  ({wj['version']})" if wj["version"] else ""))
+    out(f"    Modlist     {manifest}")
+    out(f"    Downloads   {downloads}")
+
+    ready, detail = WB.game_ready(wj.get("cli"), st["game"])
+    mark = {True: "ok", False: "BLOCKED", None: "unknown"}[ready]
+    out(f"    Game        {A.WJ.game_label(st['game'])}  [{mark}]")
+    out(f"                {detail}")
+    if st["missing"]:
+        out(f"    Missing     {st['missing']} archive(s) ({human(st['bytes'])}) not "
+            f"downloaded yet")
+        out("                Wabbajack will try to fetch these itself, which on a "
+            "free")
+        out("                account means its own click-per-file flow.")
+
+    if ready is False:
+        out()
+        out("  Not offering to install: the check above has to pass first.")
+        return False
+
+    if mode == "gui":
+        if not wj["exe"]:
+            out("  Wabbajack.exe was not found, so the window cannot be opened.")
+            return False
+        out()
+        out("  Opening Wabbajack. Paste these two paths into the install page:")
+        out(f"    Modlist   {manifest}")
+        out(f"    Downloads {downloads}")
+        if WB.launch_gui(wj["exe"]):
+            out("  Wabbajack is starting.")
+            return True
+        out("  Could not start Wabbajack.exe.")
+        return False
+
+    if not wj.get("cli"):
+        out("  wabbajack-cli.exe was not found, so the install cannot be driven")
+        out("  from here. Set INSTALL_MODE = \"gui\" in wj_config.py to open the")
+        out("  window instead.")
+        return False
+
+    remembered = (state.get("install") or {}).get(stem)
+    target = ask_path("Where should Wabbajack install this list?", remembered)
+    if not target:
+        out("  Skipped. Nothing installed.")
+        return False
+    target = os.path.abspath(target)
+
+    lines = [f"modlist   {stem}",
+             f"downloads {downloads}",
+             f"install   {target}"]
+    if os.path.isdir(target) and os.listdir(target):
+        lines.append("")
+        lines.append("That folder already has something in it. Wabbajack will")
+        lines.append("overwrite anything belonging to a modlist install.")
+    try:
+        free = shutil.disk_usage(os.path.splitdrive(target)[0] or target).free
+        lines.append("")
+        lines.append(f"free on that drive: {human(free)}")
+    except (OSError, ValueError):
+        pass
+    out()
+    rule("!")
+    out("  About to start a Wabbajack install")
+    rule("!")
+    for line in lines:
+        out("   " + line)
+    out()
+    if ask("   Start it?  [y] yes  [n] no", ("y", "n")) == "n":
+        out("  Skipped. Nothing installed.")
+        return False
+
+    state.setdefault("install", {})[stem] = target
+    A.save_state(state)
+    out()
+    out("  Running Wabbajack. This takes a while; its output follows.")
+    rule()
+    rc = WB.run_install(wj["cli"], manifest, downloads, target,
+                        on_line=lambda l: out("  | " + l))
+    rule()
+    if rc == 0:
+        out(f"  Wabbajack finished. {stem} is installed at {target}.")
+    else:
+        out(f"  Wabbajack exited {rc}. Its output above says why; the staged "
+            f"folder is untouched, so re-running is safe.")
     return rc == 0
 
 
@@ -906,7 +1048,7 @@ def run(verbose=False, nexus_mode=None, allow_size_only=False, no_lock=False):
         # parsed with its new contents rather than served from a stale entry.
         records = load_records()
         stage_incomplete(records, assist)
-        stage_prepare(records)
+        stage_prepare(records, state)
         stage_space(state, records)
 
         out()

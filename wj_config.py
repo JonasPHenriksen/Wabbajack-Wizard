@@ -74,6 +74,18 @@ EXCLUDE_POOL_DIRS = {"nolvus"}
 # Where the .wabbajack manifests live, relative to the tools folder, when
 # WJ_MANIFEST_DIR is not set.
 MANIFEST_SUBDIR = "modlists"
+
+# Where Wabbajack itself is installed. None auto-detects: a sibling of the
+# tools folder first (the arrangement on this share), then the per-user
+# install location. Set it explicitly if yours is somewhere else.
+WABBAJACK_DIR = None
+
+# How a staged list is handed over.
+#   "cli" - run wabbajack-cli install with the paths already filled in. The
+#           only thing left to decide is where to install.
+#   "gui" - open the Wabbajack window and print the two paths to paste.
+#   "off" - do not offer to install at all.
+INSTALL_MODE = "cli"
 # =======================================================================
 
 

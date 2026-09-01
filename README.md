@@ -47,8 +47,8 @@ independent — skipping one does not affect the others.
    need a Nexus click. Downloads one list at a time, finishing each before
    offering the next.
 3. **Prepare** — gathers everything one modlist needs into its own folder for
-   Wabbajack. One at a time by design: staging a second list pulls the shared
-   archives back out of the first.
+   Wabbajack, then offers to hand it straight over (see below). One at a time by
+   design: staging a second list pulls the shared archives back out of the first.
 4. **Space** — what the manifests and per-game Master pools cost, with the
    option to delete modlists and then clear Master. Both steps confirm, and let
    you change the selection at the confirmation.
@@ -92,6 +92,8 @@ At the top of `wj_autoupdate.py`:
 | `REQUIRE_HASH` | refuse to run rather than silently degrade to size-only checks |
 | `KEEP_BACKUP_DAYS` | how long superseded manifests are kept |
 | `DOWNLOAD_ORDER` | `smallest` (default), `largest`, or `manifest` — see below |
+| `WABBAJACK_DIR` | where Wabbajack is; `None` auto-detects |
+| `INSTALL_MODE` | `cli` (default), `gui`, or `off` — see below |
 
 The archive layout lives in **`wj_config.py`** — `ARCHIVE_ROOT`,
 `GAME_FOLDERS`, `GAME_DISPLAY`, `POOL_FOLDERS`, `EXCLUDE_POOL_DIRS`. Both the
@@ -136,6 +138,44 @@ session, which is the only thing that actually works.
 An API key is required either way — it is what redeems the key from each click.
 Put it in `nexus_api_key.txt` (gitignored) or `NEXUS_API_KEY`.
 
+## Handing a list to Wabbajack
+
+Once stage 3 has staged a list, everything Wabbajack needs is in one folder and
+the only real decision left is where to install. Stage 3 therefore offers to
+hand it over, with `INSTALL_MODE`:
+
+- **`cli`** (default) — asks where to install, then runs
+  `wabbajack-cli install --wabbajack … --downloads … --output …`. Both paths are
+  ones this tooling already knows, so nothing is typed twice. The install
+  location is remembered per list.
+- **`gui`** — opens the Wabbajack window and prints the two paths to paste.
+- **`off`** — never offers.
+
+### The preflight is the useful part
+
+Wabbajack cannot install a list for a game it cannot find: a modlist's
+`GameFile` archives are *copied out of the base game install*, not downloaded.
+Finding that out after committing to an install wastes an evening, so it is
+checked first, using `wabbajack-cli list-games`:
+
+```
+    Game        Skyrim Special Edition  [BLOCKED]
+                Wabbajack cannot find an installation of Skyrim Special
+                Edition. A modlist copies files out of the base game, so
+                installing without it will fail.
+
+  Not offering to install: the check above has to pass first.
+```
+
+Three outcomes are kept distinct, because they need different responses: the
+game is installed; the game is missing; or Wabbajack does not support that game
+at all (Dark Souls 3, for one, is not in its list). A missing CLI reports
+"unknown" rather than guessing either way.
+
+It also warns when archives are still outstanding — Wabbajack will try to fetch
+those itself, which on a free account means its own click-per-file flow rather
+than this tooling's.
+
 ## Download order
 
 Archives are fetched **smallest first** by default. On a free Nexus account,
@@ -176,6 +216,7 @@ recognised (if unfetchable) source rather than "unknown".
 | file | role |
 | --- | --- |
 | `wj_config.py` | the archive layout: one place, imported by the rest |
+| `wj_wabbajack.py` | finding Wabbajack, the preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_wizard.py` | the interactive four-stage front end |
 | `wabbajack_archive_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
