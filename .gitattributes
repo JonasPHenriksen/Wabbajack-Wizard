@@ -1,0 +1,4 @@
+# Byte-for-byte fidelity. These scripts run on both Windows and the
+# DietPi box, and the repo lives on a share mounted by both; letting git
+# rewrite line endings on checkout would change files under them.
+* -text

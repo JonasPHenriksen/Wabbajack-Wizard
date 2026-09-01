@@ -86,6 +86,11 @@ if not _looks_absolute(ARCHIVE_ROOT):
 GAME_FOLDERS = {
     "SkyrimSpecialEdition": "Skyrim",
     "Skyrim":               "Skyrim",
+    # Maps a GameType onto an existing pool folder whose name is not the
+    # GameType itself. Without this a Dark Souls 3 list would create a fresh
+    # "DarkSouls3" folder and orphan the "DARK SOULS 3" one already on the
+    # share. Inert if the GameType turns out to be spelled differently.
+    "DarkSouls3":           "DARK SOULS 3",
 }
 
 # Cosmetic only - friendly labels for the game menu. Unknown games fall back to
@@ -101,7 +106,25 @@ GAME_DISPLAY = {
     "StardewValley":         "Stardew Valley",
     "Enderal":               "Enderal",
     "EnderalSpecialEdition": "Enderal Special Edition",
+    "BaldursGate3":          "Baldur's Gate 3",
+    "Cyberpunk2077":         "Cyberpunk 2077",
+    "Witcher3":              "The Witcher 3",
+    "DarkSouls3":            "Dark Souls III",
 }
+
+# Folders directly under the game root that belong to a DIFFERENT installer and
+# must never be indexed, moved, or counted as demand. Nolvus has its own
+# installer and its own archive layout; touching it would break that install.
+# Matched case-insensitively against the folder name.
+EXCLUDE_POOL_DIRS = {"nolvus"}
+
+# Where the .wabbajack manifests live, relative to this script, when
+# WJ_MANIFEST_DIR is not set.
+MANIFEST_SUBDIR = "modlists"
+
+# Shared with wj_autoupdate.py: one archive-moving job at a time. Skipped when
+# WJ_LOCK_HELD is set, which the parent sets for the children it launches.
+LOCK_FILE = ".wj_autoupdate.lock"
 # =======================================================================
 
 # These three are resolved to the per-game paths once the game is chosen.
@@ -172,6 +195,94 @@ def setup_logging(log_dir, verbose=False):
 
 def banner(title):
     LOG.info("\n=================== %s ===================", title)
+
+
+def acquire_pool_lock(script_dir):
+    """Best-effort exclusive lock over the archive pools.
+
+    This script relocates files while wabbajack_archive_downloader.py may be
+    writing them. Serialising the two avoids a move landing on a file that is
+    still being written. A filesystem that cannot lock (SMB sometimes cannot)
+    is reported and the run continues - the lock is a guard rail, not a
+    guarantee."""
+    if os.environ.get("WJ_LOCK_HELD"):
+        return None
+    path = os.path.join(script_dir, LOCK_FILE)
+    try:
+        fd = open(path, "a+")
+    except OSError:
+        return None
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        fd.close()
+        LOG.error("[TERMINATED] Another archive job (downloader or updater) is "
+                  "running. Wait for it to finish, or the two will fight over "
+                  "the same files.")
+        sys.exit(3)
+    except Exception:
+        fd.close()
+        LOG.warning("[WARN] Could not take the pool lock on this filesystem; "
+                    "continuing. Do not run the downloader at the same time.")
+        return None
+    import atexit
+
+    def _release():
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            fd.close()
+        except OSError:
+            pass
+    atexit.register(_release)
+    return fd
+
+
+def is_junk_name(name):
+    """AppleDouble sidecars and dotfiles a Mac leaves on an SMB share.
+    '._Foo.wabbajack' would otherwise be treated as a real manifest."""
+    return name.startswith("._") or name.startswith(".")
+
+
+def list_manifest_files(directory):
+    try:
+        names = os.listdir(directory)
+    except OSError as e:
+        LOG.error("[ERROR] Cannot read manifest folder %s: %s", directory, e)
+        return []
+    return sorted(f for f in names
+                  if f.lower().endswith(".wabbajack") and not is_junk_name(f))
+
+
+def resolve_manifest_dir(script_dir):
+    """WJ_MANIFEST_DIR wins when it is a real directory; a bad value is an
+    error rather than a silent fallback, because falling back means sorting
+    against a different set of modlists than the caller intended."""
+    env = os.environ.get("WJ_MANIFEST_DIR")
+    if env:
+        if os.path.isdir(env):
+            return env
+        LOG.error("[TERMINATED] WJ_MANIFEST_DIR points at %s, which is not a "
+                  "directory. Refusing to guess.", env)
+        sys.exit(2)
+    sub_dir = os.path.join(script_dir, MANIFEST_SUBDIR)
+    if os.path.isdir(sub_dir) and list_manifest_files(sub_dir):
+        return sub_dir
+    return script_dir
 
 
 def short(path):
@@ -252,7 +363,8 @@ def parse_manifest(wj_path):
         }
 
     Returns the record with empty fields on any failure (logged)."""
-    record = {"game": None, "names": set(), "sizes": defaultdict(set)}
+    record = {"game": None, "names": set(), "sizes": defaultdict(set),
+              "readable": True, "gamefile": set()}
     base = os.path.basename(wj_path)
     LOG.info("  [SCAN] %s", base)
 
@@ -264,6 +376,7 @@ def parse_manifest(wj_path):
             target = next((m for m in members if os.path.basename(m).lower() == "modlist"), None)
             if target is None:
                 LOG.warning("  [WARN] No 'modlist' manifest found inside %s - skipping.", base)
+                record["readable"] = False
                 return record
 
             with z.open(target) as f:
@@ -287,18 +400,30 @@ def parse_manifest(wj_path):
                 continue
             low = str(name).lower()
             record["names"].add(low)
+            # GameFile entries are copied out of your game install by
+            # Wabbajack; they are never downloaded and are never expected on
+            # disk. Counting them as "missing" makes a healthy list look as
+            # though hundreds of archives are absent.
+            st = archive.get("State")
+            if isinstance(st, dict) and str(st.get("$type", "")).startswith(
+                    "GameFileSourceDownloader"):
+                record["gamefile"].add(low)
             size = archive.get("Size")
             if isinstance(size, int) and size >= 0:
                 record["sizes"][low].add(size)
 
     except zipfile.BadZipFile:
         LOG.error("  [ERROR] %s is not a readable zip/wabbajack file.", base)
+        record["readable"] = False
     except json.JSONDecodeError as e:
         LOG.error("  [ERROR] Manifest JSON in %s is corrupt: %s", base, e)
+        record["readable"] = False
     except OSError as e:
         LOG.error("  [ERROR] Could not open %s: %s", base, e)
+        record["readable"] = False
     except Exception as e:  # last-resort guard so one bad file never aborts the run
         LOG.error("  [ERROR] Unexpected failure reading %s: %s", base, e)
+        record["readable"] = False
 
     if record["names"]:
         LOG.info("  [OK]   %s -> game=%s, %d archive(s) required.",
@@ -350,6 +475,8 @@ def build_disk_index(search_locations, protected_names):
                 # this name, so indexing it would park it in Master and destroy
                 # the resume progress. Leave it exactly where it is.
                 continue
+            if is_junk_name(name):
+                continue  # '._x' / '.DS_Store' left by a Mac on the share
             if low in protected_names:
                 continue  # never relocate the manifests or this script
             if not os.path.isfile(full):
@@ -634,7 +761,11 @@ def choose_modlist(modlists_map, preset=None):
     if preset is not None:
         if preset in modlists_map:
             return modlists_map[preset]
-        LOG.error("[ERROR] Preset list selector '%s' is not valid.", preset)
+        by_name = {nm.lower(): nm for nm in modlists_map.values()}
+        if preset.lower() in by_name:
+            return by_name[preset.lower()]
+        LOG.error("[ERROR] Preset list selector '%s' is not valid. Known lists: %s",
+                  preset, ", ".join(sorted(modlists_map.values())))
         sys.exit(2)
 
     LOG.info("\nWhich modlist do you want to prepare the install for?")
@@ -687,7 +818,7 @@ def validate_environment():
 
 
 def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
-              modlists_map, protected, chosen_game, args):
+              modlists_map, protected, chosen_game, args, gamefile_names=frozenset()):
     """Scan disk, build, and (unless --dry-run) execute the plan for ONE pass.
 
     target_modlist is None for the automatic cleanup/reset pass, or a list name
@@ -702,7 +833,11 @@ def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
 
     # ---- Disk scan ----------------------------------------------------
     banner(f"{stage_label}: DISK SCAN (INDEXING)")
-    list_dirs = [os.path.join(OUTPUT_BASE_DIR, nm) for nm in modlists_map.values()]
+    # EXCLUDE_POOL_DIRS is enforced here as well as by never deriving a list
+    # folder from a foreign name: if a modlist ever happened to be called
+    # "Nolvus", it still must not drag that installer's archives into our pools.
+    list_dirs = [os.path.join(OUTPUT_BASE_DIR, nm) for nm in modlists_map.values()
+                 if nm.lower() not in EXCLUDE_POOL_DIRS]
     search_locations = [SHARED_DIR, MASTER_ARCHIVE_DIR] + list_dirs
 
     disk_index, duplicates = build_disk_index(search_locations, protected)
@@ -731,9 +866,15 @@ def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
 
     # Required-but-missing report (only meaningful when staging a target).
     if target_modlist:
-        missing = sorted(f for f in file_demands
-                         if target_modlist in file_demands[f] and f not in disk_index)
+        absent = sorted(f for f in file_demands
+                        if target_modlist in file_demands[f] and f not in disk_index)
+        from_game = [f for f in absent if f in gamefile_names]
+        missing = [f for f in absent if f not in gamefile_names]
         stats["missing"] = missing
+        stats["from_game"] = len(from_game)
+        if from_game:
+            LOG.info("%d archive(s) come from your game install (Wabbajack copies "
+                     "these itself); they are not expected on disk.", len(from_game))
         if missing:
             LOG.warning("[WARN] '%s' needs %d archive(s) that are NOT on disk anywhere. "
                         "Wabbajack (or the downloader script) will have to fetch these:",
@@ -792,11 +933,12 @@ def main():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     log_path = setup_logging(current_dir, verbose=args.verbose)
 
+    # Nothing below may run concurrently with a download into the same pools.
+    acquire_pool_lock(current_dir)
+
     # Manifests may live elsewhere (see change 3 in the docstring). Logs stay
     # beside this script regardless.
-    manifest_dir = os.environ.get("WJ_MANIFEST_DIR") or current_dir
-    if not os.path.isdir(manifest_dir):
-        manifest_dir = current_dir
+    manifest_dir = resolve_manifest_dir(current_dir)
 
     banner("ENVIRONMENT CHECK")
     LOG.info("Archive root:         %s", ARCHIVE_ROOT)
@@ -805,7 +947,7 @@ def main():
     if args.dry_run:
         LOG.info("Mode:                 DRY-RUN (no files will be moved)")
 
-    wj_files = sorted(f for f in os.listdir(manifest_dir) if f.lower().endswith(".wabbajack"))
+    wj_files = list_manifest_files(manifest_dir)
     if not wj_files:
         LOG.error("[TERMINATED] No .wabbajack files found in %s", manifest_dir)
         sys.exit(1)
@@ -823,6 +965,19 @@ def main():
         records.append(rec)
         if not rec["names"]:
             empty_lists.append(rec["name"])
+
+    # A manifest that failed to READ yields an empty demand set, which is
+    # indistinguishable from "this list needs nothing". The cleanup pass would
+    # then decide every archive that list needs is unused and park the lot in
+    # Master - potentially hundreds of GB of pointless movement, and a broken
+    # install. A read failure is never a safe assumption, so stop.
+    unreadable = [r["name"] for r in records if not r["readable"]]
+    if unreadable:
+        LOG.error("[TERMINATED] %d manifest(s) could not be read: %s",
+                  len(unreadable), ", ".join(unreadable))
+        LOG.error("             Their archives would look unwanted and be moved "
+                  "into Master. Re-download or remove these files, then re-run.")
+        sys.exit(2)
 
     if empty_lists:
         LOG.warning("[WARN] %d modlist(s) yielded no archives: %s",
@@ -885,7 +1040,8 @@ def main():
     # script folder and a pool folder are ever the same directory. Cheap
     # insurance: none of these are ever legitimate archive names.
     _KEEP_EXT = (".py", ".bat", ".sh", ".log", ".csv", ".json",
-                 ".bak", ".out", ".md", ".txt", ".lock")
+                 ".bak", ".out", ".md", ".txt", ".lock",
+                 ".metadata", ".part", ".rejected", ".wabbajack")
     for _d in {current_dir, manifest_dir}:
         try:
             for _f in os.listdir(_d):
@@ -910,8 +1066,10 @@ def main():
     # ---- Step 5: stage the chosen list -------------------------------
     banner(f"STEP 5: STAGE '{target_modlist}'")
     target_expected = build_expected_sizes(in_scope, target_modlist)
+    target_rec = next((r for r in in_scope if r["name"] == target_modlist), None)
     stage_stats = run_stage(f"STAGE '{target_modlist}'", target_modlist, file_demands,
-                            target_expected, modlists_map, protected, chosen_game, args)
+                            target_expected, modlists_map, protected, chosen_game, args,
+                            gamefile_names=(target_rec or {}).get("gamefile", frozenset()))
 
     if args.dry_run:
         LOG.info("\n[DRY-RUN COMPLETE] Re-run without --dry-run to apply.")
@@ -930,6 +1088,7 @@ def main():
     LOG.info("  -> Sidecar .meta moved:      %d", rc["meta"] + sc["meta"])
     LOG.info("  -> Already in place:         %d", stage_stats["already_in_place"])
     LOG.info("  -> Missing (must download):  %d", len(stage_stats["missing"]))
+    LOG.info("  -> From game install:        %d", stage_stats.get("from_game", 0))
     LOG.info("  -> Duplicate names flagged:  %d", stage_stats["duplicates"])
     total_errors = rc["errors"] + sc["errors"]
     LOG.info("  -> Errors:                   %d", total_errors)

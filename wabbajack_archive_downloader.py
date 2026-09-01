@@ -133,6 +133,11 @@ if not _looks_absolute(ARCHIVE_ROOT):
 GAME_FOLDERS = {
     "SkyrimSpecialEdition": "Skyrim",
     "Skyrim":               "Skyrim",
+    # Maps a GameType onto an existing pool folder whose name is not the
+    # GameType itself. Without this a Dark Souls 3 list would create a fresh
+    # "DarkSouls3" folder and orphan the "DARK SOULS 3" one already on the
+    # share. Inert if the GameType turns out to be spelled differently.
+    "DarkSouls3":           "DARK SOULS 3",
 }
 
 GAME_DISPLAY = {
@@ -146,10 +151,33 @@ GAME_DISPLAY = {
     "StardewValley":         "Stardew Valley",
     "Enderal":               "Enderal",
     "EnderalSpecialEdition": "Enderal Special Edition",
+    "BaldursGate3":          "Baldur's Gate 3",
+    "Cyberpunk2077":         "Cyberpunk 2077",
+    "Witcher3":              "The Witcher 3",
+    "DarkSouls3":            "Dark Souls III",
 }
 
 # Pool sub-folders that exist alongside the list folders (mirrors the sorter).
 POOL_FOLDERS = ("Master", "Shared")
+
+# Folders directly under the game root that belong to a DIFFERENT installer and
+# must be left completely alone: not indexed, not counted as "already present",
+# never staged or relocated. Nolvus ships its own installer and its own archive
+# layout, so its files are none of our business. Matched case-insensitively.
+EXCLUDE_POOL_DIRS = {"nolvus"}
+
+# Where the .wabbajack manifests live, relative to this script, when
+# WJ_MANIFEST_DIR is not set. Falls back to the script folder if absent, so
+# running this script by hand finds the same manifests wj_autoupdate.py uses.
+MANIFEST_SUBDIR = "modlists"
+
+# Hash verification is the whole point of downloading a pinned revision. When
+# the optional xxhash package is absent this script can only compare sizes,
+# which passes a file that is the right length but the wrong content. Rather
+# than quietly downgrading (the same command gives you different guarantees
+# depending on which Python picked it up), stop and say so. --allow-size-only
+# is the deliberate opt-out.
+REQUIRE_HASH = True
 
 # Nexus API tuning -----------------------------------------------------
 NEXUS_API_BASE   = "https://api.nexusmods.com/v1"
@@ -269,6 +297,45 @@ def sanitize_url(url):
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
 
 
+def is_junk_name(name):
+    """AppleDouble sidecars and dotfiles that a Mac leaves on an SMB share.
+
+    '._Foo.wabbajack' ends with '.wabbajack' and would otherwise be picked up
+    as a real manifest, parsed as a broken zip, and counted as a modlist."""
+    return name.startswith("._") or name.startswith(".")
+
+
+def list_manifest_files(directory):
+    """Sorted .wabbajack filenames in `directory`, junk excluded."""
+    try:
+        names = os.listdir(directory)
+    except OSError as e:
+        LOG.error("[ERROR] Cannot read manifest folder %s: %s", directory, e)
+        return []
+    return sorted(f for f in names
+                  if f.lower().endswith(".wabbajack") and not is_junk_name(f))
+
+
+def resolve_manifest_dir(script_dir):
+    """Where to look for .wabbajack files.
+
+    WJ_MANIFEST_DIR wins when it points at a real directory. A value that does
+    NOT resolve is reported loudly rather than silently falling back, because a
+    silent fallback means operating on a different set of modlists than the
+    caller intended."""
+    env = os.environ.get("WJ_MANIFEST_DIR")
+    if env:
+        if os.path.isdir(env):
+            return env
+        LOG.error("[ERROR] WJ_MANIFEST_DIR points at %s, which is not a "
+                  "directory. Refusing to guess.", env)
+        sys.exit(2)
+    sub_dir = os.path.join(script_dir, MANIFEST_SUBDIR)
+    if os.path.isdir(sub_dir) and list_manifest_files(sub_dir):
+        return sub_dir
+    return script_dir
+
+
 def human_bytes(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
@@ -294,7 +361,7 @@ def parse_meta(meta_text):
 # ----------------------------------------------------------------------
 def parse_manifest(wj_path):
     record = {"game": None, "name": os.path.splitext(os.path.basename(wj_path))[0],
-              "archives": []}
+              "archives": [], "readable": True}
     base = os.path.basename(wj_path)
     LOG.info("  [SCAN] %s", base)
     try:
@@ -303,6 +370,7 @@ def parse_manifest(wj_path):
                            if os.path.basename(m).lower() == "modlist"), None)
             if target is None:
                 LOG.warning("  [WARN] No 'modlist' manifest inside %s - skipping.", base)
+                record["readable"] = False
                 return record
             with z.open(target) as f:
                 data = json.load(f)
@@ -332,12 +400,16 @@ def parse_manifest(wj_path):
             })
     except zipfile.BadZipFile:
         LOG.error("  [ERROR] %s is not a readable zip/wabbajack file.", base)
+        record["readable"] = False
     except json.JSONDecodeError as e:
         LOG.error("  [ERROR] Manifest JSON in %s is corrupt: %s", base, e)
+        record["readable"] = False
     except OSError as e:
         LOG.error("  [ERROR] Could not open %s: %s", base, e)
+        record["readable"] = False
     except Exception as e:
         LOG.error("  [ERROR] Unexpected failure reading %s: %s", base, e)
+        record["readable"] = False
 
     LOG.info("  [OK]   %s -> game=%s, %d archive(s).",
              base, record["game"] or "unknown", len(record["archives"]))
@@ -407,16 +479,45 @@ def candidate_domains(archive, forced=None):
 # ----------------------------------------------------------------------
 # Existing-file index (so we never re-download what we already have)
 # ----------------------------------------------------------------------
+_EXISTING_CACHE = {}
+
+
+def invalidate_existing_cache():
+    """Call after anything writes into the pools."""
+    _EXISTING_CACHE.clear()
+
+
 def index_existing(game_base):
+    """Index every archive already sitting in this game's pools.
+
+    Returns { name_lower: (abs_path, size_bytes) }. The size is what makes the
+    "already present" test meaningful: a name match alone would treat a
+    truncated or wrong-version file as done forever, and you would only find
+    out when Wabbajack hash-verifies it at install time.
+
+    Folders listed in EXCLUDE_POOL_DIRS (e.g. Nolvus) are skipped entirely, so
+    another installer's archives are neither claimed nor disturbed."""
+    cache_key = os.path.normcase(os.path.abspath(game_base))
+    if cache_key in _EXISTING_CACHE:
+        return _EXISTING_CACHE[cache_key]
+
     index = {}
     locations = [game_base] + [os.path.join(game_base, p) for p in POOL_FOLDERS]
+    skipped = []
     try:
         for entry in os.listdir(game_base):
             full = os.path.join(game_base, entry)
-            if os.path.isdir(full):
-                locations.append(full)
+            if not os.path.isdir(full):
+                continue
+            if entry.lower() in EXCLUDE_POOL_DIRS:
+                skipped.append(entry)
+                continue
+            locations.append(full)
     except OSError:
         pass
+    if skipped:
+        LOG.info("  [SKIP] Ignoring foreign installer folder(s): %s",
+                 ", ".join(sorted(skipped)))
 
     seen = set()
     for loc in locations:
@@ -427,12 +528,39 @@ def index_existing(game_base):
         try:
             for name in os.listdir(loc):
                 full = os.path.join(loc, name)
-                if name.lower().endswith(".meta") or not os.path.isfile(full):
+                low = name.lower()
+                if low.endswith(".meta") or low.endswith(".part"):
                     continue
-                index.setdefault(name.lower(), full)
+                if is_junk_name(name) or not os.path.isfile(full):
+                    continue
+                if low in index:
+                    continue
+                try:
+                    index[low] = (full, os.path.getsize(full))
+                except OSError:
+                    index[low] = (full, None)
         except OSError as e:
             LOG.warning("  [WARN] Cannot read %s: %s", loc, e)
+    _EXISTING_CACHE[cache_key] = index
     return index
+
+
+def present_match(existing, archive):
+    """Decide whether `archive` is already on disk.
+
+    Returns (path, why) when it counts as present, or (None, why_not). The
+    manifest's Size is authoritative when it has one; without a size we can
+    only go on the name, and say so."""
+    hit = existing.get(archive["name"].lower())
+    if not hit:
+        return None, "absent"
+    path, size = hit
+    want = archive.get("size")
+    if want is None or size is None:
+        return path, "name match (no size to check)"
+    if size == want:
+        return path, "size match"
+    return None, "on disk at %s but the manifest expects %s" % (size, want)
 
 
 # ----------------------------------------------------------------------
@@ -736,11 +864,19 @@ def register_nxm(script_dir):
             prev, _ = winreg.QueryValueEx(k, None)
     except OSError:
         prev = None
-    try:
-        with open(os.path.join(script_dir, NXM_PREV_HANDLER), "w", encoding="utf-8") as f:
-            f.write(prev or "")
-    except OSError:
-        pass
+    # Only record a previous handler that is not already us. Registering twice
+    # without unregistering in between would otherwise save OUR command as the
+    # "previous" one, and --unregister-nxm would then restore the hijack
+    # permanently instead of giving Wabbajack its handler back.
+    ours = nxm_handler_command()
+    if prev and os.path.normcase(prev.strip()) == os.path.normcase(ours.strip()):
+        LOG.debug("nxm handler is already ours; keeping the saved previous handler.")
+    else:
+        try:
+            with open(os.path.join(script_dir, NXM_PREV_HANDLER), "w", encoding="utf-8") as f:
+                f.write(prev or "")
+        except OSError:
+            pass
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "URL:NXM Protocol")
@@ -1076,10 +1212,20 @@ def choose_game(games_present, preset=None):
 
 
 def choose_modlist(modlists_map, preset=None):
+    """Resolve --list. Accepts a menu number OR a modlist name.
+
+    Names are what callers should use. A menu number is positional: it depends
+    on how many manifests parsed successfully this run, so a transient read
+    error on an unrelated file silently shifts every number and the wrong list
+    gets operated on. A name cannot drift."""
     if preset is not None:
         if preset in modlists_map:
             return modlists_map[preset]
-        LOG.error("[ERROR] Preset list selector '%s' is not valid.", preset)
+        by_name = {nm.lower(): nm for nm in modlists_map.values()}
+        if preset.lower() in by_name:
+            return by_name[preset.lower()]
+        LOG.error("[ERROR] Preset list selector '%s' is not valid. Known lists: %s",
+                  preset, ", ".join(sorted(modlists_map.values())))
         sys.exit(2)
     LOG.info("\nWhich modlist do you want to download archives for?")
     for num, nm in modlists_map.items():
@@ -1316,6 +1462,12 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
         LOG.info("\n[ABORT] Capture interrupted by user.")
     finally:
         listener.close()
+        # Hand the nxm:// handler back to whatever owned it (normally
+        # Wabbajack). Without this, every "download with manager" click on
+        # Nexus keeps landing on this script until you notice and fix it by
+        # hand - including the clicks Wabbajack itself is waiting for.
+        if platform.system() == "Windows":
+            unregister_nxm(script_dir)
 
 
 # ----------------------------------------------------------------------
@@ -1353,18 +1505,16 @@ def main():
     parser.add_argument("--unregister-nxm", action="store_true",
                         help="Restore the previous nxm:// handler and exit (Windows).")
     parser.add_argument("--nxm", help=argparse.SUPPRESS)  # internal: handler invocation
+    parser.add_argument("--allow-size-only", action="store_true",
+                        help="Proceed even though 'xxhash' is missing and files "
+                             "can only be checked by size. Off by default: a "
+                             "silent downgrade to size-only verification is how "
+                             "a corrupt archive survives to install time.")
     parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose console output.")
     args = parser.parse_args()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # The .wabbajack manifests need not live beside this script (wj_autoupdate.py
-    # sets WJ_MANIFEST_DIR so the tooling can sit in its own folder). Logs, the
-    # API key file and the CSV reports stay in script_dir either way.
-    manifest_dir = os.environ.get("WJ_MANIFEST_DIR") or script_dir
-    if not os.path.isdir(manifest_dir):
-        manifest_dir = script_dir
 
     # --- Handler-invocation entry point: forward the URL and exit immediately.
     if args.nxm:
@@ -1381,6 +1531,12 @@ def main():
         unregister_nxm(script_dir)
         return
 
+    # The .wabbajack manifests need not live beside this script (wj_autoupdate.py
+    # sets WJ_MANIFEST_DIR so the tooling can sit in its own folder, and this
+    # script otherwise looks in ./modlists). Logs, the API key file and the CSV
+    # reports stay in script_dir either way.
+    manifest_dir = resolve_manifest_dir(script_dir)
+
     banner("ENVIRONMENT CHECK")
     LOG.info("Archive root:   %s", ARCHIVE_ROOT)
     if log_path:
@@ -1389,8 +1545,14 @@ def main():
         LOG.info("Mode:           DRY-RUN (nothing will be downloaded)")
     LOG.info("Hash verify:    %s", "xxHash64 (xxhash installed)" if _HAVE_XXHASH
              else "size only (install 'xxhash' for hash checks)")
+    if not _HAVE_XXHASH and REQUIRE_HASH and not args.allow_size_only:
+        LOG.error("[TERMINATED] 'xxhash' is not importable by this interpreter "
+                  "(%s), so downloads could only be checked by size.", sys.executable)
+        LOG.error("             Run setup_env.bat and launch via run.bat, or pass "
+                  "--allow-size-only to accept size-only checks.")
+        sys.exit(2)
 
-    wj_files = sorted(f for f in os.listdir(manifest_dir) if f.lower().endswith(".wabbajack"))
+    wj_files = list_manifest_files(manifest_dir)
     if not wj_files:
         LOG.error("[TERMINATED] No .wabbajack files found in %s", manifest_dir)
         sys.exit(1)
@@ -1399,6 +1561,16 @@ def main():
 
     banner("STEP 1: SCANNING MANIFESTS")
     records = [parse_manifest(os.path.join(manifest_dir, f)) for f in wj_files]
+
+    # A manifest we could not read is NOT the same as one with no GameType. It
+    # drops out of the menu, which used to shift every list number below it, and
+    # would make this list's archives look unwanted to the sorter. Say so.
+    unreadable = [r["name"] for r in records if not r["readable"]]
+    if unreadable:
+        LOG.error("[ERROR] %d manifest(s) could not be read and are excluded from "
+                  "this run: %s", len(unreadable), ", ".join(unreadable))
+        LOG.error("        Re-download or remove them; do not rely on list "
+                  "numbers while this is true.")
 
     games_present = sorted({r["game"] for r in records if r["game"]})
     if not games_present:
@@ -1426,11 +1598,17 @@ def main():
     LOG.info("[SUMMARY] %d file(s) already present in this game's pools.", len(existing))
 
     direct_items, nexus_items, skipped_present, skipped_gamefile, unsupported = [], [], 0, 0, []
+    stale = []
     for a in record["archives"]:
-        low = a["name"].lower()
-        if low in existing:
+        hit, why = present_match(existing, a)
+        if hit:
             skipped_present += 1
             continue
+        if why.startswith("on disk"):
+            # Right name, wrong bytes. Previously this counted as present and
+            # was never fetched again; Wabbajack would then fail on it at
+            # install time with no clue why.
+            stale.append((a["name"], why))
         kind = state_type(a["state"])
         if kind == "gamefile":
             skipped_gamefile += 1
@@ -1454,6 +1632,13 @@ def main():
     LOG.info("To download:    %d  (%s)", len(direct_items) + len(nexus_items),
              ", ".join(f"{k}:{v}" for k, v in sorted(by_kind.items())) or "none")
     LOG.info("Already present:%d", skipped_present)
+    if stale:
+        LOG.warning("[WARN] %d file(s) are on disk under the right name but the "
+                    "wrong size, and will be re-downloaded:", len(stale))
+        for nm, why in stale[:20]:
+            LOG.warning("  ? %s (%s)", nm, why)
+        if len(stale) > 20:
+            LOG.warning("  ... and %d more", len(stale) - 20)
     LOG.info("From game files:%d (Wabbajack copies these from your install)", skipped_gamefile)
     if unsupported:
         LOG.warning("[WARN] %d archive(s) use a source this script can't fetch "

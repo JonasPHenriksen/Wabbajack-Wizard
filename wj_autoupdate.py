@@ -72,7 +72,7 @@ import subprocess
 import urllib.error
 import urllib.request
 import concurrent.futures
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ============================ CONFIGURATION ============================
 
@@ -127,6 +127,11 @@ MANIFEST_DIR = "modlists"
 #     EXCLUDE = ["LoreRim/LoreRim", "ForgottenGlory_@@_masterstroke"]
 EXCLUDE = []
 
+# Folders under the game root that belong to a different installer. Kept in
+# step with EXCLUDE_POOL_DIRS in the other two scripts; Nolvus has its own
+# installer and its archives must never be indexed, pooled, or moved.
+EXCLUDE_POOL_DIRS = {"nolvus"}
+
 # Optional pins, as "<repo>/<machineURL>". Only needed for a list that
 # auto-matching cannot resolve, which it will tell you about. Anything listed
 # here is followed regardless.
@@ -138,7 +143,7 @@ TRACK = []
 # Only one list can be staged per run: the sorter gathers everything that list
 # needs into its folder, so staging a second list would immediately undo the
 # first. Pick the list you actually install from.
-STAGE_LIST = None
+STAGE_LIST = "SkrubbySkrubInAShrub_@@_NordicSoulsPBR"
 
 # How to handle the Nexus archives.
 #   "skip"   -> do not touch Nexus at all. Wabbajack fetches them itself later.
@@ -148,12 +153,27 @@ STAGE_LIST = None
 #               needs a browser and a real console. Still one click per file:
 #               this is the same manual step Wabbajack would ask of you, just
 #               driven by your script instead.
-NEXUS_MODE = "skip"
+NEXUS_MODE = "assist"
 
-# Set to True only AFTER applying the one-line .part fix to the sorter (see
-# README). Until then, a leftover .part file from a failed download makes the
-# sorter unsafe to run unattended and this script will skip it.
-SORTER_IGNORES_PART = False
+# The sorter skips "*.part" when indexing (change 1 in its own docstring), so a
+# leftover part file from an interrupted download is left where it is and its
+# resume progress survives. This flag stays only as an escape hatch if you ever
+# swap in an older sorter that lacks that behaviour.
+SORTER_IGNORES_PART = True
+
+# How long to remember that a local .wabbajack matched no published list before
+# trying again. A negative result is never cached at all when any feed failed to
+# load during that run - otherwise one flaky request from GitHub silently drops
+# a modlist from tracking for good.
+NEGATIVE_MATCH_TTL_DAYS = 14
+
+# Superseded manifests are parked in manifest_backups. They are multi-GB each,
+# so keep them only long enough to be useful for a rollback.
+KEEP_BACKUP_DAYS = 14
+
+# Refuse to run when 'xxhash' is missing, rather than silently falling back to
+# comparing sizes. Same reasoning as the downloader's own REQUIRE_HASH.
+REQUIRE_HASH = True
 
 # Refuse to start a download batch that would leave less than this much free.
 FREE_SPACE_MARGIN_GB = 20
@@ -173,6 +193,7 @@ STATE_FILE   = "wj_autoupdate_state.json"
 LOCK_FILE    = ".wj_autoupdate.lock"
 # =======================================================================
 
+NEWLINE = chr(10)
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG = logging.getLogger("wj_autoupdate")
 
@@ -194,20 +215,45 @@ except Exception:
 # ----------------------------------------------------------------------
 # Logging
 # ----------------------------------------------------------------------
+_HANDLERS = []
+
+
 def setup_logging(verbose=False):
     LOG.setLevel(logging.DEBUG)
     con = logging.StreamHandler(sys.stdout)
     con.setLevel(logging.DEBUG if verbose else logging.INFO)
     con.setFormatter(logging.Formatter("%(message)s"))
     LOG.addHandler(con)
+    _HANDLERS.append(con)
     try:
         fh = logging.FileHandler(os.path.join(HERE, "wj_autoupdate.log"),
                                  encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
         LOG.addHandler(fh)
+        _HANDLERS.append(fh)
     except OSError as e:
         LOG.warning("[WARN] Could not open log file: %s", e)
+
+    # wabbajack_cdn logs to its own logger, which has no handler of its own.
+    # Without this its messages reach nothing but logging.lastResort on stderr,
+    # so the log file records "Manifest download failed" with no cause - the
+    # single most useful line (an HTTP 404 on the CDN definition, say) is the
+    # one that goes missing. Same treatment for the downloader in adopt_logger().
+    if CDN is not None:
+        adopt_logger(CDN.LOG)
+
+
+def adopt_logger(child):
+    """Route another module's logger into our handlers.
+
+    Keeps the child at INFO so its progress chatter does not drown the run, but
+    its warnings and errors land in wj_autoupdate.log where they belong."""
+    child.setLevel(logging.INFO)
+    child.propagate = False
+    for h in _HANDLERS:
+        if h not in child.handlers:
+            child.addHandler(h)
 
 
 def banner(title):
@@ -319,13 +365,60 @@ def load_downloader_module():
     except Exception as e:
         LOG.error("[TERMINATED] Could not import %s: %s", DOWNLOADER_SCRIPT, e)
         sys.exit(1)
-    # Keep its chatter out of our log except for real problems.
+    # Keep its chatter out of our log except for real problems, but make sure
+    # those problems actually reach the log file rather than vanishing into
+    # logging.lastResort on stderr.
+    adopt_logger(mod.LOG)
     mod.LOG.setLevel(logging.WARNING)
-    mod.LOG.addHandler(logging.NullHandler())
     return mod
 
 
 WJ = None  # populated in main()
+
+
+def check_script_consistency():
+    """The downloader and the sorter each carry their own copy of ARCHIVE_ROOT,
+    GAME_FOLDERS and EXCLUDE_POOL_DIRS.
+
+    They have to agree. The downloader decides where an archive is written; the
+    sorter decides where it is moved to. If the two disagree about the pool root
+    or about which folder a game maps to, every run quietly works across two
+    different directory trees: files get downloaded into one, sorted out of the
+    other, and each tool reports success. Cheap to check, miserable to debug."""
+    path = os.path.join(HERE, SORTER_SCRIPT)
+    if not os.path.isfile(path):
+        LOG.error("[TERMINATED] %s not found next to this script.", SORTER_SCRIPT)
+        return False
+    spec = importlib.util.spec_from_file_location("wj_sort_cfg", path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        LOG.error("[TERMINATED] Could not read the sorter's configuration: %s", e)
+        return False
+
+    ok = True
+    if os.path.normcase(str(mod.ARCHIVE_ROOT)) != os.path.normcase(str(WJ.ARCHIVE_ROOT)):
+        LOG.error("[TERMINATED] ARCHIVE_ROOT differs between the two scripts:")
+        LOG.error("    %-40s %s", DOWNLOADER_SCRIPT, WJ.ARCHIVE_ROOT)
+        LOG.error("    %-40s %s", SORTER_SCRIPT, mod.ARCHIVE_ROOT)
+        ok = False
+    if dict(mod.GAME_FOLDERS) != dict(WJ.GAME_FOLDERS):
+        LOG.error("[TERMINATED] GAME_FOLDERS differs between the two scripts, so "
+                  "they would use different pool folders for the same game.")
+        for g in sorted(set(mod.GAME_FOLDERS) | set(WJ.GAME_FOLDERS)):
+            a, b = WJ.GAME_FOLDERS.get(g), mod.GAME_FOLDERS.get(g)
+            if a != b:
+                LOG.error("    %-28s downloader=%-18s sorter=%s", g, a, b)
+        ok = False
+    a = set(getattr(WJ, "EXCLUDE_POOL_DIRS", ()) or ())
+    b = set(getattr(mod, "EXCLUDE_POOL_DIRS", ()) or ())
+    if a != b:
+        LOG.error("[TERMINATED] EXCLUDE_POOL_DIRS differs: downloader=%s sorter=%s. "
+                  "A folder excluded from one but not the other is worse than "
+                  "excluding it from neither.", sorted(a), sorted(b))
+        ok = False
+    return ok
 
 
 # ----------------------------------------------------------------------
@@ -474,16 +567,19 @@ def normalise(entry, repo):
 
 def load_feeds(repo_names=None):
     """Fetch repositories.json, then the named feeds (or all of them).
-    Returns {key: normalised_entry}."""
+    Returns ({key: normalised_entry}, complete) where `complete` is False if
+    any feed failed to load. A caller must not draw a negative conclusion - "no
+    published list matches this file" - from an incomplete picture, because one
+    flaky request would then untrack a modlist for good."""
     LOG.info("Fetching feed registry...")
     try:
         repos = http_json(REPOSITORIES_URL)
     except Exception as e:
         LOG.error("[ERROR] Could not read repositories.json: %s", e)
-        return {}
+        return {}, False
     if not isinstance(repos, dict):
         LOG.error("[ERROR] repositories.json was not an object.")
-        return {}
+        return {}, False
 
     wanted = {r: u for r, u in repos.items()
               if repo_names is None or r in repo_names}
@@ -494,6 +590,7 @@ def load_feeds(repo_names=None):
     LOG.info("Fetching %d feed(s)...", len(wanted))
 
     out = {}
+    failed = []
 
     def grab(item):
         repo, url = item
@@ -506,6 +603,7 @@ def load_feeds(repo_names=None):
         for repo, data, err in pool.map(grab, wanted.items()):
             if err is not None:
                 LOG.warning("[WARN] Feed '%s' unavailable: %s", repo, err)
+                failed.append(repo)
                 continue
             n = 0
             for raw in iter_entries(data):
@@ -515,21 +613,16 @@ def load_feeds(repo_names=None):
                     n += 1
             LOG.debug("  %-28s %d list(s)", repo, n)
     LOG.info("Indexed %d list(s) across %d feed(s).", len(out), len(wanted))
-    return out
+    if failed:
+        LOG.warning("[WARN] %d feed(s) could not be read this run (%s). The "
+                    "picture is incomplete, so nothing will be recorded as "
+                    "permanently unmatched.", len(failed), ", ".join(sorted(failed)))
+    return out, not failed
 
 
 # ----------------------------------------------------------------------
 # Local manifests and state
 # ----------------------------------------------------------------------
-def local_manifests():
-    """{filename: record} for every .wabbajack next to this script."""
-    out = {}
-    for f in sorted(os.listdir(MANIFESTS)):
-        if f.lower().endswith(".wabbajack"):
-            out[f] = WJ.parse_manifest(os.path.join(MANIFESTS, f))
-    return out
-
-
 def manifest_name(path):
     """The modlist's own Name field, for matching against feed titles."""
     import zipfile
@@ -567,6 +660,21 @@ def save_state(state):
         LOG.error("[ERROR] Could not write state file: %s", e)
 
 
+def manifest_filename_for(key, entry):
+    """What to call a manifest we do not already hold a copy of.
+
+    Follows the '<repo>_@@_<machineURL>.wabbajack' convention the rest of the
+    folder uses, so the new file lines up with its pool folder and resolves
+    straight back to the same feed key on the next run. Naming it after the
+    feed title instead would produce 'LoreRim.wabbajack' next to a
+    'LoreRim_@@_LoreRim' pool folder, and the two would drift apart."""
+    stem = key.replace("/", "_@@_")
+    cleaned = safe_filename(stem)
+    if cleaned[:-len(".wabbajack")] == stem:
+        return cleaned
+    return safe_filename(entry["title"])
+
+
 def safe_filename(title):
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")
     return (name or "modlist") + ".wabbajack"
@@ -582,13 +690,23 @@ def CDN_LOOKS_NEEDED(url):
         "wabbajack.org" in url or "b-cdn.net" in url)
 
 
-def verify_manifest(path, size, hash_b64):
+def verify_manifest(path, size, hash_b64, known_hash=None):
+    """Check a manifest against the feed's Size and Hash.
+
+    known_hash is the file's hash if something already computed it while
+    writing the file - the CDN downloader hashes every assembled file before
+    it renames it. Reusing that saves re-reading a multi-GB file off the share
+    for no new information."""
     try:
         actual = os.path.getsize(path)
     except OSError as e:
         return False, f"cannot stat ({e})"
     if size is not None and actual != size:
         return False, f"size {actual} != feed's {size}"
+    if hash_b64 and known_hash:
+        if known_hash != hash_b64:
+            return False, "hash mismatch"
+        return True, "ok (hashed while downloading)"
     if hash_b64 and getattr(WJ, "_HAVE_XXHASH", False):
         got = WJ.wabbajack_hash(path)
         if got and got != hash_b64:
@@ -601,9 +719,19 @@ def verify_manifest(path, size, hash_b64):
 
 
 def fetch_manifest(entry, filename):
-    """Download entry's .wabbajack into the manifest folder, atomically."""
+    """Fetch entry's .wabbajack and put it in place without ever leaving a gap.
+
+    The order matters. The old code moved your existing manifest aside FIRST
+    and downloaded second, so anything that stopped the process mid-transfer -
+    Ctrl+C, a dropped share, a reboot - left you with no manifest at all and
+    only a half-written .part file. A multi-GB list then had to be fetched
+    again from zero.
+
+    Here the new copy is downloaded to a staging name and fully verified before
+    anything touches the file you already have. Until the final rename, an
+    interruption costs you nothing but the partial download, which resumes."""
     dest = os.path.join(MANIFESTS, filename)
-    part = dest + ".part"
+    staging = dest + ".new"
     url = entry["download"]
     if not url:
         LOG.error("  [ERROR] '%s' has no download link in its feed.", entry["title"])
@@ -614,41 +742,89 @@ def fetch_manifest(entry, filename):
 
     # Nearly every published manifest lives on the Wabbajack CDN, which needs
     # the multi-part protocol rather than a plain GET.
+    cdn_hash = None
     if _HAVE_CDN and (CDN.is_cdn_url(url) or CDN.looks_multipart(url)):
-        ok = CDN.download(url, dest, expected_size=entry["size"],
-                          expected_hash=entry["hash"])
+        ok, cdn_hash = CDN.download(url, staging, expected_size=entry["size"],
+                                    expected_hash=entry["hash"], detail=True)
     else:
         if not _HAVE_CDN and CDN_LOOKS_NEEDED(url):
             LOG.error("  [ERROR] %s is a Wabbajack CDN URL but wabbajack_cdn.py "
                       "is missing from %s. Put it next to this script.",
                       filename, HERE)
             return False
-        ok = WJ.stream_download(WJ.sanitize_url(url), dest,
+        ok = WJ.stream_download(WJ.sanitize_url(url), staging,
                                 expected_size=entry["size"])
     if not ok:
-        LOG.error("  [ERROR] Manifest download failed for %s", filename)
+        LOG.error("  [ERROR] Manifest download failed for %s "
+                  "(your existing copy is untouched)", filename)
         return False
 
-    ok, why = verify_manifest(dest, entry["size"], entry["hash"])
+    ok, why = verify_manifest(staging, entry["size"], entry["hash"],
+                              known_hash=cdn_hash)
     if not ok:
         LOG.error("  [ERROR] %s failed verification: %s - discarding.", filename, why)
-        quarantine = os.path.join(BACKUPS, os.path.basename(dest) + ".rejected")
+        quarantine = os.path.join(BACKUPS, filename + ".rejected")
         try:
-            os.replace(dest, quarantine)
+            if os.path.exists(quarantine):
+                os.remove(quarantine)
+            os.replace(staging, quarantine)
             LOG.error("  Rejected copy kept at %s for inspection.",
                       os.path.basename(quarantine))
         except OSError:
-            pass
+            try:
+                os.remove(staging)
+            except OSError:
+                pass
         return False
 
     LOG.info("  Verified: %s", why)
-    for stray in (part,):
-        if os.path.exists(stray):
+
+    # Only now is the existing manifest touched. Both steps are renames on the
+    # same volume, so the window where neither file is in place is as close to
+    # zero as the filesystem allows.
+    backup_existing(filename)
+    try:
+        os.replace(staging, dest)
+    except OSError as e:
+        LOG.error("  [ERROR] Could not put %s in place: %s", filename, e)
+        bak = os.path.join(BACKUPS, filename + ".bak")
+        if os.path.isfile(bak):
             try:
-                os.remove(stray)
+                os.replace(bak, dest)
+                LOG.info("  Restored the previous manifest.")
             except OSError:
                 pass
+        return False
     return True
+
+
+def prune_backups():
+    """Drop superseded manifests once they are too old to be a useful rollback.
+
+    These are whole modlist manifests - several GB each - so keeping one per
+    list forever quietly eats more space than the archives some lists need."""
+    if BACKUPS == MANIFESTS:
+        return
+    cutoff = time.time() - KEEP_BACKUP_DAYS * 86400
+    freed = 0
+    try:
+        names = os.listdir(BACKUPS)
+    except OSError:
+        return
+    for n in names:
+        if not n.lower().endswith((".bak", ".rejected")):
+            continue
+        p = os.path.join(BACKUPS, n)
+        try:
+            if os.path.getmtime(p) >= cutoff:
+                continue
+            size = os.path.getsize(p)
+            os.remove(p)
+            freed += size
+        except OSError:
+            continue
+    if freed:
+        LOG.info("Pruned old manifest backups, freeing %s.", WJ.human_bytes(freed))
 
 
 def backup_existing(filename):
@@ -675,7 +851,10 @@ def plan_for(record):
     existing = WJ.index_existing(game_base)
     direct, nexus, other, present = [], [], [], 0
     for a in record["archives"]:
-        if a["name"].lower() in existing:
+        # present_match compares the manifest's Size, not just the filename: a
+        # truncated or wrong-version file with the right name used to count as
+        # done forever and only surface when Wabbajack hash-checked it.
+        if WJ.present_match(existing, a)[0]:
             present += 1
             continue
         kind = WJ.state_type(a["state"])
@@ -754,22 +933,9 @@ def write_nexus_todo(record, nexus_items):
 # ----------------------------------------------------------------------
 # Driving the two existing scripts
 # ----------------------------------------------------------------------
-def list_number(game, name):
-    """Reproduce the menu number both scripts assign to a list.
-
-    Both build their menu from sorted(*.wabbajack) filtered to the chosen
-    game, numbered from 1, and both derive the display name from the filename
-    stem. Computing it here means neither script needs modifying."""
-    files = sorted(f for f in os.listdir(MANIFESTS) if f.lower().endswith(".wabbajack"))
-    in_scope = []
-    for f in files:
-        rec = WJ.parse_manifest(os.path.join(MANIFESTS, f))
-        if rec["game"] == game:
-            in_scope.append(os.path.splitext(f)[0])
-    for i, nm in enumerate(in_scope, 1):
-        if nm == name:
-            return str(i)
-    return None
+def child_flags(args):
+    """Flags that must reach the child scripts so they behave like the parent."""
+    return ["--allow-size-only"] if args.allow_size_only else []
 
 
 def run_script(script, args, label, interactive=False):
@@ -787,7 +953,8 @@ def run_script(script, args, label, interactive=False):
     LOG.info("\n$ %s", " ".join(cmd))
     # The child scripts default to scanning their own folder for manifests;
     # this tells them to look where we actually keep them.
-    env = dict(os.environ, PYTHONUNBUFFERED="1", WJ_MANIFEST_DIR=MANIFESTS)
+    env = dict(os.environ, PYTHONUNBUFFERED="1", WJ_MANIFEST_DIR=MANIFESTS,
+               WJ_LOCK_HELD="1")
     cap = os.path.join(HERE, f"wj_autoupdate_{label}.out")
     try:
         if interactive:
@@ -817,32 +984,22 @@ def run_script(script, args, label, interactive=False):
 # ----------------------------------------------------------------------
 def cmd_discover():
     banner("DISCOVER: MATCHING LOCAL MANIFESTS TO FEEDS")
-    feeds = load_feeds(None)
+    feeds, _complete = load_feeds(None)
     if not feeds:
         return 1
+    idx = index_feeds(feeds)
 
-    by_machine, by_title = {}, {}
-    for k, e in feeds.items():
-        by_machine.setdefault(e["machine"].lower(), []).append(e)
-        by_title.setdefault(e["title"].strip().lower(), []).append(e)
-
-    files = [f for f in sorted(os.listdir(MANIFESTS)) if f.lower().endswith(".wabbajack")]
+    files = WJ.list_manifest_files(MANIFESTS)
     if not files:
         LOG.warning("No .wabbajack files found in %s", MANIFESTS)
 
     matched, unmatched = [], []
     for f in files:
-        stem = os.path.splitext(f)[0]
-        inner = manifest_name(os.path.join(MANIFESTS, f))
-        cands = []
-        for probe in filter(None, (inner, stem)):
-            cands += by_title.get(probe.strip().lower(), [])
-            cands += by_machine.get(probe.strip().lower(), [])
-        seen, uniq = set(), []
-        for c in cands:
-            if c["key"] not in seen:
-                seen.add(c["key"])
-                uniq.append(c)
+        uniq = match_candidates(idx, f, None)
+        inner = None
+        if not uniq:
+            inner = manifest_name(os.path.join(MANIFESTS, f))
+            uniq = match_candidates(idx, f, inner)
         if uniq:
             matched.append((f, inner, uniq))
         else:
@@ -875,25 +1032,84 @@ def cmd_discover():
 # Working out which published list each local .wabbajack corresponds to
 # ----------------------------------------------------------------------
 def index_feeds(feeds):
-    by_machine, by_title = {}, {}
+    """Lookup tables for matching a local file to a published list."""
+    idx = {"machine": {}, "title": {}, "key": {}}
     for e in feeds.values():
-        by_machine.setdefault(e["machine"].lower(), []).append(e)
-        by_title.setdefault(e["title"].strip().lower(), []).append(e)
-    return by_machine, by_title
+        idx["machine"].setdefault(e["machine"].lower(), []).append(e)
+        idx["title"].setdefault(e["title"].strip().lower(), []).append(e)
+        idx["key"][e["key"].lower()] = e
+    return idx
 
 
-def match_candidates(by_machine, by_title, filename, inner_name):
-    """Feed entries whose title or machineURL matches this file's name or the
-    Name recorded inside its manifest."""
+def feed_key_from_filename(filename):
+    """The published feed key a '<repo>_@@_<machineURL>.wabbajack' file names.
+
+    This is the convention Wabbajack's own downloads follow, and it is exact:
+    the stem IS the feed key with '/' written as '_@@_'. Matching on it first
+    means the common case resolves with no guessing at all - no full feed scan,
+    no reliance on a title that the author may have since renamed, and no
+    ambiguity between two lists that happen to share a display name."""
     stem = os.path.splitext(filename)[0]
+    repo, sep, machine = stem.partition("_@@_")
+    if not sep or not repo or not machine:
+        return None
+    return "%s/%s" % (repo, machine)
+
+
+def match_candidates(idx, filename, inner_name):
+    """Feed entries that could be this local file.
+
+    Tried in order of how much we trust them:
+      1. the feed key encoded in the filename  (exact, unambiguous)
+      2. the Name recorded inside the manifest (against titles and machineURLs)
+      3. the filename stem                     (same)
+    """
     cands, seen = [], set()
+
+    def add(c):
+        if c and c["key"] not in seen:
+            seen.add(c["key"])
+            cands.append(c)
+
+    key = feed_key_from_filename(filename)
+    if key:
+        add(idx["key"].get(key.lower()))
+    if cands:
+        return cands
+
+    stem = os.path.splitext(filename)[0]
     for probe in filter(None, (inner_name, stem)):
         p = probe.strip().lower()
-        for c in by_title.get(p, []) + by_machine.get(p, []):
-            if c["key"] not in seen:
-                seen.add(c["key"])
-                cands.append(c)
+        for c in idx["title"].get(p, []) + idx["machine"].get(p, []):
+            add(c)
     return cands
+
+
+def negative_expired(entry):
+    """Should a remembered "matches nothing" be retried?
+
+    A bare "" is the old format, written before negatives had an expiry and
+    written even when a feed had failed to load. Those are never trustworthy,
+    so they are always retried."""
+    if entry == "":
+        return True
+    if isinstance(entry, dict):
+        try:
+            return datetime.now(timezone.utc) >= datetime.fromisoformat(
+                entry.get("retry_after"))
+        except (TypeError, ValueError):
+            return True
+    return True
+
+
+def remember_no_match(cache, filename, feeds_complete):
+    """Cache a no-match, but only when we actually saw every feed."""
+    if not feeds_complete:
+        LOG.warning("      Not recording this as unmatched: at least one feed "
+                    "failed to load, so it may simply not have been visible.")
+        return
+    until = datetime.now(timezone.utc) + timedelta(days=NEGATIVE_MATCH_TTL_DAYS)
+    cache[filename.lower()] = {"retry_after": until.isoformat(timespec="seconds")}
 
 
 def disambiguate(cands, path, local_game):
@@ -916,7 +1132,7 @@ def resolve_tracking(state, rediscover=False):
     all-feeds scan runs only when something new shows up. An empty string in
     the cache is a remembered "no match", which stops a private or renamed
     list from triggering a full scan on every single run."""
-    files = [f for f in sorted(os.listdir(MANIFESTS)) if f.lower().endswith(".wabbajack")]
+    files = WJ.list_manifest_files(MANIFESTS)
     cache = state.setdefault("map", {})
     if rediscover:
         LOG.info("--rediscover: clearing the cached list mapping.")
@@ -925,40 +1141,53 @@ def resolve_tracking(state, rediscover=False):
     tracked, unresolved = {}, []
     for f in files:
         cached = cache.get(f.lower())
-        if cached:
+        if isinstance(cached, str) and cached:
             tracked[cached] = f
-        elif cached == "":
-            LOG.debug("  %s previously matched nothing; skipping.", f)
-        else:
+        elif cached is None:
             unresolved.append(f)
+        elif negative_expired(cached):
+            LOG.info("  %s was recorded as unmatched; retrying it.", f)
+            unresolved.append(f)
+        else:
+            LOG.debug("  %s matched nothing recently; skipping until %s.",
+                      f, cached.get("retry_after"))
 
     if unresolved and not AUTO_TRACK:
         LOG.warning("[WARN] AUTO_TRACK is off and %d file(s) are unpinned: %s",
                     len(unresolved), ", ".join(unresolved))
     elif unresolved:
-        LOG.info("Resolving %d new manifest(s) against the published feeds. This "
-                 "pulls every feed once and takes a moment.", len(unresolved))
-        by_machine, by_title = index_feeds(load_feeds(None))
+        LOG.info("Resolving %d manifest(s) against the published feeds.",
+                 len(unresolved))
+        feeds, complete = load_feeds(None)
+        idx = index_feeds(feeds)
         for f in unresolved:
             path = os.path.join(MANIFESTS, f)
-            rec = WJ.parse_manifest(path)
-            cands = match_candidates(by_machine, by_title, f, manifest_name(path))
+
+            # Cheap probes first: the feed key encoded in the filename, then
+            # the stem. Only if both miss do we crack the manifest open to read
+            # its own Name, which on a 4 GB list means pulling the whole
+            # modlist member across the share.
+            cands = match_candidates(idx, f, None)
+            if not cands:
+                cands = match_candidates(idx, f, manifest_name(path))
+
             if not cands:
                 LOG.warning("[WARN] %s matches no published list, so it will be "
                             "left alone. Usually means private, renamed, or from "
                             "a repo outside repositories.json.", f)
-                cache[f.lower()] = ""
+                remember_no_match(cache, f, complete)
                 continue
             if len(cands) == 1:
                 pick, why = cands[0], "unique match"
             else:
+                rec = WJ.parse_manifest(path)
                 pick, why = disambiguate(cands, path, rec.get("game"))
             if pick is None:
                 LOG.warning("[WARN] %s matches %d published lists and they could "
                             "not be told apart. Add the right one to TRACK by "
                             "hand: %s", f, len(cands),
                             ", ".join(c["key"] for c in cands))
-                cache[f.lower()] = ""
+                remember_no_match(cache, f, complete)
                 continue
             LOG.info("[TRACK] %s  ->  %s  (%s)", f, pick["key"], why)
             cache[f.lower()] = pick["key"]
@@ -998,7 +1227,7 @@ def pending_updates(state, tracked):
                   "%s, or pin entries in TRACK.", MANIFESTS)
         return None, None, None
     repos = {k.split("/", 1)[0] for k in tracked}
-    feeds = load_feeds(repos)
+    feeds, _complete = load_feeds(repos)
     if not feeds:
         return None, None, None
 
@@ -1010,7 +1239,8 @@ def pending_updates(state, tracked):
             LOG.warning("[WARN] Tracked list '%s' not present in its feed.", key)
             continue
         prev = known.get(key, {})
-        filename = local_file or prev.get("file") or safe_filename(ent["title"])
+        filename = (local_file or prev.get("file")
+                    or manifest_filename_for(key, ent))
         path = os.path.join(MANIFESTS, filename)
         on_disk = os.path.isfile(path)
 
@@ -1081,6 +1311,30 @@ def cmd_run(args, state, tracked):
     if seen is None:
         return 1
 
+    only_stem = None
+    if args.only:
+        # Restrict the archive work to one list. Without this, a run downloads
+        # archives for every list whose manifest moved - which in assist mode
+        # means clicking through thousands of Nexus files across lists you were
+        # not planning to install. Unlike --force this does not re-fetch a
+        # manifest that is already current.
+        want = args.only.strip().lower()
+        sel = [(k, e, p, f) for k, e, p, f, _c, _d in seen
+               if want in (k.lower(), os.path.splitext(f)[0].lower())]
+        if not sel:
+            LOG.error("[ERROR] --only '%s' matched no tracked list. Tracked: %s",
+                      args.only, ", ".join(sorted(os.path.splitext(f)[0]
+                                                  for _k, _e, _p, f, _c, _d in seen)))
+            return 2
+        keys = {k for k, _e, _p, _f in sel}
+        pending = [p_ for p_ in pending if p_[0] in keys]
+        resume = [r for r in resume if r[0] in keys]
+        if not pending and not resume:
+            # Manifest already current: still process its archives.
+            resume = sel
+        only_stem = os.path.splitext(sel[0][3])[0]
+        LOG.info("--only: this run is limited to %s.", ", ".join(sorted(keys)))
+
     if not pending and not resume and not args.force:
         LOG.info("\n[DONE] All %d tracked list(s) are current. Nothing to do.",
                  len(seen))
@@ -1094,6 +1348,20 @@ def cmd_run(args, state, tracked):
             return 2
         LOG.info("--force: reprocessing %s regardless of version.",
                  pending[0][0])
+
+    failures = []
+
+    # Manifests are not small - a big list's .wabbajack runs to several GB, and
+    # a run can queue a dozen of them. Step 2 checked free space before
+    # downloading archives; step 1 checked nothing at all and would happily
+    # fill the volume.
+    if pending and not args.dry_run:
+        need = sum(e["size"] or 0 for _k, e, _p, _f in pending)
+        if need and not free_space_ok(MANIFESTS, need):
+            LOG.error("[TERMINATED] Not enough room for the manifests this run "
+                      "would fetch. Free some space, or narrow the run with "
+                      "--force <list>.")
+            return 2
 
     banner(f"STEP 1: FETCHING {len(pending)} UPDATED MANIFEST(S)")
     if not pending:
@@ -1112,18 +1380,12 @@ def cmd_run(args, state, tracked):
         if args.dry_run:
             LOG.info("  [DRY-RUN] would fetch %s", filename)
             continue
-        backup_existing(filename)
+        # fetch_manifest only disturbs the existing file once the replacement
+        # is downloaded and verified, so there is nothing to roll back here.
         if fetch_manifest(ent, filename):
             updated.append((key, ent, filename))
         else:
-            # Roll the old manifest back so the pools stay consistent.
-            bak = os.path.join(BACKUPS, filename + ".bak")
-            if os.path.isfile(bak):
-                try:
-                    os.replace(bak, os.path.join(MANIFESTS, filename))
-                    LOG.info("  Restored the previous manifest.")
-                except OSError:
-                    pass
+            failures.append("%s: manifest download failed" % filename)
 
     work = updated + [c for c in carried
                       if c[0] not in {k for k, _e, _f in updated}]
@@ -1166,23 +1428,25 @@ def cmd_run(args, state, tracked):
                 summary.append(f"{record['name']}: SKIPPED, low disk space")
                 complete[key] = False
                 continue
-            num = list_number(record["game"], record["name"])
-            if num is None:
-                LOG.error("  [ERROR] Could not resolve a menu number for %s.",
-                          record["name"])
-                summary.append(f"{record['name']}: could not resolve list number")
-                complete[key] = False
-                continue
             assist = (NEXUS_MODE == "assist")
             mode_flag = ["--nxm-assist"] if assist else ["--skip-nexus"]
+            # By name, never by menu number: the number is only the list's
+            # position in a menu built from whichever manifests happened to
+            # parse, so one unreadable file used to shift it and send the whole
+            # download at a different modlist.
             rc = run_script(DOWNLOADER_SCRIPT,
-                            ["--game", record["game"], "--list", num,
-                             "--yes"] + mode_flag
+                            ["--game", record["game"], "--list", record["name"],
+                             "--yes"] + mode_flag + child_flags(args)
                             + (["-v"] if args.verbose else []),
                             "downloader", interactive=assist)
             # rc 1 means some individual files failed, not that the run aborted.
             if rc not in (0, 1):
                 summary.append(f"{record['name']}: downloader exited {rc}")
+            # The child just wrote into the pools, so the cached index of what
+            # is on disk is stale. Everything else the parent does is read-only,
+            # which is what makes caching the scan safe at all: over SMB it walks
+            # thousands of files, and it used to run twice per list.
+            WJ.invalidate_existing_cache()
             # Re-plan: anything still missing that we could have fetched means
             # the job is unfinished and must be retried on the next run.
             after = plan_for(record)
@@ -1205,36 +1469,58 @@ def cmd_run(args, state, tracked):
     # ---- Sort ---------------------------------------------------------
     if not args.no_sort and not args.dry_run and staged_candidates:
         banner("STEP 3: SORTING POOLS")
-        target = STAGE_LIST
+        # --only names the list this run is about, so it also decides what gets
+        # staged. Lists span several games here, and each game has its own
+        # pools: downloading one list's archives and then gathering a different
+        # list - possibly for a different game entirely - is never the intent.
+        target = only_stem or STAGE_LIST
+        rec = None
         if target is None:
-            target = staged_candidates[-1][0]["name"]
-            LOG.info("STAGE_LIST is unset; staging the most recently updated list.")
-        rec = next((r for r, _ in staged_candidates if r["name"] == target), None)
-        if rec is None:
             rec = staged_candidates[-1][0]
-            LOG.warning("[WARN] STAGE_LIST '%s' was not updated this run; "
-                        "staging '%s' instead.", target, rec["name"])
             target = rec["name"]
-
-        parts = find_part_files(rec and WJ.resolve_game_dirs(rec["game"])[0])
-        if parts and not SORTER_IGNORES_PART:
-            LOG.error("[SKIPPED] %d leftover .part file(s) are in the pools. The "
-                      "sorter does not skip .part files, so it would park them in "
-                      "Master and destroy your resume progress. Apply the one-line "
-                      ".part fix from the README and set SORTER_IGNORES_PART = True, "
-                      "or remove these by hand:", len(parts))
-            for p_ in parts[:10]:
-                LOG.error("  ? %s", p_)
-            summary.append(f"sorter skipped: {len(parts)} .part file(s) present")
+            LOG.info("STAGE_LIST is unset; staging the most recently updated list.")
         else:
-            num = list_number(rec["game"], target)
-            if num is None:
-                LOG.error("[ERROR] Could not resolve a menu number for '%s'.", target)
+            rec = next((r for r, _ in staged_candidates if r["name"] == target), None)
+            if rec is None:
+                # A pinned list that did not happen to update this run must
+                # STILL be the one staged. Staging something else gathers a
+                # different list's archives into a different folder and undoes
+                # the preparation for the list you actually install - which is
+                # the entire reason for pinning one.
+                pinned = os.path.join(MANIFESTS, target + ".wabbajack")
+                if os.path.isfile(pinned):
+                    rec = WJ.parse_manifest(pinned)
+                    rec["name"] = target
+                    LOG.info("STAGE_LIST '%s' did not update this run; staging "
+                             "it anyway, as pinned.", target)
+                else:
+                    LOG.error("[ERROR] STAGE_LIST '%s' has no manifest in %s. "
+                              "Skipping the sort rather than staging some other "
+                              "list.", target, MANIFESTS)
+                    failures.append(f"STAGE_LIST '{target}' not found")
+
+        if rec is None or not rec.get("game"):
+            LOG.warning("[SKIPPED] Nothing safe to stage this run.")
+        else:
+            parts = find_part_files(WJ.resolve_game_dirs(rec["game"])[0])
+            if parts and not SORTER_IGNORES_PART:
+                LOG.error("[SKIPPED] %d leftover .part file(s) are in the pools "
+                          "and this sorter is configured as not skipping them:",
+                          len(parts))
+                for p_ in parts[:10]:
+                    LOG.error("  ? %s", p_)
+                summary.append(f"sorter skipped: {len(parts)} .part file(s) present")
             else:
+                if parts:
+                    LOG.info("%d .part file(s) in the pools; the sorter leaves "
+                             "them alone and their resume progress is safe.",
+                             len(parts))
                 rc = run_script(SORTER_SCRIPT,
-                                ["--game", rec["game"], "--list", num, "--yes"]
+                                ["--game", rec["game"], "--list", target, "--yes"]
                                 + (["-v"] if args.verbose else []),
                                 "sorter")
+                if rc != 0:
+                    failures.append(f"sorter exited {rc}")
                 summary.append(f"sorter staged '{target}' (exit {rc})")
 
     # ---- Record state and report --------------------------------------
@@ -1252,17 +1538,30 @@ def cmd_run(args, state, tracked):
             }
         save_state(state)
 
+    prune_backups()
+
     banner("RUN COMPLETE")
     for line in summary:
         LOG.info("-> %s", line)
+    if failures:
+        LOG.error("")
+        LOG.error("%d problem(s) this run:", len(failures))
+        for f_ in failures:
+            LOG.error("  ! %s", f_)
     LOG.info("")
-    notify(f"Wabbajack: {len(work)} list(s) processed", "\n".join(summary) or "no detail")
-    return 0
+
+    body = summary + ((["", "PROBLEMS:"] + failures) if failures else [])
+    notify("Wabbajack: %d list(s) processed%s"
+           % (len(work), " (%d problem(s))" % len(failures) if failures else ""),
+           NEWLINE.join(body) or "no detail")
+    # A scheduler has to be able to tell "clean" from "finished, but something
+    # failed" - every path that reached here used to return 0 regardless.
+    return 1 if failures else 0
 
 
 # ----------------------------------------------------------------------
 def main():
-    global WJ
+    global WJ, NEXUS_MODE
     ap = argparse.ArgumentParser(
         description="Watch Wabbajack modlists for updates and drive the "
                     "downloader and sorter unattended.")
@@ -1272,6 +1571,11 @@ def main():
                          "informational; tracking is automatic.")
     ap.add_argument("--check", action="store_true",
                     help="Report which tracked lists have updates. Changes nothing.")
+    ap.add_argument("--only", metavar="LIST",
+                    help="Do the archive work for just this list (by TRACK key "
+                         "or filename stem), leaving other updated lists' "
+                         "manifests alone. Use this for a Nexus click session: "
+                         "without it a run walks every updated list in turn.")
     ap.add_argument("--force", metavar="LIST",
                     help="Reprocess one list (by TRACK key or filename stem) even "
                          "if its version has not moved.")
@@ -1288,22 +1592,40 @@ def main():
     ap.add_argument("--no-lock", action="store_true",
                     help="Skip the single-instance lock. Use if a stale lock on "
                          "a network share is blocking you.")
+    ap.add_argument("--nexus-mode", choices=("skip", "assist"),
+                    help="Override NEXUS_MODE for this run. 'assist' opens each "
+                         "Nexus page and waits for your click (needs you at the "
+                         "keyboard); 'skip' leaves Nexus files to Wabbajack and "
+                         "is the only mode that works unattended.")
+    ap.add_argument("--allow-size-only", action="store_true",
+                    help="Proceed without xxhash, checking sizes only.")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
     setup_logging(args.verbose)
     WJ = load_downloader_module()
+    if args.nexus_mode:
+        NEXUS_MODE = args.nexus_mode
 
     LOG.info("Wabbajack auto-updater  %s",
              datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if not check_script_consistency():
+        return 2
     if not resolve_dirs():
         return 1
     LOG.info("Script dir:     %s", HERE)
     LOG.info("Manifest dir:   %s", MANIFESTS)
     LOG.info("Archive root:   %s", WJ.ARCHIVE_ROOT)
+    have_hash = bool(getattr(WJ, "_HAVE_XXHASH", False))
     LOG.info("Hash verify:    %s",
-             "xxHash64" if getattr(WJ, "_HAVE_XXHASH", False)
-             else "size only (install python3-xxhash)")
+             "xxHash64" if have_hash else "size only (install python3-xxhash)")
+    if not have_hash and REQUIRE_HASH and not args.allow_size_only:
+        LOG.error("[TERMINATED] 'xxhash' is not importable by this interpreter "
+                  "(%s), so manifests and archives could only be checked by "
+                  "size.", sys.executable)
+        LOG.error("             Run setup_env.bat and launch through run.bat, or "
+                  "pass --allow-size-only to accept size-only checks.")
+        return 2
 
     LOG.info("Nexus mode:     %s", NEXUS_MODE)
     if not os.path.isdir(WJ.ARCHIVE_ROOT):
@@ -1325,22 +1647,38 @@ def main():
     if not args.no_lock:
         lock_fd = acquire_lock(os.path.join(HERE, LOCK_FILE))
         if lock_fd is HELD:
-            LOG.info("[SKIPPED] Another run holds the lock. Exiting cleanly. "
-                     "(If nothing else is running, use --no-lock.)")
-            return 0
+            LOG.info("[SKIPPED] Another run holds the lock. Exiting without "
+                     "doing anything. (If nothing else is running, use "
+                     "--no-lock.)")
+            # Exit 3, not 0: "did nothing because something else was running"
+            # is not the same as "ran and everything was current", and a
+            # scheduler that cannot tell them apart reports a healthy run
+            # forever while nothing actually happens.
+            return 3
         if lock_fd is UNAVAILABLE:
             LOG.warning("[WARN] Could not lock on this filesystem; continuing "
                         "without one. Do not start a second run by hand.")
             lock_fd = None
 
+    rc = 2
     try:
         state = load_state()
         tracked = resolve_tracking(state, rediscover=args.rediscover)
-        if args.check:
-            return cmd_check(state, tracked)
-        return cmd_run(args, state, tracked)
+        rc = cmd_check(state, tracked) if args.check else cmd_run(args, state, tracked)
+        return rc
+    except Exception:
+        LOG.exception("[TERMINATED] Unhandled error; see the traceback above.")
+        rc = 4
+        return rc
     finally:
         release_lock(lock_fd)
+        # cmd_run reports its own outcome, including partial failures. This
+        # covers the paths that never got that far - a dead feed, no space, an
+        # unhandled error - which previously notified nothing at all, which is
+        # exactly backwards for a run you are not watching.
+        if rc >= 2 and not args.check and not args.dry_run:
+            notify("Wabbajack updater failed (exit %d)" % rc,
+                   "The run stopped early. See wj_autoupdate.log on the share.")
 
 
 if __name__ == "__main__":

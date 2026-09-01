@@ -264,7 +264,7 @@ def _drop_sidecar(dest):
 
 
 def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
-             expected_size=None, expected_hash=None):
+             expected_size=None, expected_hash=None, detail=False):
     """Fetch a Wabbajack CDN multi-part file to `dest`.
 
     Returns True on success. Writes to `dest + ".part"` and renames on
@@ -292,22 +292,35 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
         os.makedirs(parent, exist_ok=True)
 
     done = _load_sidecar(dest, base, total_size)
-    # The sidecar is only trustworthy if the .part file is still the right size.
+    # The sidecar is trustworthy only if the .part file actually reaches past
+    # the parts it claims. The file is no longer pre-sized (see below), so it
+    # grows as parts land and is exactly total_size only once complete.
     if done:
         try:
-            if os.path.getsize(part_file) != (total_size or 0):
+            need = max((_field(p, "Offset", default=0) or 0)
+                       + (_field(p, "Size", default=0) or 0)
+                       for p in parts if _field(p, "Index") in done)
+            have = os.path.getsize(part_file)
+            if have < need or (total_size and have > total_size):
                 done = set()
-        except OSError:
+        except (OSError, ValueError):
             done = set()
     if done:
         LOG.info("  Resuming: %d of %d part(s) already fetched.", len(done), n_parts)
 
-    # Pre-size the file so parts can be written at their offsets in any order.
+    # Deliberately NOT pre-sized. truncate() to the final length looks free on
+    # a local disk, but on an SMB share it is a synchronous zero-fill: measured
+    # here at ~17.5 MB/s, so a 4.7 GB manifest spent about four and a half
+    # minutes allocating before a single byte was downloaded - over half its
+    # total time, and a cost proportional to size, which is why every download
+    # appeared to plateau at the same ~9 MB/s regardless of how big it was.
+    #
+    # Writing at an absolute offset past EOF extends the file anyway, and the
+    # CDN returns parts close to in order, so writes stay near the end and the
+    # filesystem never has a large gap to zero.
     try:
         mode = "r+b" if (done and os.path.exists(part_file)) else "wb"
         fh = open(part_file, mode)
-        if mode == "wb" and total_size:
-            fh.truncate(total_size)
     except OSError as e:
         LOG.error("  [ERROR] Cannot open %s for writing: %s", part_file, e)
         return False
@@ -362,9 +375,21 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
         LOG.error("  [ERROR] Only %d of %d part(s) completed.", len(done), n_parts)
         return False
 
+    # Every part is written, so the highest offset+size is the file length and
+    # this should already hold. Guard anyway: a definition whose parts do not
+    # tile the whole file would otherwise leave a short file to be hashed.
+    try:
+        if total_size and os.path.getsize(part_file) != total_size:
+            with open(part_file, "r+b") as fx:
+                fx.truncate(total_size)
+    except OSError:
+        pass
+
     # Whole-file check before publishing it under the real name.
+    verified = None
     if total_hash and _HAVE_XXHASH:
         got = hash_file(part_file)
+        verified = got
         if got != total_hash:
             LOG.error("  [ERROR] Assembled file hash %s != definition %s. "
                       "Discarding and clearing resume state.", got, total_hash)
@@ -384,4 +409,8 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
         return False
 
     _drop_sidecar(dest)
-    return True
+    # detail=True hands back the hash we just computed, so a caller that also
+    # wants to verify does not have to read the whole file off the share a
+    # second time. On a 5 GB manifest over SMB that second pass costs about a
+    # minute and cannot discover anything the first one missed.
+    return (True, verified) if detail else True
