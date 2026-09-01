@@ -99,31 +99,34 @@ means the two work on different trees while both report success.
 ## Nexus accounts
 
 Nexus only mints automated download links for Premium accounts. On a free
-account the website mints one per click, and assist mode captures those: it
-registers itself as the `nxm://` handler, and each *Mod manager download* click
-you make becomes a file it fetches and verifies. The handler is always handed
-back on exit, including Ctrl+C.
+account the website mints one per click, which assist mode captures: it
+registers itself as the `nxm://` handler, opens each mod's download page in
+turn, and waits for you to click *Mod manager download*. One tab per file, in
+your normal browser. The handler is always handed back on exit, including
+Ctrl+C — without that, Wabbajack's own downloads keep landing here instead.
 
-Two ways of presenting the list, set by `ASSIST_BROWSER`:
+The page URL is confirmed against the API rather than taken from the manifest.
+Manifests disagree with themselves: this collection records `skyrimse` in a
+file's `Meta gameName` and `SkyrimSpecialEdition` in its `State.GameName`, and
+only the second is a slug the website serves. Trusting the manifest opened
+every page on "mod could not be found".
 
-- **`page`** (default) - opens one local control page in your normal browser
-  listing every outstanding file. Each entry is an ordinary link aimed at a
-  single *named* tab, so the whole session costs two tabs however long the
-  list is: the control page and one Nexus tab that gets reused. Progress
-  updates live, `Enter` opens the next one, and clicks are accepted in any
-  order you like.
-- **`default`** - opens each download page directly, one new tab per file.
+### Do not try to automate the browser
 
-### Why the browser is not automated
+Two attempts were made to keep these pages out of your way, and both are worth
+recording so they are not repeated:
 
-An earlier version drove a dedicated Firefox over Marionette to keep the pages
-out of the way. That cannot work, and the reason is worth recording: an
-automated Firefox reports `navigator.webdriver`, Nexus's bot protection
-challenges it, and the challenge then cannot be passed at all - not even by
-solving it by hand. Working around bot detection is not something this tool
-should do, so it does not try. Your own browser and your own session are the
-only sensible path, and the tab problem is a presentation problem, which is
-what the control page solves.
+- Closing each tab with a Ctrl+W keystroke once its click was captured. This
+  cannot work reliably: at the moment the click lands, Firefox has raised its
+  own "launch application?" dialog for the `nxm://` handoff, so the focused
+  window is that dialog rather than the page.
+- Driving a dedicated Firefox over Marionette. This cannot work at all. An
+  automated Firefox reports `navigator.webdriver`, Nexus's bot protection
+  challenges it, and the challenge then fails even when solved by hand.
+  Working around bot detection is not something this tool should do.
+
+Stacked tabs are the accepted cost of using your own browser and your own
+session, which is the only thing that actually works.
 
 An API key is required either way — it is what redeems the key from each click.
 Put it in `nexus_api_key.txt` (gitignored) or `NEXUS_API_KEY`.

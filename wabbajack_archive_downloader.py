@@ -88,9 +88,6 @@ import zipfile
 import logging
 import argparse
 import platform
-import subprocess
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import http.client
 import webbrowser
 import urllib.error
@@ -213,31 +210,6 @@ NXM_PREV_HANDLER  = ".nxm_prev_handler"    # saved previous nxm:// command
 NXM_FALLBACK_FILE = "nxm_captured.txt"     # forwarder appends here if no listener
 NXM_CLICK_TIMEOUT = 180          # seconds to wait per file for a click
 
-# Assist mode opens one download page per file. Over a 300-file list that
-# stacks 300 tabs in whatever browser you were already using, so the tab is
-# closed again once its click has been captured. Set False to leave them open.
-# How assist mode shows you each download page.
-#
-#   "page"    - open ONE local control page in your normal browser, listing
-#               every pending file. Each entry is an ordinary link aimed at a
-#               single named tab, so working through the list uses two tabs in
-#               total however long the list is. Your own browser, your own
-#               session, your own clicks.
-#   "default" - open each download page directly, one new tab per file.
-#
-# An earlier version drove a dedicated Firefox over Marionette to keep it out
-# of your way. That cannot work: an automated Firefox reports
-# navigator.webdriver, so Nexus's bot protection challenges it and the
-# challenge cannot be passed. Driving the browser was the wrong idea; the tab
-# problem is a presentation problem, and "page" solves it without automation.
-ASSIST_BROWSER = "page"          # "page" | "default"
-ASSIST_HTTP_HOST = "127.0.0.1"
-
-# Only relevant to "default", where a tab really is opened per file.
-CLOSE_TAB_AFTER_CLICK = False
-BROWSER_PROCESSES = ("firefox.exe", "chrome.exe", "msedge.exe", "brave.exe",
-                     "opera.exe", "vivaldi.exe", "chromium.exe", "iexplore.exe")
-TAB_SETTLE_S = 0.7               # let the new tab take focus before noting it
 # =======================================================================
 
 LOG = logging.getLogger("wj_downloader")
@@ -1005,7 +977,7 @@ class NxmListener:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((NXM_LISTEN_HOST, 0))
-        self.sock.listen(64)
+        self.sock.listen(8)
         self.port = self.sock.getsockname()[1]
         with open(os.path.join(script_dir, NXM_PORT_FILE), "w", encoding="utf-8") as f:
             f.write(str(self.port))
@@ -1096,308 +1068,6 @@ def nexus_file_page(domain, mod_id, file_id):
     """The mod-manager download page; clicking its button fires the nxm link."""
     return (f"https://www.nexusmods.com/{domain}/mods/{mod_id}"
             f"?tab=files&file_id={file_id}&nmm=1")
-
-
-# ----------------------------------------------------------------------
-# Closing the tab we opened (Windows)
-# ----------------------------------------------------------------------
-_WINKEY = None
-
-
-def _winkey():
-    """ctypes plumbing for SendInput, built once. None where unavailable."""
-    global _WINKEY
-    if _WINKEY is not None:
-        return _WINKEY or None
-    if os.name != "nt":
-        _WINKEY = False
-        return None
-    try:
-        import ctypes
-        from ctypes import wintypes
-        u32 = ctypes.WinDLL("user32", use_last_error=True)
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        u32.GetForegroundWindow.restype = wintypes.HWND
-        k32.OpenProcess.restype = wintypes.HANDLE
-        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-
-        # MOUSEINPUT is the largest member of the real INPUT union. Declaring
-        # only KEYBDINPUT would make sizeof(INPUT) too small and SendInput
-        # would reject every call.
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
-                        ("mouseData", wintypes.DWORD),
-                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
-                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-        class _U(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _anonymous_ = ("u",)
-            _fields_ = [("type", wintypes.DWORD), ("u", _U)]
-
-        _WINKEY = (ctypes, wintypes, u32, k32, KEYBDINPUT, INPUT)
-        return _WINKEY
-    except Exception as e:
-        LOG.debug("Keyboard plumbing unavailable (%s); tabs will stay open.", e)
-        _WINKEY = False
-        return None
-
-
-def foreground_browser_window():
-    """(hwnd, exe_name, window_title) when a browser has focus, else Nones."""
-    w = _winkey()
-    if not w:
-        return None, None, ""
-    ctypes, wintypes, u32, k32, _KI, _IN = w
-    hwnd = u32.GetForegroundWindow()
-    if not hwnd:
-        return None, None, ""
-    pid = wintypes.DWORD()
-    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    handle = k32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFO
-    if not handle:
-        return None, None, ""
-    buf = ctypes.create_unicode_buffer(1024)
-    size = wintypes.DWORD(1024)
-    ok = k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
-    k32.CloseHandle(handle)
-    if not ok:
-        return None, None, ""
-    name = os.path.basename(buf.value).lower()
-    if name not in BROWSER_PROCESSES:
-        return None, None, ""
-    title = ctypes.create_unicode_buffer(512)
-    u32.GetWindowTextW(hwnd, title, 512)
-    return hwnd, name, title.value or ""
-
-
-def close_browser_tab(expect_hwnd=None):
-    """Send Ctrl+W to close the download page we opened.
-
-    Guarded twice, because closing a tab cannot be undone and this runs
-    hundreds of times: the focused window must belong to a browser, and it
-    must still be the same window the page was opened in. If you have switched
-    to another window - or another browser window - this does nothing and
-    leaves the tab alone. The one case it cannot detect is you switching to a
-    different tab of the same window before the click is captured."""
-    if not CLOSE_TAB_AFTER_CLICK:
-        return False
-    w = _winkey()
-    if not w:
-        return False
-    ctypes, _wt, u32, _k32, KEYBDINPUT, INPUT = w
-    hwnd, _name, title = foreground_browser_window()
-    if not hwnd:
-        LOG.debug("  Leaving the tab open: the focused window is not a browser.")
-        return False
-    if expect_hwnd and hwnd != expect_hwnd:
-        LOG.debug("  Leaving the tab open: focus moved to another window.")
-        return False
-    # The tab showing must still be a Nexus page. Matching the window alone is
-    # not enough: switching to one of your own tabs in the same window keeps
-    # the same hwnd, and Ctrl+W would then close your tab instead of ours.
-    if "nexus" not in title.lower():
-        LOG.debug("  Leaving the tab open: the active tab is not a Nexus page "
-                  "(%s).", title[:60])
-        return False
-    VK_CONTROL, VK_W, KEYEVENTF_KEYUP = 0x11, 0x57, 0x0002
-    seq = []
-    for vk, flags in ((VK_CONTROL, 0), (VK_W, 0),
-                      (VK_W, KEYEVENTF_KEYUP), (VK_CONTROL, KEYEVENTF_KEYUP)):
-        item = INPUT(type=1)
-        item.ki = KEYBDINPUT(wVk=vk, wScan=0, dwFlags=flags, time=0,
-                             dwExtraInfo=None)
-        seq.append(item)
-    arr = (INPUT * len(seq))(*seq)
-    return u32.SendInput(len(seq), arr, ctypes.sizeof(INPUT)) == len(seq)
-
-
-# ----------------------------------------------------------------------
-# The control page (assist mode, ASSIST_BROWSER = "page")
-# ----------------------------------------------------------------------
-CONTROL_PAGE = """<!doctype html>
-<meta charset="utf-8"><title>Wabbajack downloads - %(list)s</title>
-<style>
- :root{color-scheme:dark}
- body{background:#15171a;color:#e6e6e6;font:14px/1.5 system-ui,sans-serif;
-      margin:0;padding:20px 24px}
- h1{font-size:17px;margin:0 0 2px}
- .sub{color:#9aa0a6;font-size:13px;margin-bottom:14px}
- .bar{height:6px;background:#2a2e33;border-radius:3px;overflow:hidden;margin:10px 0 18px}
- .bar i{display:block;height:100%%;background:#4c9f70;width:0;transition:width .3s}
- .hint{background:#1d2126;border:1px solid #2e343b;border-radius:6px;
-       padding:10px 14px;margin-bottom:18px;color:#c4cad0}
- kbd{background:#2a2e33;border:1px solid #3a4048;border-radius:4px;
-     padding:1px 6px;font:12px monospace}
- ol{list-style:none;margin:0;padding:0}
- li{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;
-    border:1px solid transparent}
- li.next{background:#1e2a22;border-color:#3f6b4f}
- li.done{opacity:.45}
- .st{width:22px;text-align:center}
- .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
- .sz{color:#9aa0a6;font-size:12px;min-width:72px;text-align:right}
- a{color:#8ab4f8;text-decoration:none}
- a:hover{text-decoration:underline}
- .done .nm{text-decoration:line-through}
- .err{color:#f28b82}
-</style>
-<h1>%(list)s</h1>
-<div class="sub" id="sub">starting...</div>
-<div class="bar"><i id="fill"></i></div>
-<div class="hint">
-  Click a mod below (or press <kbd>Enter</kbd> for the next one). It opens in a
-  single reused tab, so this page plus that one tab is all you ever get.
-  On the Nexus page use <b>Mod manager download</b> - the click is captured
-  here automatically and the file starts downloading. Then come back and take
-  the next one.
-</div>
-<ol id="rows"></ol>
-<script>
-var rows = [];
-function render(state) {
-  rows = state.rows;
-  var done = 0, i, r, li;
-  var ol = document.getElementById('rows');
-  ol.innerHTML = '';
-  var firstPending = -1;
-  for (i = 0; i < rows.length; i++) {
-    r = rows[i];
-    if (r.status === 'done') done++;
-    if (firstPending < 0 && r.status === 'pending') firstPending = i;
-  }
-  for (i = 0; i < rows.length; i++) {
-    r = rows[i];
-    li = document.createElement('li');
-    li.className = (r.status === 'done' ? 'done' : '') +
-                   (i === firstPending ? ' next' : '');
-    var mark = r.status === 'done' ? '\u2713'
-             : r.status === 'busy' ? '\u25cf'
-             : r.status === 'failed' ? '!' : '\u00b7';
-    var st = document.createElement('span');
-    st.className = 'st' + (r.status === 'failed' ? ' err' : '');
-    st.textContent = mark;
-    var nm = document.createElement('span');
-    nm.className = 'nm';
-    if (r.url) {
-      var a = document.createElement('a');
-      a.href = r.url; a.target = 'wjnexus'; a.textContent = r.name;
-      if (i === firstPending) a.id = 'nextlink';
-      nm.appendChild(a);
-    } else { nm.textContent = r.name; }
-    var sz = document.createElement('span');
-    sz.className = 'sz'; sz.textContent = r.size || '';
-    li.appendChild(st); li.appendChild(nm); li.appendChild(sz);
-    ol.appendChild(li);
-  }
-  document.getElementById('fill').style.width =
-      (rows.length ? (done * 100 / rows.length) : 0) + '%%';
-  document.getElementById('sub').textContent =
-      done + ' of ' + rows.length + ' downloaded' +
-      (state.busy ? '  -  downloading ' + state.busy : '');
-  if (state.finished) {
-    document.getElementById('sub').textContent =
-        'Finished - ' + done + ' of ' + rows.length +
-        ' downloaded. You can close this tab.';
-  }
-}
-function poll() {
-  fetch('/state').then(function (r) { return r.json(); })
-    .then(render).catch(function () {});
-}
-setInterval(poll, 1500); poll();
-document.addEventListener('keydown', function (e) {
-  if (e.key === 'Enter' || e.key === ' ') {
-    var a = document.getElementById('nextlink');
-    // A real keydown counts as a user gesture, so this click is allowed to
-    // target a named tab. Doing it from a timer would be blocked as a popup.
-    if (a) { a.click(); e.preventDefault(); }
-  }
-});
-</script>
-"""
-
-
-class AssistState:
-    """What the control page shows, shared with the download loop."""
-
-    def __init__(self, rows, list_name):
-        self.rows = rows                  # [{key,name,size,url,status}]
-        self.list_name = list_name
-        self.busy = None
-        self.finished = False
-        self.lock = threading.Lock()
-
-    def snapshot(self):
-        with self.lock:
-            return {
-                "rows": [{"name": r["name"], "size": r["size"],
-                          "url": r["url"], "status": r["status"]}
-                         for r in self.rows],
-                "busy": self.busy,
-                "finished": self.finished,
-            }
-
-    def set_status(self, key, status):
-        with self.lock:
-            for r in self.rows:
-                if r["key"] == key:
-                    r["status"] = status
-                    break
-
-    def pending(self):
-        with self.lock:
-            return [r for r in self.rows if r["status"] == "pending"]
-
-
-class _ControlHandler(BaseHTTPRequestHandler):
-    state = None                          # set on the server instance
-
-    def log_message(self, *a):
-        pass                              # keep the console for the download log
-
-    def _send(self, body, ctype):
-        raw = body.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        try:
-            self.wfile.write(raw)
-        except OSError:
-            pass
-
-    def do_GET(self):
-        st = self.server.state
-        if self.path.startswith("/state"):
-            self._send(json.dumps(st.snapshot()), "application/json")
-        elif self.path in ("/", "/index.html"):
-            self._send(CONTROL_PAGE % {"list": html_escape(st.list_name)},
-                       "text/html; charset=utf-8")
-        else:
-            self.send_error(404)
-
-
-def html_escape(text):
-    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
-
-
-def start_control_page(state):
-    """Serve the control page on a free local port. Returns (server, url)."""
-    server = ThreadingHTTPServer((ASSIST_HTTP_HOST, 0), _ControlHandler)
-    server.state = state
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    return server, "http://%s:%d/" % (ASSIST_HTTP_HOST, server.server_port)
 
 
 # ----------------------------------------------------------------------
@@ -1809,197 +1479,8 @@ def download_nexus_from_file(items, nexus, dest_dir, results, nxm_path, limit=0)
                     len(missing))
 
 
-# How long the page-driven loop waits with nothing happening before it gives
-# up and prints what is left. Generous: you are working through the list at
-# your own pace, and a pause for a cup of tea should not end the session.
-ASSIST_IDLE_TIMEOUT = 1800
-
-
-def resolve_list_domains(nexus, items):
-    """Map each manifest-recorded Nexus domain onto the one the site serves.
-
-    Resolved once per distinct manifest domain rather than once per mod: a
-    modlist records the same value for nearly every file, so this is one or two
-    API calls for a whole list instead of three hundred. A mod that is
-    genuinely hosted under a different game than its list-mates will have a
-    page link that 404s; that is worth one skipped file, not 300 extra calls."""
-    mapping = {}
-    for a in items:
-        raw = (nexus_domain(a) or "").lower()
-        if not raw or raw in mapping:
-            continue
-        learned = {}
-        resolved, _note = resolve_browser_domain(nexus, a, learned)
-        mapping[raw] = resolved
-        if resolved != raw:
-            LOG.info("  [NOTE] Manifest records domain '%s'; the site uses "
-                     "'%s'.", raw, resolved)
-    return mapping
-
-
-def _assist_via_page(items, nexus, dest_dir, results, script_dir, args,
-                     listener, by_ids, fetched):
-    """Show one control page and capture clicks in whatever order they come.
-
-    This replaces marching through the list one file at a time. You get your
-    own browser with your own session - which is the only way past Nexus's bot
-    protection - and the page aims every link at a single named tab, so the
-    count of tabs stays at two no matter how long the list is."""
-    LOG.info("Resolving Nexus domains for the list...")
-    domains = resolve_list_domains(nexus, items)
-
-    rows, unusable = [], 0
-    for a in items:
-        mod_id, file_id = nexus_ids(a)
-        raw = (nexus_domain(a) or "").lower()
-        dom = domains.get(raw) or nexus_url_domain(raw)
-        url = (nexus_file_page(dom, mod_id, file_id)
-               if (dom and mod_id and file_id) else "")
-        if not url:
-            unusable += 1
-        rows.append({"key": (mod_id, file_id), "name": a["name"],
-                     "size": human_bytes(a["size"]) if a["size"] else "",
-                     "url": url, "status": "pending"})
-    if unusable:
-        LOG.warning("[WARN] %d file(s) have incomplete Nexus identifiers and "
-                    "have no link on the page.", unusable)
-
-    state = AssistState(rows, os.path.basename(dest_dir.rstrip("\\/")) or "modlist")
-    server, page_url = start_control_page(state)
-    LOG.info("")
-    LOG.info("Control page: %s", page_url)
-    LOG.info("It has just opened in your normal browser. Every mod is a link "
-             "there, aimed at one reused tab, so you will never have more than "
-             "this page plus one Nexus tab open.")
-    LOG.info("Work down the list; each 'Mod manager download' click is caught "
-             "here and the file starts downloading. Ctrl+C stops whenever you "
-             "like - what is finished stays finished.")
-    LOG.info("")
-    try:
-        webbrowser.open(page_url)
-    except Exception:
-        LOG.info("(Could not open a browser; visit the URL above yourself.)")
-
-    try:
-        while True:
-            if args.limit and results["done"] >= args.limit:
-                LOG.info("  [STOP] Reached --limit; stopping.")
-                break
-            if not state.pending():
-                LOG.info("\nEvery file on the list has been downloaded.")
-                break
-            if (nexus.daily_remaining is not None
-                    and nexus.daily_remaining <= NEXUS_DAILY_FLOOR):
-                LOG.error("  [STOP] Nexus daily request allowance nearly "
-                          "exhausted (%s left). Stopping; re-run later. "
-                          "Everything downloaded so far is kept.",
-                          nexus.daily_remaining)
-                break
-            raw_url = listener.wait(ASSIST_IDLE_TIMEOUT)
-            if not raw_url:
-                LOG.info("\nNothing clicked for %d minutes; stopping. Re-run "
-                         "to pick up the rest.", ASSIST_IDLE_TIMEOUT // 60)
-                break
-            link = parse_nxm(raw_url)
-            if not link:
-                LOG.warning("  [WARN] Captured something that is not an nxm "
-                            "link; ignoring.")
-                continue
-            key = (link["mod_id"], link["file_id"])
-            archive = by_ids.get(key)
-            if archive is None:
-                LOG.info("  [SKIP] A click arrived for mod %s file %s, which is "
-                         "not one of this list's outstanding files.",
-                         link["mod_id"], link["file_id"])
-                continue
-            if key in fetched:
-                LOG.info("  [SKIP] %s is already downloaded.", archive["name"])
-                continue
-            state.set_status(key, "busy")
-            with state.lock:
-                state.busy = archive["name"]
-            before = results["done"]
-            _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results,
-                                      fetched)
-            with state.lock:
-                state.busy = None
-            state.set_status(key, "done" if results["done"] > before else "failed")
-            remaining = len(state.pending())
-            LOG.info("  %d file(s) still to go.", remaining)
-    finally:
-        with state.lock:
-            state.finished = True
-        # Leave the page up briefly so its last poll shows the final state.
-        time.sleep(2)
-        try:
-            server.shutdown()
-            server.server_close()
-        except Exception:
-            pass
-
-
-def _assist_one_tab_per_file(items, nexus, dest_dir, results, script_dir, args,
-                             listener, by_ids, fetched, learned_domains):
-    """The older strategy: open each download page in turn, one tab per file."""
-
-    LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
-    pending = list(items)
-    for idx, a in enumerate(pending, 1):
-        if args.limit and results["done"] >= args.limit:
-            LOG.info("  [STOP] Reached --limit; stopping.")
-            break
-        ids = nexus_ids(a)
-        if ids in fetched:
-            continue
-        if not (nexus_domain(a) and ids[0] and ids[1]):
-            LOG.error("  [SKIP] %s: incomplete Nexus identifiers.", a["name"])
-            results["failed"] += 1
-            continue
-        if (nexus.daily_remaining is not None
-                and nexus.daily_remaining <= NEXUS_DAILY_FLOOR):
-            LOG.error("  [STOP] Nexus daily request allowance nearly "
-                      "exhausted (%s left). Stopping; re-run later. "
-                      "Everything downloaded so far is kept.",
-                      nexus.daily_remaining)
-            break
-        domain, dom_note = resolve_browser_domain(nexus, a, learned_domains)
-        page = nexus_file_page(domain, ids[0], ids[1])
-        LOG.info("\n[%d/%d] %s", idx, len(pending), a["name"])
-        if dom_note:
-            LOG.info("  [NOTE] %s", dom_note)
-        LOG.info("  Opening: %s", page)
-        tab_hwnd = None
-        try:
-            webbrowser.open(page)
-            if CLOSE_TAB_AFTER_CLICK:
-                # Note which window the tab landed in, so the Ctrl+W later
-                # can refuse to fire if focus moved elsewhere.
-                time.sleep(TAB_SETTLE_S)
-                tab_hwnd, _n, _t = foreground_browser_window()
-        except Exception:
-            LOG.info("  (Could not open a browser; open the URL above "
-                     "by hand.)")
-        LOG.info("  Waiting up to %ds for your click... (Ctrl+C to stop)", NXM_CLICK_TIMEOUT)
-        url = listener.wait(NXM_CLICK_TIMEOUT)
-        # Close the page as soon as its click is in, not after the download:
-        # the download can take minutes, by which time you have very likely
-        # switched windows and the guard would refuse to close anything.
-        closed = close_browser_tab(tab_hwnd)
-        if not url:
-            LOG.warning("  [TIMEOUT] No click captured for %s; moving on.", a["name"])
-            results["failures"].append((a["name"], "no nxm click captured"))
-            continue
-        link = parse_nxm(url)
-        if not link:
-            LOG.warning("  [WARN] Captured a non-nxm URL; skipping.")
-            continue
-        if not closed and CLOSE_TAB_AFTER_CLICK:
-            LOG.debug("  Tab left open (focus had moved).")
-        _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched)
-
-
 def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
-    """Free-account capture: you click, this catches the link and downloads."""
+    """Interactive free-account capture: open each page, catch the nxm click."""
     if not _HAVE_WINREG and platform.system() == "Windows":
         LOG.error("[ERROR] winreg unavailable; cannot register the nxm handler.")
         return
@@ -2010,27 +1491,63 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
     # Make sure we are the nxm handler (so clicks reach us).
     if platform.system() == "Windows":
         if not register_nxm(script_dir):
-            LOG.error("[ERROR] Could not register the nxm handler; aborting "
-                      "assist mode.")
+            LOG.error("[ERROR] Could not register the nxm handler; aborting assist mode.")
             return
     else:
-        LOG.warning("[WARN] Not on Windows: nxm registration skipped. Clicks "
-                    "will only be captured if something else forwards them to "
-                    "this listener.")
+        LOG.warning("[WARN] Not on Windows: nxm registration skipped. Clicks will only be "
+                    "captured if something else forwards them to this listener.")
 
     listener = NxmListener(script_dir)
-    LOG.info("Capture listener on %s:%d.", NXM_LISTEN_HOST, listener.port)
+    LOG.info("Capture listener on %s:%d. For each file, your browser opens the Nexus "
+             "download page - click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
+    LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
     try:
-        if ASSIST_BROWSER == "page":
-            _assist_via_page(items, nexus, dest_dir, results, script_dir, args,
-                             listener, by_ids, fetched)
-        else:
-            _assist_one_tab_per_file(items, nexus, dest_dir, results,
-                                     script_dir, args, listener, by_ids,
-                                     fetched, learned_domains)
+        pending = list(items)
+        for idx, a in enumerate(pending, 1):
+            if args.limit and results["done"] >= args.limit:
+                LOG.info("  [STOP] Reached --limit; stopping.")
+                break
+            ids = nexus_ids(a)
+            if ids in fetched:
+                continue
+            if not (nexus_domain(a) and ids[0] and ids[1]):
+                LOG.error("  [SKIP] %s: incomplete Nexus identifiers.", a["name"])
+                results["failed"] += 1
+                continue
+            if (nexus.daily_remaining is not None
+                    and nexus.daily_remaining <= NEXUS_DAILY_FLOOR):
+                LOG.error("  [STOP] Nexus daily request allowance nearly "
+                          "exhausted (%s left). Stopping; re-run later. "
+                          "Everything downloaded so far is kept.",
+                          nexus.daily_remaining)
+                break
+            # Confirm the domain against the API rather than trusting the
+            # manifest's Meta gameName: this list records "skyrimse", which the
+            # website does not serve, and every page then opens on "mod could
+            # not be found". Cached, so it costs about one call per mod.
+            domain, dom_note = resolve_browser_domain(nexus, a, learned_domains)
+            page = nexus_file_page(domain, ids[0], ids[1])
+            LOG.info("\n[%d/%d] %s", idx, len(pending), a["name"])
+            if dom_note:
+                LOG.info("  [NOTE] %s", dom_note)
+            LOG.info("  Opening: %s", page)
+            try:
+                webbrowser.open(page)
+            except Exception:
+                LOG.info("  (Could not auto-open a browser; open the URL above manually.)")
+            LOG.info("  Waiting up to %ds for your click... (Ctrl+C to stop)", NXM_CLICK_TIMEOUT)
+            url = listener.wait(NXM_CLICK_TIMEOUT)
+            if not url:
+                LOG.warning("  [TIMEOUT] No click captured for %s; moving on.", a["name"])
+                results["failures"].append((a["name"], "no nxm click captured"))
+                continue
+            link = parse_nxm(url)
+            if not link:
+                LOG.warning("  [WARN] Captured a non-nxm URL; skipping.")
+                continue
+            _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched)
     except KeyboardInterrupt:
-        LOG.info("\n[ABORT] Interrupted. Anything already downloaded is kept, "
-                 "and re-running picks up the rest.")
+        LOG.info("\n[ABORT] Capture interrupted by user.")
     finally:
         listener.close()
         # Hand the nxm:// handler back to whatever owned it (normally
