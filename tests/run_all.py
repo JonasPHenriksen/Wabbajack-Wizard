@@ -24,6 +24,7 @@ SUITES = [
     ("t7_identity.py", "one filename, several builds"),
     ("t8_order.py", "download order: smallest, largest, manifest"),
     ("t9_wabbajack.py", "handing a staged list to Wabbajack"),
+    ("t10_lookup.py", "where a file may live and count as present"),
 ]
 
 total_pass = total_fail = 0

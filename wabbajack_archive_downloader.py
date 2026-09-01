@@ -525,13 +525,21 @@ def index_existing(game_base):
     requirement against another list's file.
 
     Folders listed in EXCLUDE_POOL_DIRS (e.g. Nolvus) are skipped entirely, so
-    another installer's archives are neither claimed nor disturbed."""
+    another installer's archives are neither claimed nor disturbed.
+
+    The scanned set is exactly what the sorter scans: Master, Shared, and the
+    per-list folders. The game ROOT itself is deliberately excluded, even though
+    a file sitting loose there is technically on disk. The sorter does not scan
+    the root either, so it would never stage such a file into the list folder -
+    meaning counting it as present made the archive get skipped here and then be
+    missing when Wabbajack looked for it. Better to fetch a redundant copy into
+    the right place than to be quietly short one file."""
     cache_key = os.path.normcase(os.path.abspath(game_base))
     if cache_key in _EXISTING_CACHE:
         return _EXISTING_CACHE[cache_key]
 
     index = {}
-    locations = [game_base] + [os.path.join(game_base, p) for p in POOL_FOLDERS]
+    locations = [os.path.join(game_base, p) for p in POOL_FOLDERS]
     skipped = []
     try:
         for entry in os.listdir(game_base):
