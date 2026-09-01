@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------
+# Data, not source. modlists/ alone is ~19 GB of .wabbajack files and
+# manifest_backups/ holds superseded copies of the same.
+# ---------------------------------------------------------------------
+modlists/
+manifest_backups/
+
+# Local Python environment: platform-specific, rebuilt by setup_env.bat.
+.venv-win/
+.venv-linux/
+lib-win/
+__pycache__/
+*.pyc
+
+# ---------------------------------------------------------------------
+# Secrets. Never commit.
+# ---------------------------------------------------------------------
+nexus_api_key.txt
+
+# ---------------------------------------------------------------------
+# Runtime state and output, regenerated on every run.
+# ---------------------------------------------------------------------
+wj_autoupdate_state.json
+wj_manifest_cache.json
+*.log
+*.out
+*.csv
+*.lock
+.nxm_listener_port
+.nxm_prev_handler
+nxm_captured.txt
+
+# Pre-change copies kept locally for rollback.
+.orig_backup_*/
+
+# This share is also mounted from a Mac, and Windows leaves its own litter.
+.DS_Store
+._*
+Thumbs.db
+desktop.ini

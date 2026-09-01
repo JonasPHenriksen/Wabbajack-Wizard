@@ -1,0 +1,7 @@
+# The only third-party dependency of these scripts.
+#
+# Without it, wabbajack_archive_downloader.py falls back to comparing file
+# sizes only, so a truncated or wrong-version archive can pass verification.
+# With it you get the same base64 little-endian xxHash64 that Wabbajack itself
+# uses, for both the .wabbajack manifests and every archive downloaded.
+xxhash>=3.0
