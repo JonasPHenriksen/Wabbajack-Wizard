@@ -5,7 +5,12 @@ REM
 REM  Prefers the isolated environment made by setup_env.bat, then a
 REM  lib-win folder, then whatever Python is on PATH.
 REM
-REM  Arguments pass straight through:
+REM  With no arguments this opens the interactive manager: it walks four
+REM  stages - updates, incomplete modlists, prepare one for install, disk
+REM  space - showing what it can see at each and offering skip / all / some.
+REM  Every stage is independent; skipping one does not affect the others.
+REM
+REM  Arguments are for scripted or scheduled use and pass straight through:
 REM      run.bat --check         just report what has updates
 REM      run.bat --dry-run       plan everything, change nothing
 REM      run.bat --rediscover    re-match local manifests against the feeds

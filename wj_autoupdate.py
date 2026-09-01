@@ -844,6 +844,78 @@ def backup_existing(filename):
 # ----------------------------------------------------------------------
 # Work planning against the pools
 # ----------------------------------------------------------------------
+MANIFEST_CACHE_FILE = "wj_manifest_cache.json"
+
+
+def archive_kind(a):
+    """Source kind for an archive, from either a full or a cached record."""
+    return a.get("kind") or WJ.state_type(a.get("state"))
+
+
+def load_plan_records(progress=None, files=None):
+    """Lightweight per-list records, cached on disk.
+
+    Planning only needs each archive's name, size and source kind. A full parse
+    also carries every archive's Meta block, which is the bulk of a manifest -
+    and only the downloader needs that, which re-parses the file itself anyway.
+    Caching the light form turns a multi-minute crawl over ~19 GB of zips into
+    a sub-second read.
+
+    An entry is keyed by its manifest's mtime and size, so editing, replacing
+    or re-downloading a manifest invalidates just that entry automatically.
+    There is no way for the cache to describe a file that is no longer there."""
+    path = os.path.join(HERE, MANIFEST_CACHE_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            cache = json.load(f)
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, json.JSONDecodeError):
+        cache = {}
+
+    names = files if files is not None else WJ.list_manifest_files(MANIFESTS)
+    out, dirty, misses = {}, False, []
+    for i, fn in enumerate(names, 1):
+        full = os.path.join(MANIFESTS, fn)
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        stamp = [int(st.st_mtime), st.st_size]
+        hit = cache.get(fn)
+        if isinstance(hit, dict) and hit.get("stamp") == stamp:
+            out[fn] = hit
+            continue
+        misses.append((i, fn, full, stamp))
+
+    for n, (i, fn, full, stamp) in enumerate(misses, 1):
+        if progress:
+            progress(n, len(misses), fn)
+        rec = WJ.parse_manifest(full)
+        entry = {
+            "stamp": stamp,
+            "game": rec["game"],
+            "readable": rec["readable"],
+            "archives": [{"name": a["name"], "size": a["size"],
+                          "kind": WJ.state_type(a["state"])}
+                         for a in rec["archives"]],
+        }
+        cache[fn] = entry
+        out[fn] = entry
+        dirty = True
+
+    if dirty:
+        cache = {k: v for k, v in cache.items() if k in out}
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f)
+            os.replace(tmp, path)
+        except OSError as e:
+            LOG.debug("Could not write the manifest cache: %s", e)
+    return out
+
+
 def plan_for(record):
     """Split a parsed manifest's archives into what we can fetch, what only
     Wabbajack can fetch, and what is already on disk."""
@@ -857,7 +929,7 @@ def plan_for(record):
         if WJ.present_match(existing, a)[0]:
             present += 1
             continue
-        kind = WJ.state_type(a["state"])
+        kind = archive_kind(a)
         if kind == "nexus":
             nexus.append(a)
         elif kind in ("http", "wabbajackcdn", "mediafire"):
@@ -977,6 +1049,56 @@ def run_script(script, args, label, interactive=False):
         except OSError:
             pass
     return rc
+
+
+# ----------------------------------------------------------------------
+# Start-up shared by the flag interface and the interactive wizard
+# ----------------------------------------------------------------------
+def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
+    """Prepare the environment. Returns 0 on success, else an exit code.
+
+    Both entry points need exactly this: logging, the downloader module, the
+    cross-script configuration check, the manifest folder, and the refusal to
+    run without hash verification. Keeping it in one place means the wizard
+    cannot quietly start up under weaker checks than the flag interface."""
+    global WJ, NEXUS_MODE
+    setup_logging(verbose)
+    WJ = load_downloader_module()
+    if nexus_mode:
+        NEXUS_MODE = nexus_mode
+
+    LOG.info("Wabbajack auto-updater  %s",
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if not check_script_consistency():
+        return 2
+    if not resolve_dirs():
+        return 1
+    LOG.info("Script dir:     %s", HERE)
+    LOG.info("Manifest dir:   %s", MANIFESTS)
+    LOG.info("Archive root:   %s", WJ.ARCHIVE_ROOT)
+    have_hash = bool(getattr(WJ, "_HAVE_XXHASH", False))
+    LOG.info("Hash verify:    %s",
+             "xxHash64" if have_hash else "size only (install python3-xxhash)")
+    if not have_hash and REQUIRE_HASH and not allow_size_only:
+        LOG.error("[TERMINATED] 'xxhash' is not importable by this interpreter "
+                  "(%s), so manifests and archives could only be checked by "
+                  "size.", sys.executable)
+        LOG.error("             Run setup_env.bat and launch through run.bat, or "
+                  "pass --allow-size-only to accept size-only checks.")
+        return 2
+
+    LOG.info("Nexus mode:     %s", NEXUS_MODE)
+    if not os.path.isdir(WJ.ARCHIVE_ROOT):
+        LOG.error("[TERMINATED] ARCHIVE_ROOT does not exist or is not reachable: "
+                  "%s\nIf that is a mapped drive, make sure the share is "
+                  "connected before running.", WJ.ARCHIVE_ROOT)
+        return 1
+    if NEXUS_MODE == "assist" and os.name != "nt":
+        LOG.error("[TERMINATED] NEXUS_MODE='assist' needs Windows: the downloader "
+                  "registers an nxm:// handler via winreg and opens a browser. "
+                  "Use 'skip' on Linux.")
+        return 1
+    return 0
 
 
 # ----------------------------------------------------------------------
@@ -1592,6 +1714,11 @@ def main():
     ap.add_argument("--no-lock", action="store_true",
                     help="Skip the single-instance lock. Use if a stale lock on "
                          "a network share is blocking you.")
+    ap.add_argument("--wizard", action="store_true",
+                    help="Interactive mode: walk the four stages (updates, "
+                         "incomplete lists, prepare one for install, disk "
+                         "space) showing status and offering skip / all / some "
+                         "at each. This is what a bare launch does.")
     ap.add_argument("--nexus-mode", choices=("skip", "assist"),
                     help="Override NEXUS_MODE for this run. 'assist' opens each "
                          "Nexus page and waits for your click (needs you at the "
@@ -1602,42 +1729,26 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
-    setup_logging(args.verbose)
-    WJ = load_downloader_module()
-    if args.nexus_mode:
-        NEXUS_MODE = args.nexus_mode
+    # A bare launch is the interactive wizard; the flags stay for scripted and
+    # scheduled use. Keeping one entry point means run.bat needs no arguments
+    # and the two interfaces cannot drift apart - the wizard drives exactly the
+    # same functions the flags do.
+    # The wizard is the default unless an action flag asks for something
+    # specific. Testing len(sys.argv) instead would send "--nexus-mode assist"
+    # - a modifier, not an action - down the non-interactive path, which is
+    # exactly the sort of surprise a scheduled run should never spring.
+    actions = (args.check, args.discover, args.only, args.force, args.dry_run,
+               args.no_download, args.no_sort, args.rediscover)
+    if args.wizard or not any(actions):
+        import wj_wizard
+        return wj_wizard.run(verbose=args.verbose, nexus_mode=args.nexus_mode,
+                             allow_size_only=args.allow_size_only,
+                             no_lock=args.no_lock)
 
-    LOG.info("Wabbajack auto-updater  %s",
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    if not check_script_consistency():
-        return 2
-    if not resolve_dirs():
-        return 1
-    LOG.info("Script dir:     %s", HERE)
-    LOG.info("Manifest dir:   %s", MANIFESTS)
-    LOG.info("Archive root:   %s", WJ.ARCHIVE_ROOT)
-    have_hash = bool(getattr(WJ, "_HAVE_XXHASH", False))
-    LOG.info("Hash verify:    %s",
-             "xxHash64" if have_hash else "size only (install python3-xxhash)")
-    if not have_hash and REQUIRE_HASH and not args.allow_size_only:
-        LOG.error("[TERMINATED] 'xxhash' is not importable by this interpreter "
-                  "(%s), so manifests and archives could only be checked by "
-                  "size.", sys.executable)
-        LOG.error("             Run setup_env.bat and launch through run.bat, or "
-                  "pass --allow-size-only to accept size-only checks.")
-        return 2
-
-    LOG.info("Nexus mode:     %s", NEXUS_MODE)
-    if not os.path.isdir(WJ.ARCHIVE_ROOT):
-        LOG.error("[TERMINATED] ARCHIVE_ROOT does not exist or is not reachable: "
-                  "%s\nIf that is a mapped drive, make sure the share is "
-                  "connected before running.", WJ.ARCHIVE_ROOT)
-        return 1
-    if NEXUS_MODE == "assist" and os.name != "nt":
-        LOG.error("[TERMINATED] NEXUS_MODE='assist' needs Windows: the downloader "
-                  "registers an nxm:// handler via winreg and opens a browser. "
-                  "Use 'skip' on Linux.")
-        return 1
+    rc = bootstrap(verbose=args.verbose, nexus_mode=args.nexus_mode,
+                   allow_size_only=args.allow_size_only)
+    if rc:
+        return rc
 
     if args.discover:
         return cmd_discover()

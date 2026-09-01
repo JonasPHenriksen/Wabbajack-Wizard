@@ -925,7 +925,13 @@ def main():
     parser.add_argument("--game", dest="game",
                         help="Pre-select a game (GameType or friendly name) non-interactively.")
     parser.add_argument("--list", dest="preset",
-                        help="Pre-select a modlist number non-interactively.")
+                        help="Pre-select a modlist by name (or menu number).")
+    parser.add_argument("--cleanup-only", action="store_true",
+                        help="Run only the cleanup/reset pass that rebuilds the "
+                             "pools from current demand, then stop without "
+                             "staging any list. Used after deleting a modlist, "
+                             "so anything the remaining lists still need is "
+                             "pulled back out of Master before Master is cleared.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose (debug-level) console output.")
     args = parser.parse_args()
@@ -1058,6 +1064,14 @@ def main():
     reset_expected = build_expected_sizes(in_scope, None)
     reset_stats = run_stage("CLEANUP", None, file_demands, reset_expected,
                             modlists_map, protected, chosen_game, args)
+
+    if args.cleanup_only:
+        c = reset_stats["counters"]
+        banner("CLEANUP COMPLETE (no list staged)")
+        LOG.info("  -> Files relocated:          %d", c["moved"])
+        LOG.info("  -> Conflicts parked->Master: %d", c["parked"])
+        LOG.info("  -> Errors:                   %d", c["errors"])
+        sys.exit(1 if c["errors"] else 0)
 
     # ---- Step 4: choose the list to stage ----------------------------
     banner("STEP 4: SELECT MODLIST")

@@ -270,10 +270,16 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
     Returns True on success. Writes to `dest + ".part"` and renames on
     completion, so a partial file never appears under the real name.
     """
+    # detail=True changes the return type, so every exit has to go through
+    # this. Updating only the success path left the failure paths returning a
+    # bare False, which a caller unpacking a tuple cannot survive.
+    def done_(ok, computed=None):
+        return (ok, computed) if detail else ok
+
     base = public_url(url).rstrip("/")
     definition = get_definition(base)
     if definition is None:
-        return False
+        return done_(False)
 
     total_size, total_hash, n_parts = definition_summary(definition)
     parts = _field(definition, "Parts", default=[])
@@ -323,7 +329,7 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
         fh = open(part_file, mode)
     except OSError as e:
         LOG.error("  [ERROR] Cannot open %s for writing: %s", part_file, e)
-        return False
+        return done_(False)
 
     todo = [p for p in parts if _field(p, "Index") not in done]
     written = sum(_field(p, "Size", default=0) or 0
@@ -369,11 +375,11 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
     if failed is not None:
         LOG.error("  [ERROR] %s", failed)
         LOG.info("  %d of %d part(s) kept; re-run to resume.", len(done), n_parts)
-        return False
+        return done_(False)
 
     if len(done) != n_parts:
         LOG.error("  [ERROR] Only %d of %d part(s) completed.", len(done), n_parts)
-        return False
+        return done_(False)
 
     # Every part is written, so the highest offset+size is the file length and
     # this should already hold. Guard anyway: a definition whose parts do not
@@ -398,7 +404,7 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
                 os.remove(part_file)
             except OSError:
                 pass
-            return False
+            return done_(False)
 
     try:
         if os.path.exists(dest):
@@ -406,11 +412,11 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
         os.replace(part_file, dest)
     except OSError as e:
         LOG.error("  [ERROR] Could not finalise %s: %s", dest, e)
-        return False
+        return done_(False)
 
     _drop_sidecar(dest)
     # detail=True hands back the hash we just computed, so a caller that also
     # wants to verify does not have to read the whole file off the share a
     # second time. On a 5 GB manifest over SMB that second pass costs about a
     # minute and cannot discover anything the first one missed.
-    return (True, verified) if detail else True
+    return done_(True, verified)
