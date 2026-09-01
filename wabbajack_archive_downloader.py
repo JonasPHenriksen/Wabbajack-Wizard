@@ -209,6 +209,14 @@ NXM_PORT_FILE     = ".nxm_listener_port"   # written next to the script
 NXM_PREV_HANDLER  = ".nxm_prev_handler"    # saved previous nxm:// command
 NXM_FALLBACK_FILE = "nxm_captured.txt"     # forwarder appends here if no listener
 NXM_CLICK_TIMEOUT = 180          # seconds to wait per file for a click
+
+# Assist mode opens one download page per file. Over a 300-file list that
+# stacks 300 tabs in whatever browser you were already using, so the tab is
+# closed again once its click has been captured. Set False to leave them open.
+CLOSE_TAB_AFTER_CLICK = True
+BROWSER_PROCESSES = ("firefox.exe", "chrome.exe", "msedge.exe", "brave.exe",
+                     "opera.exe", "vivaldi.exe", "chromium.exe", "iexplore.exe")
+TAB_SETTLE_S = 0.7               # let the new tab take focus before noting it
 # =======================================================================
 
 LOG = logging.getLogger("wj_downloader")
@@ -1070,6 +1078,127 @@ def nexus_file_page(domain, mod_id, file_id):
 
 
 # ----------------------------------------------------------------------
+# Closing the tab we opened (Windows)
+# ----------------------------------------------------------------------
+_WINKEY = None
+
+
+def _winkey():
+    """ctypes plumbing for SendInput, built once. None where unavailable."""
+    global _WINKEY
+    if _WINKEY is not None:
+        return _WINKEY or None
+    if os.name != "nt":
+        _WINKEY = False
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        u32.GetForegroundWindow.restype = wintypes.HWND
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+
+        # MOUSEINPUT is the largest member of the real INPUT union. Declaring
+        # only KEYBDINPUT would make sizeof(INPUT) too small and SendInput
+        # would reject every call.
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                        ("mouseData", wintypes.DWORD),
+                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+        class _U(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _anonymous_ = ("u",)
+            _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+        _WINKEY = (ctypes, wintypes, u32, k32, KEYBDINPUT, INPUT)
+        return _WINKEY
+    except Exception as e:
+        LOG.debug("Keyboard plumbing unavailable (%s); tabs will stay open.", e)
+        _WINKEY = False
+        return None
+
+
+def foreground_browser_window():
+    """(hwnd, exe_name, window_title) when a browser has focus, else Nones."""
+    w = _winkey()
+    if not w:
+        return None, None, ""
+    ctypes, wintypes, u32, k32, _KI, _IN = w
+    hwnd = u32.GetForegroundWindow()
+    if not hwnd:
+        return None, None, ""
+    pid = wintypes.DWORD()
+    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    handle = k32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFO
+    if not handle:
+        return None, None, ""
+    buf = ctypes.create_unicode_buffer(1024)
+    size = wintypes.DWORD(1024)
+    ok = k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+    k32.CloseHandle(handle)
+    if not ok:
+        return None, None, ""
+    name = os.path.basename(buf.value).lower()
+    if name not in BROWSER_PROCESSES:
+        return None, None, ""
+    title = ctypes.create_unicode_buffer(512)
+    u32.GetWindowTextW(hwnd, title, 512)
+    return hwnd, name, title.value or ""
+
+
+def close_browser_tab(expect_hwnd=None):
+    """Send Ctrl+W to close the download page we opened.
+
+    Guarded twice, because closing a tab cannot be undone and this runs
+    hundreds of times: the focused window must belong to a browser, and it
+    must still be the same window the page was opened in. If you have switched
+    to another window - or another browser window - this does nothing and
+    leaves the tab alone. The one case it cannot detect is you switching to a
+    different tab of the same window before the click is captured."""
+    if not CLOSE_TAB_AFTER_CLICK:
+        return False
+    w = _winkey()
+    if not w:
+        return False
+    ctypes, _wt, u32, _k32, KEYBDINPUT, INPUT = w
+    hwnd, _name, title = foreground_browser_window()
+    if not hwnd:
+        LOG.debug("  Leaving the tab open: the focused window is not a browser.")
+        return False
+    if expect_hwnd and hwnd != expect_hwnd:
+        LOG.debug("  Leaving the tab open: focus moved to another window.")
+        return False
+    # The tab showing must still be a Nexus page. Matching the window alone is
+    # not enough: switching to one of your own tabs in the same window keeps
+    # the same hwnd, and Ctrl+W would then close your tab instead of ours.
+    if "nexus" not in title.lower():
+        LOG.debug("  Leaving the tab open: the active tab is not a Nexus page "
+                  "(%s).", title[:60])
+        return False
+    VK_CONTROL, VK_W, KEYEVENTF_KEYUP = 0x11, 0x57, 0x0002
+    seq = []
+    for vk, flags in ((VK_CONTROL, 0), (VK_W, 0),
+                      (VK_W, KEYEVENTF_KEYUP), (VK_CONTROL, KEYEVENTF_KEYUP)):
+        item = INPUT(type=1)
+        item.ki = KEYBDINPUT(wVk=vk, wScan=0, dwFlags=flags, time=0,
+                             dwExtraInfo=None)
+        seq.append(item)
+    arr = (INPUT * len(seq))(*seq)
+    return u32.SendInput(len(seq), arr, ctypes.sizeof(INPUT)) == len(seq)
+
+
+# ----------------------------------------------------------------------
 # MediaFire (best effort)
 # ----------------------------------------------------------------------
 _MF_PATTERNS = [
@@ -1500,6 +1629,11 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
     LOG.info("Capture listener on %s:%d. For each file, your browser opens the Nexus "
              "download page - click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
     LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
+    if CLOSE_TAB_AFTER_CLICK:
+        LOG.info("Each page is closed again once its click is captured, so the "
+                 "tabs do not stack up. Stay in the browser window while "
+                 "clicking; if you switch away, the tab is left open rather "
+                 "than risking closing something of yours.")
     try:
         pending = list(items)
         for idx, a in enumerate(pending, 1):
@@ -1526,12 +1660,22 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
             if dom_note:
                 LOG.info("  [NOTE] %s", dom_note)
             LOG.info("  Opening: %s", page)
+            tab_hwnd = None
             try:
                 webbrowser.open(page)
+                if CLOSE_TAB_AFTER_CLICK:
+                    # Note which window the tab landed in, so the Ctrl+W later
+                    # can refuse to fire if focus has moved somewhere else.
+                    time.sleep(TAB_SETTLE_S)
+                    tab_hwnd, _n, _t = foreground_browser_window()
             except Exception:
                 LOG.info("  (Could not auto-open a browser; open the URL above manually.)")
             LOG.info("  Waiting up to %ds for your click... (Ctrl+C to stop)", NXM_CLICK_TIMEOUT)
             url = listener.wait(NXM_CLICK_TIMEOUT)
+            # Close the page as soon as its click is in, not after the download:
+            # the download can take minutes, by which time you have very likely
+            # switched windows and the guard would refuse to close anything.
+            closed = close_browser_tab(tab_hwnd)
             if not url:
                 LOG.warning("  [TIMEOUT] No click captured for %s; moving on.", a["name"])
                 results["failures"].append((a["name"], "no nxm click captured"))
@@ -1540,6 +1684,8 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
             if not link:
                 LOG.warning("  [WARN] Captured a non-nxm URL; skipping.")
                 continue
+            if not closed and CLOSE_TAB_AFTER_CLICK:
+                LOG.debug("  Tab left open (focus had moved).")
             _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched)
     except KeyboardInterrupt:
         LOG.info("\n[ABORT] Capture interrupted by user.")
