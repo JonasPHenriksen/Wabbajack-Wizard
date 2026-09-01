@@ -104,7 +104,36 @@ for flag, value in (("--wabbajack", r"Z:\m\L.wabbajack"),
 check("nothing else is passed", len(args) == 8, str(args))
 
 # ---------------------------------------------------------------- 9.5
-print("\n 9.5  the wizard refuses to offer an install it cannot do")
+print("\n 9.5  the paths are checked before anything starts")
+man = os.path.join(BOX, "L.wabbajack")
+os.makedirs(BOX, exist_ok=True)
+io.open(man, "wb").write(b"stub")
+dl = os.path.join(BOX, "downloads")
+os.makedirs(dl, exist_ok=True)
+check("a separate folder is accepted",
+      WB.check_paths(man, dl, os.path.join(BOX, "installed")) == [])
+check("install == downloads is refused",
+      any("IS the downloads" in p for p in WB.check_paths(man, dl, dl)),
+      str(WB.check_paths(man, dl, dl)))
+check("install inside downloads is refused",
+      any("inside the downloads" in p
+          for p in WB.check_paths(man, dl, os.path.join(dl, "sub"))))
+check("downloads inside install is refused",
+      any("downloads folder is inside" in p
+          for p in WB.check_paths(man, os.path.join(dl, "sub2"), dl))
+      or any("not there" in p
+             for p in WB.check_paths(man, os.path.join(dl, "sub2"), dl)))
+check("a missing modlist file is refused",
+      any("modlist file is not there" in p
+          for p in WB.check_paths(man + "x", dl, os.path.join(BOX, "i"))))
+check("a missing downloads folder is refused",
+      any("downloads folder is not there" in p
+          for p in WB.check_paths(man, dl + "x", os.path.join(BOX, "i"))))
+check("an empty install path is refused",
+      any("no install path" in p for p in WB.check_paths(man, dl, "")))
+
+# ---------------------------------------------------------------- 9.6
+print("\n 9.6  the wizard refuses to offer an install it cannot do")
 import logging
 import wj_autoupdate as A
 A.setup_logging(False)

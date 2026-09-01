@@ -168,6 +168,43 @@ def game_ready(cli, gametype):
                    "it will fail." % wanted)
 
 
+def check_paths(manifest, downloads, output):
+    """Problems worth catching before Wabbajack is started.
+
+    The CLI does validate its arguments, but it does so by throwing a .NET
+    stack trace, which is a poor way to find out you mistyped a drive letter
+    after committing to an install.
+
+    The overlap checks are the ones that matter most: Wabbajack extracts the
+    downloads into the install folder, so if one contains the other it ends up
+    reading what it is writing."""
+    problems = []
+    if not os.path.isfile(manifest):
+        problems.append("the modlist file is not there: %s" % manifest)
+    if not os.path.isdir(downloads):
+        problems.append("the downloads folder is not there: %s" % downloads)
+    if not output or not str(output).strip():
+        problems.append("no install path was given")
+        return problems
+
+    out_abs = os.path.abspath(output)
+    dl_abs = os.path.abspath(downloads)
+    if os.path.normcase(out_abs) == os.path.normcase(dl_abs):
+        problems.append("the install path IS the downloads folder; "
+                        "they have to be separate")
+    elif os.path.normcase(out_abs).startswith(os.path.normcase(dl_abs) + os.sep):
+        problems.append("the install path is inside the downloads folder; "
+                        "they have to be separate")
+    elif os.path.normcase(dl_abs).startswith(os.path.normcase(out_abs) + os.sep):
+        problems.append("the downloads folder is inside the install path; "
+                        "they have to be separate")
+
+    drive = os.path.splitdrive(out_abs)[0]
+    if drive and not os.path.isdir(drive + os.sep):
+        problems.append("there is no drive %s on this machine" % drive)
+    return problems
+
+
 def install_args(cli, manifest, downloads, output):
     """The command that installs a staged list."""
     return [cli, "install",
@@ -183,10 +220,13 @@ def run_install(cli, manifest, downloads, output, on_line=None):
     a long time and silence is indistinguishable from a hang."""
     cmd = install_args(cli, manifest, downloads, output)
     try:
+        # stdin is deliberately NOT closed off. If Wabbajack needs to ask
+        # something mid-install - its own Nexus sign-in, for a file this tooling
+        # did not fetch - a closed stdin turns that into a confusing failure
+        # instead of a question you can answer.
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True,
-                                errors="replace", bufsize=1,
-                                stdin=subprocess.DEVNULL)
+                                errors="replace", bufsize=1)
     except OSError as e:
         if on_line:
             on_line("could not start wabbajack-cli: %s" % e)

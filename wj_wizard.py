@@ -665,6 +665,14 @@ def offer_install(state, filename, st):
         return False
     target = os.path.abspath(target)
 
+    problems = WB.check_paths(manifest, downloads, target)
+    if problems:
+        out()
+        for p in problems:
+            out("  [NO] " + p)
+        out("  Nothing started. Run the stage again with a different path.")
+        return False
+
     lines = [f"modlist   {stem}",
              f"downloads {downloads}",
              f"install   {target}"]
