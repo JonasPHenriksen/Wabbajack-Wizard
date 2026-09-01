@@ -991,7 +991,9 @@ def write_nexus_todo(record, nexus_items):
             w = csv.writer(f)
             w.writerow(["archive", "size_bytes", "download_page"])
             for a in nexus_items:
-                dom = WJ.nexus_domain(a)
+                # The site slug, not the raw manifest value: these links are
+                # meant to be clicked, and nexusmods.com/skyrimse/... 404s.
+                dom = WJ.nexus_url_domain(WJ.nexus_domain(a))
                 mid, fid = WJ.nexus_ids(a)
                 page = (WJ.nexus_file_page(dom, mid, fid)
                         if dom and mid and fid else "")

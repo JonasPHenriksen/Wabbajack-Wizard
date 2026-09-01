@@ -1011,6 +1011,58 @@ class NxmListener:
                 pass
 
 
+# Domains that turn up in manifests but are not the slug the WEBSITE uses.
+# nexusmods.com/skyrimse/... serves a "mod could not be found" page, so the
+# click that assist mode waits 180s for can never happen. The API path already
+# routed around this through NEXUS_DOMAIN_FALLBACKS; the browser URL did not.
+NEXUS_URL_ALIASES = {
+    "skyrimse":         "skyrimspecialedition",
+    "falloutnv":        "newvegas",
+    "falloutnewvegas":  "newvegas",
+    "enderalse":        "enderalspecialedition",
+}
+
+
+def nexus_url_domain(domain):
+    d = (domain or "").lower()
+    return NEXUS_URL_ALIASES.get(d, d)
+
+
+def resolve_browser_domain(nexus, archive, learned):
+    """The domain whose website actually hosts this mod's page.
+
+    Asks the API instead of trusting the manifest. Meta gameName and
+    State.GameName disagree often enough to matter - this list records
+    "skyrimse" in Meta and "SkyrimSpecialEdition" in State, and only the second
+    is a real site slug - and nothing in the manifest says which is right.
+
+    The domain that worked last time is tried first, so a list normally costs
+    one API call per mod. Returns (domain, note)."""
+    primary = (nexus_domain(archive) or "").lower()
+    mod_id, _fid = nexus_ids(archive)
+    order = []
+    if learned.get(primary):
+        order.append(learned[primary])
+    for d in candidate_domains(archive):
+        cand = nexus_url_domain(d)
+        if cand not in order:
+            order.append(cand)
+    for cand in order:
+        if not mod_id:
+            break
+        _files, status = nexus.mod_files(cand, mod_id)
+        time.sleep(REQUEST_PAUSE_S)
+        if status == "ok":
+            note = None
+            if cand != primary and learned.get(primary) != cand:
+                note = ("manifest records domain '%s'; the site uses '%s'"
+                        % (primary, cand))
+            learned[primary] = cand
+            return cand, note
+    return nexus_url_domain(primary), ("no Nexus domain served mod %s; this "
+                                       "page link may 404" % mod_id)
+
+
 def nexus_file_page(domain, mod_id, file_id):
     """The mod-manager download page; clicking its button fires the nxm link."""
     return (f"https://www.nexusmods.com/{domain}/mods/{mod_id}"
@@ -1433,6 +1485,7 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
         return
     by_ids = {nexus_ids(a): a for a in items}
     fetched = set()
+    learned_domains = {}
 
     # Make sure we are the nxm handler (so clicks reach us).
     if platform.system() == "Windows":
@@ -1456,13 +1509,22 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
             ids = nexus_ids(a)
             if ids in fetched:
                 continue
-            domain = nexus_domain(a)
-            if not (domain and ids[0] and ids[1]):
+            if not (nexus_domain(a) and ids[0] and ids[1]):
                 LOG.error("  [SKIP] %s: incomplete Nexus identifiers.", a["name"])
                 results["failed"] += 1
                 continue
+            if (nexus.daily_remaining is not None
+                    and nexus.daily_remaining <= NEXUS_DAILY_FLOOR):
+                LOG.error("  [STOP] Nexus daily request allowance nearly "
+                          "exhausted (%s left). Stopping; re-run later. "
+                          "Everything downloaded so far is kept.",
+                          nexus.daily_remaining)
+                break
+            domain, dom_note = resolve_browser_domain(nexus, a, learned_domains)
             page = nexus_file_page(domain, ids[0], ids[1])
             LOG.info("\n[%d/%d] %s", idx, len(pending), a["name"])
+            if dom_note:
+                LOG.info("  [NOTE] %s", dom_note)
             LOG.info("  Opening: %s", page)
             try:
                 webbrowser.open(page)
@@ -1740,7 +1802,7 @@ def main():
                     w = csv.writer(f)
                     w.writerow(["archive", "download_page"])
                     for a in nexus_items:
-                        d = nexus_domain(a)
+                        d = nexus_url_domain(nexus_domain(a))
                         mid, fid = nexus_ids(a)
                         if d and mid and fid:
                             w.writerow([a["name"], nexus_file_page(d, mid, fid)])
