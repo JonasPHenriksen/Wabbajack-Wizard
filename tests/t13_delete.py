@@ -392,6 +392,9 @@ check("  while a game with its own folder keeps its own key",
       G.pool_key("fallout4") == "fallout4")
 check("Skyrim VR draws from the Skyrim pool as well",
       G.pool_key("skyrimvr") == "skyrim" and A.WJ.folder_key("SkyrimVR") == "skyrim")
+check("  and Enderal SE, whose lists are three-quarters Skyrim SE mods",
+      G.pool_key("enderalspecialedition") == "skyrim"
+      and A.WJ.folder_key("EnderalSpecialEdition") == "skyrim")
 
 # ---------------------------------------------------------------- 13.9
 print("\n 13.9  the 'any known modlist' rule refuses every non-permanent gap")

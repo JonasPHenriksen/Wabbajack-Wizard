@@ -36,15 +36,23 @@ ARCHIVE_ROOT = "../Mod Archive"
 #   everything. Every list drawing from a shared folder also protects it - see
 #   folder_key() below.
 #
+#   Enderal is a total conversion running on Skyrim's engine, and its lists
+#   are mostly Skyrim mods: of the two Enderal SE lists held here, three
+#   quarters of the Nexus files come from the Skyrim SE Nexus, and its own
+#   pool held 332 archives (31 GB) that the Skyrim pool already had.
+#   wj_merge_pool.py folds an existing folder into the shared one.
+#
 #   DarkSouls3 points at an existing folder that predates this tooling. Without
 #   the entry a Dark Souls 3 list would create a fresh "DarkSouls3" folder and
 #   orphan the one already on the share. Inert if the GameType turns out to be
 #   spelled differently.
 GAME_FOLDERS = {
-    "SkyrimSpecialEdition": "Skyrim",
-    "Skyrim":               "Skyrim",
-    "SkyrimVR":             "Skyrim",
-    "DarkSouls3":           "DARK SOULS 3",
+    "SkyrimSpecialEdition":  "Skyrim",
+    "Skyrim":                "Skyrim",
+    "SkyrimVR":              "Skyrim",
+    "EnderalSpecialEdition": "Skyrim",
+    "Enderal":               "Skyrim",
+    "DarkSouls3":            "DARK SOULS 3",
 }
 
 # Cosmetic only: friendly labels for menus and tables. An unknown game falls

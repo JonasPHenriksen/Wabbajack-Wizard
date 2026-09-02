@@ -140,6 +140,9 @@ check("Skyrim LE resolves to the same folder, as configured",
 check("Skyrim VR resolves to the same folder too",
       G.pool_dir("skyrimvr") == G.pool_dir("SkyrimSpecialEdition"),
       str(G.pool_dir("skyrimvr")))
+check("and so does Enderal Special Edition, a total conversion on that engine",
+      G.pool_dir("enderalspecialedition") == G.pool_dir("SkyrimSpecialEdition"),
+      str(G.pool_dir("enderalspecialedition")))
 check("a differently-cased token still finds the folder",
       G.pool_dir("FALLOUT4") == os.path.join(CFG.ARCHIVE_ROOT, "Fallout4"),
       str(G.pool_dir("FALLOUT4")))

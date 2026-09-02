@@ -28,6 +28,7 @@ SUITES = [
     ("t11_gallery.py", "the published gallery, and what you already own"),
     ("t12_cleanup.py", "deleting what nothing wants; folders that are not ours"),
     ("t13_delete.py", "stage 5 end to end: what a deletion must never take"),
+    ("t14_merge.py", "folding one game folder into another"),
 ]
 
 total_pass = total_fail = 0

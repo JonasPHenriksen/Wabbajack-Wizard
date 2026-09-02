@@ -177,8 +177,15 @@ DOWNLOAD_RETRIES = 4             # attempts per file when the stream drops mid-t
 # download_link request 404s under the manifest's stated domain, we retry the
 # same mod/file under these fallbacks (in order) before giving up. Keys and
 # values are lowercase Nexus domain slugs.
+#
+# The two Enderal SE lists held here tag their files "enderalse" and
+# "skyrimse", short forms the API does not serve; candidate_domains() maps
+# those onto the real domain first (NEXUS_URL_ALIASES), and the entries here
+# then say where else to look. Before "enderalse" had an entry, an API-path
+# download of any of its 148 files tried that one bogus domain and gave up.
 NEXUS_DOMAIN_FALLBACKS = {
     "enderalspecialedition": ["skyrimspecialedition", "skyrim"],
+    "enderalse":             ["enderalspecialedition", "skyrimspecialedition", "skyrim"],
     "enderal":               ["skyrim", "enderalspecialedition"],
     "skyrimspecialedition":  ["skyrim"],
     "skyrim":                ["skyrimspecialedition"],
@@ -512,8 +519,14 @@ def candidate_domains(archive, forced=None):
                 ordered.append(d)
     add(forced)
     primary = nexus_domain(archive)
+    # A manifest slug the API does not serve ("skyrimse", "enderalse") is
+    # tried under its real name first, then as written - the alias saves two
+    # wasted requests per file, the raw form stays in case an alias is wrong.
+    real = nexus_url_domain(primary) if primary else None
+    add(real)
     add(primary)
-    for d in NEXUS_DOMAIN_FALLBACKS.get(primary, []):
+    for d in NEXUS_DOMAIN_FALLBACKS.get(primary, []) + \
+            NEXUS_DOMAIN_FALLBACKS.get(real or "", []):
         add(d)
     # Also seed fallbacks from the forced/primary even if primary was unknown.
     if forced:

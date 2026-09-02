@@ -183,4 +183,32 @@ A.prune_backups()
 check("with BACKUPS == MANIFESTS it prunes nothing at all",
       os.path.exists(os.path.join(A.MANIFESTS, "Live.wabbajack")))
 
+# ---------------------------------------------------------------- 6.6
+print("\n 6.6  the Nexus domains a manifest's slug is tried under")
+
+
+def tried(slug):
+    return A.WJ.candidate_domains({"meta": {"gamename": slug}, "state": {}})
+
+
+check("enderalse is tried under the real Enderal SE domain FIRST",
+      tried("enderalse")[0] == "enderalspecialedition", str(tried("enderalse")))
+check("  then the Skyrim SE domain most of its files actually live on",
+      "skyrimspecialedition" in tried("enderalse"), str(tried("enderalse")))
+check("  with the raw slug kept as a later try, not dropped",
+      "enderalse" in tried("enderalse"))
+check("skyrimse goes to skyrimspecialedition first",
+      tried("skyrimse")[0] == "skyrimspecialedition", str(tried("skyrimse")))
+check("a real domain is still tried first and as itself",
+      tried("skyrimspecialedition")[0] == "skyrimspecialedition")
+check("the Enderal LE slug reaches Skyrim LE and Enderal SE",
+      {"skyrim", "enderalspecialedition"} <= set(tried("enderal")))
+check("no domain is tried twice",
+      all(len(tried(s)) == len(set(tried(s)))
+          for s in ("enderalse", "skyrimse", "enderal", "skyrim",
+                    "skyrimspecialedition", "falloutnv")))
+check("a forced domain goes first",
+      A.WJ.candidate_domains({"meta": {"gamename": "enderalse"}, "state": {}},
+                             forced="skyrim")[0] == "skyrim")
+
 sys.exit(summary())

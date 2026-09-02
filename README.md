@@ -20,10 +20,13 @@ Mod Archive/Skyrim/
 └── Nolvus/                       excluded: different installer, left alone
 ```
 
-Skyrim, Skyrim Special Edition and Skyrim VR lists all draw from the one
-`Skyrim` folder, since VR lists are built almost entirely from Special Edition
-archives; `GAME_FOLDERS` in `wj_config.py` is where that is said, and every list
-drawing from a shared folder also protects it.
+Skyrim, Skyrim Special Edition, Skyrim VR and Enderal Special Edition lists all
+draw from the one `Skyrim` folder: VR lists are built almost entirely from
+Special Edition archives, and Enderal is a total conversion on the same engine
+whose lists are three quarters Skyrim SE Nexus files. `GAME_FOLDERS` in
+`wj_config.py` is where that is said, and every list drawing from a shared
+folder also protects it. Folding an existing folder into another is
+`wj_merge_pool.py`'s job (see below).
 
 A folder is only visible to the tooling if a manifest of the same name exists in
 `modlists/`. `modlists/Foo.wabbajack` ↔ `Mod Archive/<Game>/Foo/`. Delete the
@@ -298,7 +301,10 @@ The page URL is confirmed against the API rather than taken from the manifest.
 Manifests disagree with themselves: this collection records `skyrimse` in a
 file's `Meta gameName` and `SkyrimSpecialEdition` in its `State.GameName`, and
 only the second is a slug the website serves. Trusting the manifest opened
-every page on "mod could not be found".
+every page on "mod could not be found". The Enderal lists are the extreme case:
+their files are tagged `enderalse` and `skyrimse`, with a few on the Skyrim LE
+and Enderal LE Nexus, and the API path tries each slug's real domain first
+(`enderalspecialedition`, `skyrimspecialedition`), then the parent game's.
 
 ### Do not try to automate the browser
 
@@ -405,6 +411,7 @@ recognised (if unfetchable) source rather than "unknown".
 | `wabbajack_archive_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
 | `wabbajack_archive_sorter_v2.py` | moves archives between pools |
 | `wabbajack_cdn.py` | the Wabbajack CDN's multi-part protocol |
+| `wj_merge_pool.py` | folds one game's pool folder into another's, once: renames, hash-proven drops, a record |
 
 ## Tests
 
@@ -412,7 +419,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-575 checks across thirteen suites. None of them touch the live archive pools:
+616 checks across fourteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -433,7 +440,8 @@ exactly the failure they want to check.
 | `t10_lookup` | every location an archive may sit in and still count as already downloaded |
 | `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, and Wabbajack's own "Unavailable" rule |
 | `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, and the refusal to delete on an incomplete picture |
-| `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row deletion record, the un-staging warning |
+| `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row deletion record, the un-staging warning, duplicates |
+| `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the
