@@ -46,6 +46,9 @@ desktop.ini
 # Backups taken by a live test before damaging real archives.
 .test_backup/
 
+# Before/after snapshots written by a verification run.
+park_before.json
+
 # Wabbajack's published validation reports, cached so the browse stage can
 # say how much of a list you already hold without downloading its
 # .wabbajack. ~45 MB, entirely re-fetchable: wj_autoupdate.py --gallery
