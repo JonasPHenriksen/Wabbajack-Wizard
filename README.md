@@ -22,7 +22,7 @@ Mod Archive/Skyrim/
 
 A folder is only visible to the tooling if a manifest of the same name exists in
 `modlists/`. `modlists/Foo.wabbajack` ↔ `Mod Archive/<Game>/Foo/`. Delete the
-manifest and the folder goes dark, so deletion is handled explicitly (stage 4).
+manifest and the folder goes dark, so deletion is handled explicitly (stage 5).
 
 Manifest filenames follow `<repo>_@@_<machineURL>.wabbajack`, which *is* the
 published feed key with `/` written as `_@@_`. That is how a local file is
@@ -37,23 +37,97 @@ run.bat              the interactive manager
 
 ## The interactive manager
 
-`run.bat` with no arguments walks four stages. Each shows what it can currently
+`run.bat` with no arguments walks five stages. Each shows what it can currently
 see, then offers **skip**, **all**, or **some** (`1,3,5-7`). Stages are
 independent — skipping one does not affect the others.
 
-1. **Updates** — which tracked modlists have a newer published version, and
+1. **Browse** — every modlist published for a game you keep archives for, and
+   how much of each one is already in your pools, sorted most-complete first.
+   Picking one shows the gap in full and offers to fetch its manifest and start
+   tracking it (see below).
+2. **Updates** — which tracked modlists have a newer published version, and
    which are already current. Fetches the manifests you pick.
-2. **Incomplete** — which modlists are missing archives, and how many of those
+3. **Incomplete** — which modlists are missing archives, and how many of those
    need a Nexus click. Downloads one list at a time, finishing each before
    offering the next.
-3. **Prepare** — gathers everything one modlist needs into its own folder for
+4. **Prepare** — gathers everything one modlist needs into its own folder for
    Wabbajack, then offers to hand it straight over (see below). One at a time by
    design: staging a second list pulls the shared archives back out of the first.
-4. **Space** — what the manifests and per-game Master pools cost, with the
+5. **Space** — what the manifests and per-game Master pools cost, with the
    option to delete modlists and then clear Master. Both steps confirm, and let
    you change the selection at the confirmation.
 
-### How stage 4 avoids deleting something you need
+## Stage 1: what you already own of what you do not have
+
+Wabbajack's gallery is not an API — it is a set of JSON files in the
+`wabbajack-tools/mod-lists` repository. Among them is one report per published
+list, at `reports/<repo>/<machineURL>/status.json`, holding **every archive** of
+that list with its `Name`, `Size`, `Hash`, `Meta` and `State`: the same shape as
+the `Archives[]` inside the `.wabbajack` itself.
+
+That is worth a lot when archives are pooled. A `.wabbajack` runs from 100 MB to
+5 GB; its report is a median 728 KB, and about 140 KB gzipped. So the question
+"how much of this list do I already have?" gets answered for the price of a few
+hundred kilobytes, before committing to the big download rather than after.
+
+The answer is rarely small. Measured against this share's Skyrim pool:
+
+| a list not tracked here | archives | already owned | still to fetch |
+| --- | --- | --- | --- |
+| Tempus Maledictum | 1953 | **99.4%** | 4.3 GB of 143.7 GB |
+| Keizaal | 876 | 98.3% | 2.5 GB of 20.0 GB |
+| NGVO | 1573 | 87.7% | 25.8 GB of 122.1 GB |
+| WakingDreams/TwistedSkyrim | 6031 | 39.4% | 367 GB of 539 GB |
+
+Only games with a pool folder under the archive root are shown, since nothing
+else can overlap what you own. The whole sweep is 224 reports, about 45 MB, and
+takes roughly nine seconds; it is cached under `.gallery-cache/` and served from
+there afterwards, including when GitHub is unreachable.
+
+### "Unavailable" does not mean uninstallable
+
+Wabbajack tags a gallery entry **Unavailable** when either of two unrelated
+things is true, which its own view model computes as:
+
+```csharp
+IsBroken = (Summary?.HasFailures ?? false) || metadata.ForceDown;
+```
+
+- `HasFailures` — `Failed > 0 || ModListIsMissing`. The validator could not
+  download some archives *from their source*.
+- `ForceDown` — a flag the author sets by hand. Of the 33 lists carrying it, 25
+  have zero failing archives.
+
+That state disables the Install button on the gallery tile and does nothing
+else. The `.wabbajack` stays on the CDN, and `Wabbajack.CLI`'s `install` verb —
+the one this tooling drives — never reads either value. More to the point, a
+failing archive only matters if you do not already have it, which for a pooled
+collection is often not the case.
+
+So stage 1 shows these lists, marks them `!`, and names the dead archives split
+into the ones already in your pools and the ones that are not. Keizaal, for
+instance, is Unavailable over a single dead `xLODGen.106.7z` — which is already
+in Master, so nothing about it blocks the install.
+
+Five lists carry `Status: ForcedDown` in their report, and those reports have an
+**empty** `Archives[]` because the validator does not walk a list its author has
+pulled. Their upstream `passed=0 failed=0` means *not checked*, not *none of it
+works*, so they are shown with a `-` for overlap rather than as 0%.
+
+### There is no hidden pool of modlists
+
+The gallery aggregates every repository in `repositories.json`, not just the
+official ones, so the 224 lists it shows are already everything. What sits off
+to the side is small: `unlisted_modlists.json` has 1 entry,
+`utility_modlists.json` has 0, `invalid_repositories.json` names 2 rejected
+repos, and `disabled_mod_lists.json` holds 7 retired lists whose download URLs
+still work. Two of those seven — `living_skyrim` and `elysium` — are published
+again today, so they are filtered out rather than listed twice.
+
+Retired lists appear marked `>`. They can be fetched and installed, but there is
+no feed behind them, so their version can never be tracked.
+
+### How stage 5 avoids deleting something you need
 
 Deleting a modlist moves its archives into that game's `Master` rather than
 removing them, because some are very likely needed by lists you are keeping.
@@ -68,6 +142,8 @@ recorded in `deleted_<game>_<timestamp>.csv`.
 Any action flag skips the wizard:
 
 ```
+run.bat --gallery                     summarise the published gallery
+run.bat --gallery --sync-reports      refresh the validation-report cache
 run.bat --check                       report what has updates, change nothing
 run.bat --only <list>                 do the archive work for one list only
 run.bat --dry-run                     plan everything, change nothing
@@ -140,8 +216,8 @@ Put it in `nexus_api_key.txt` (gitignored) or `NEXUS_API_KEY`.
 
 ## Handing a list to Wabbajack
 
-Once stage 3 has staged a list, everything Wabbajack needs is in one folder and
-the only real decision left is where to install. Stage 3 therefore offers to
+Once stage 4 has staged a list, everything Wabbajack needs is in one folder and
+the only real decision left is where to install. Stage 4 therefore offers to
 hand it over, with `INSTALL_MODE`:
 
 - **`cli`** (default) — asks where to install, then runs
@@ -218,7 +294,8 @@ recognised (if unfetchable) source rather than "unknown".
 | `wj_config.py` | the archive layout: one place, imported by the rest |
 | `wj_wabbajack.py` | finding Wabbajack, the preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
-| `wj_wizard.py` | the interactive four-stage front end |
+| `wj_gallery.py` | the published gallery and its validation reports: what exists, and how much of it you hold |
+| `wj_wizard.py` | the interactive five-stage front end |
 | `wabbajack_archive_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
 | `wabbajack_archive_sorter_v2.py` | moves archives between pools |
 | `wabbajack_cdn.py` | the Wabbajack CDN's multi-part protocol |
@@ -229,7 +306,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-203 checks across six suites. None of them touch the live archive pools:
+366 checks across eleven suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -244,11 +321,19 @@ exactly the failure they want to check.
 | `t4_updater` | filename-to-feed-key matching, negative-cache expiry, damaged state files, odd feed shapes, the start-up guards |
 | `t5_wizard` | empty data in every stage, missing folders, deleting a modlist whose pieces are already gone, awkward filenames |
 | `t6_planning` | present vs stale vs absent decisions, `--force`, foreign-installer exclusion, manifest cache invalidation, backup pruning |
+| `t7_identity` | one filename, several builds: the wrong copy must never satisfy a list that wants a different one |
+| `t8_order` | download order — smallest, largest, manifest — and where unknown sizes land |
+| `t9_wabbajack` | finding the newest CLI, the game preflight, path overlap, the install command |
+| `t10_lookup` | every location an archive may sit in and still count as already downloaded |
+| `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, and Wabbajack's own "Unavailable" rule |
 
-Two real bugs were found this way and are covered by regression checks: a
+Four real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the
-resume logic never engaged), and the sorter validated `--list` only after its
-cleanup pass had already moved files.
+resume logic never engaged); the sorter validated `--list` only after its
+cleanup pass had already moved files; the downloader counted the game root as a
+pool while the sorter did not, so a file loose there was called present and then
+never staged; and `normalise()` dropped `force_down`, which silently disarmed
+half of the Unavailable check.
 
 ## Requirements
 

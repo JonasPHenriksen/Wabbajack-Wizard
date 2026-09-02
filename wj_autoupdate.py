@@ -572,7 +572,29 @@ def normalise(entry, repo):
         "size":     dm.get("Size") if isinstance(dm.get("Size"), int) else None,
         "archives": dm.get("NumberOfArchives"),
         "arch_size": dm.get("SizeOfArchives") if isinstance(dm.get("SizeOfArchives"), int) else None,
+        # Presentation flags. The updater ignores all four, but the browse
+        # stage needs them and re-reading 149 feeds to get them would be
+        # absurd. force_down in particular is half of Wabbajack's own
+        # "Unavailable" test - dropping it here silently disarmed that check.
+        "force_down": bool(entry.get("force_down")),
+        "nsfw": bool(entry.get("nsfw")),
+        "official": bool(entry.get("official")),
+        "tags": [str(t) for t in (entry.get("tags") or [])
+                 if isinstance(t, (str, int))],
     }
+
+
+# One complete all-feeds fetch per process, reused for later subset requests.
+# The browse stage reads all 149 feeds to show the gallery, and the update
+# stage then asks for the handful of repos it tracks; without this the second
+# ask re-fetches feeds the first one already has, and 149 requests is the part
+# of a run that visibly takes time.
+_FEED_CACHE = {"all": None, "complete": False}
+
+
+def reset_feed_cache():
+    _FEED_CACHE["all"] = None
+    _FEED_CACHE["complete"] = False
 
 
 def load_feeds(repo_names=None):
@@ -581,6 +603,20 @@ def load_feeds(repo_names=None):
     any feed failed to load. A caller must not draw a negative conclusion - "no
     published list matches this file" - from an incomplete picture, because one
     flaky request would then untrack a modlist for good."""
+    if _FEED_CACHE["all"] is not None:
+        cached, complete = _FEED_CACHE["all"], _FEED_CACHE["complete"]
+        if repo_names is None:
+            return dict(cached), complete
+        want = set(repo_names)
+        subset = {k: v for k, v in cached.items() if v["repo"] in want}
+        missing = want - {v["repo"] for v in cached.values()}
+        if missing:
+            LOG.warning("[WARN] Unknown repo(s) in TRACK, ignoring: %s",
+                        ", ".join(sorted(missing)))
+        LOG.info("Reusing this run's feed snapshot (%d of %d list(s)).",
+                 len(subset), len(cached))
+        return subset, complete
+
     LOG.info("Fetching feed registry...")
     try:
         repos = http_json(REPOSITORIES_URL)
@@ -627,6 +663,12 @@ def load_feeds(repo_names=None):
         LOG.warning("[WARN] %d feed(s) could not be read this run (%s). The "
                     "picture is incomplete, so nothing will be recorded as "
                     "permanently unmatched.", len(failed), ", ".join(sorted(failed)))
+    # Only a request for EVERY feed produces a snapshot later subset requests
+    # can be served from. Caching a subset would make the next caller think a
+    # repo it never asked about is genuinely absent.
+    if repo_names is None:
+        _FEED_CACHE["all"] = dict(out)
+        _FEED_CACHE["complete"] = not failed
     return out, not failed
 
 
@@ -1125,6 +1167,79 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
     return 0
 
 
+def cmd_gallery(sync=False, force=False):
+    """Report the published gallery, and optionally refresh its cache.
+
+    The interactive browse stage does this for you. The flag exists so a
+    scheduled run can keep the report cache warm - the sweep is 224 files and
+    about 45 MB, which is nine seconds on a decent line, but it is nine
+    seconds nobody wants to wait for at the start of a browse."""
+    try:
+        import wj_gallery as GAL
+    except ImportError:
+        LOG.error("[TERMINATED] wj_gallery.py is missing from %s.", HERE)
+        return 2
+
+    banner("PUBLISHED GALLERY")
+    try:
+        summary = GAL.load_summary()
+        featured = GAL.load_featured()
+        disabled = GAL.load_disabled()
+    except GAL.GalleryError as e:
+        LOG.error("[TERMINATED] The gallery index could not be read: %s", e)
+        return 2
+
+    feeds, complete = load_feeds()
+    if not feeds:
+        LOG.error("[TERMINATED] No feed could be read.")
+        return 2
+
+    state = load_state()
+    tracked = resolve_tracking(state)
+    pooled = GAL.pooled_games({e.get("game") for e in feeds.values()})
+    rows = GAL.build_rows(feeds, summary, featured, disabled, set(tracked),
+                          games=set(pooled))
+
+    LOG.info("%d published list(s); %d for the %d game(s) with a pool folder.",
+             len(feeds), len(rows), len(pooled))
+    LOG.info("Tracked here: %d. Featured: %d. Unavailable: %d. Retired: %d.",
+             sum(1 for r in rows if r["have"]),
+             sum(1 for r in rows if r["featured"]),
+             sum(1 for r in rows if GAL.unavailable(r)),
+             sum(1 for r in rows if r["retired"]))
+    if not complete:
+        LOG.warning("[WARN] Some feeds did not respond, so this is an "
+                    "incomplete picture. Nothing is concluded from an "
+                    "absence here.")
+
+    if sync:
+        keys = [r["key"] for r in rows if not r["retired"]]
+        LOG.info("Fetching %d validation report(s)...", len(keys))
+        last = [0.0]
+
+        def progress(done, total, cached, key):
+            now = time.time()
+            if total and (done == total or now - last[0] > 2.0):
+                last[0] = now
+                LOG.info("  [%d/%d] %s", done, total, (key or "")[:56])
+
+        fetched, cached, failed = GAL.sync_reports(keys, progress=progress,
+                                                   force=force)
+        LOG.info("%d fetched, %d already cached, %d without a published "
+                 "report.", fetched, cached, len(failed))
+        for k in failed:
+            LOG.debug("  no report: %s", k)
+
+    size, files = GAL.cache_size()
+    covered = sum(1 for r in rows if GAL.have_report(r["key"]))
+    LOG.info("Report cache: %s across %d file(s); %d of %d rows covered.",
+             WJ.human_bytes(size), files, covered, len(rows))
+    LOG.info("")
+    LOG.info("Run the wizard to browse them with how much of each you "
+             "already hold.")
+    return 0
+
+
 # ----------------------------------------------------------------------
 # Format assumptions
 # ----------------------------------------------------------------------
@@ -1264,6 +1379,83 @@ def cmd_selftest():
                             f for f, present in zip(
                                 ("Index", "Offset", "Size", "Hash"), fields)
                             if not present) or "none")
+
+    # -- 5. the gallery reports ----------------------------------------
+    # These are what the browse stage answers "how much of this do I already
+    # have?" from, without downloading a 5 GB .wabbajack to find out. They are
+    # files in a GitHub repository, not an API, so their shape is exactly as
+    # unpromised as everything else here.
+    try:
+        import wj_gallery as GAL
+    except ImportError:
+        verdict("wj_gallery.py is present", False,
+                "the browse stage needs it; the rest of the tooling does not")
+    else:
+        try:
+            summary = GAL.load_summary(force=True)
+        except Exception as e:
+            verdict("modListSummary.json loads", False, str(e))
+            summary = {}
+        else:
+            verdict("modListSummary.json loads", bool(summary),
+                    "%d list(s) with a validation row" % len(summary))
+            need = ("failed", "passed", "modlist_missing", "has_failures")
+            complete = sum(1 for r in summary.values()
+                           if all(k in r for k in need))
+            verdict("summary rows carry the health fields",
+                    complete == len(summary),
+                    "%d of %d carry %s" % (complete, len(summary),
+                                           "/".join(need)))
+        try:
+            featured = GAL.load_featured(force=True)
+            verdict("featured_lists.json loads", bool(featured),
+                    "%d featured key(s) - note this is NOT the 'wj-featured' "
+                    "repository, which is a different and smaller set"
+                    % len(featured))
+        except Exception as e:
+            verdict("featured_lists.json loads", False, str(e))
+        try:
+            disabled = GAL.load_disabled(force=True)
+            verdict("disabled_mod_lists.json parses despite its "
+                    "trailing commas", True,
+                    "%d retired list(s)" % len(disabled))
+        except Exception as e:
+            verdict("disabled_mod_lists.json parses despite its "
+                    "trailing commas", False, str(e))
+
+        # The report has to describe the same archives as the manifest, or the
+        # gap it reports is fiction. Checked against a list actually held.
+        recs = load_plan_records()
+        probe = None
+        for fn, rec in sorted(recs.items()):
+            key = fn[:-len(".wabbajack")].replace("_@@_", "/")
+            if key in summary and rec.get("archives"):
+                probe = (key, rec)
+                break
+        if probe is None:
+            verdict("a report can be matched to a manifest we hold", False,
+                    "no tracked list has both a manifest and a summary row")
+        else:
+            key, rec = probe
+            rep = GAL.load_report(key, force=True)
+            if not rep:
+                verdict("the per-list report is published", False, key)
+            else:
+                arch = GAL.report_archives(rep, WJ)
+                verdict("the per-list report lists archives", bool(arch),
+                        "%d in %s" % (len(arch), key))
+                mine = {(a["name"], a["size"]) for a in rec["archives"]}
+                theirs = {(a["name"], a["size"]) for a in arch}
+                verdict("the report describes the SAME archives as the "
+                        ".wabbajack", mine == theirs,
+                        "%s: %d local vs %d published, %d only local, "
+                        "%d only published"
+                        % (key, len(mine), len(theirs),
+                           len(mine - theirs), len(theirs - mine)))
+                verdict("report archives carry a recognised State type",
+                        all(a["kind"] != "unknown" for a in arch),
+                        "unknown: %d" % sum(1 for a in arch
+                                            if a["kind"] == "unknown"))
 
     banner("SELF TEST COMPLETE")
     LOG.info("  %d assumption(s) hold, %d changed.", ok_count, bad_count)
@@ -1872,6 +2064,17 @@ def main():
                          "every archive type is one it recognises. Use it when "
                          "results look implausible: it separates 'upstream "
                          "changed' from 'your collection is odd'.")
+    ap.add_argument("--gallery", action="store_true",
+                    help="Summarise the published gallery: how many lists "
+                         "exist for the games you keep pools for, how many you "
+                         "already track, and how much of the validation-report "
+                         "cache is present. Changes nothing on the pools.")
+    ap.add_argument("--sync-reports", action="store_true",
+                    help="With --gallery, fetch the per-list validation "
+                         "reports into the cache (224 files, about 45 MB). "
+                         "These are what the browse stage uses to say how much "
+                         "of a list you already hold without downloading its "
+                         ".wabbajack first.")
     ap.add_argument("--check", action="store_true",
                     help="Report which tracked lists have updates. Changes nothing.")
     ap.add_argument("--only", metavar="LIST",
@@ -1923,7 +2126,8 @@ def main():
     # - a modifier, not an action - down the non-interactive path, which is
     # exactly the sort of surprise a scheduled run should never spring.
     actions = (args.check, args.discover, args.only, args.force, args.dry_run,
-               args.no_download, args.no_sort, args.rediscover, args.selftest)
+               args.no_download, args.no_sort, args.rediscover, args.selftest,
+               args.gallery, args.sync_reports)
     if args.wizard or not any(actions):
         import wj_wizard
         return wj_wizard.run(verbose=args.verbose, nexus_mode=args.nexus_mode,
@@ -1937,6 +2141,8 @@ def main():
 
     if args.selftest:
         return cmd_selftest()
+    if args.gallery or args.sync_reports:
+        return cmd_gallery(sync=args.sync_reports)
     if args.discover:
         return cmd_discover()
 

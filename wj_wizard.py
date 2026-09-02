@@ -2,24 +2,28 @@
 """
 Interactive front end for the Wabbajack tooling
 ===============================================
-One launch, four stages, each of which can be skipped independently:
+One launch, five stages, each of which can be skipped independently:
 
-  1. UPDATES     which tracked modlists have a newer published version, and
+  1. BROWSE      every modlist published for a game you keep archives for,
+                 with how much of each one you already hold. Read from
+                 Wabbajack's own validation reports, so the answer arrives
+                 before the .wabbajack is downloaded rather than after.
+  2. UPDATES     which tracked modlists have a newer published version, and
                  which are already current. Fetch all, some, or none.
-  2. INCOMPLETE  which modlists are missing archives. Fetch all, some, or
+  3. INCOMPLETE  which modlists are missing archives. Fetch all, some, or
                  none - one list at a time, each finished before the next is
                  offered, because a long Nexus click session is fragile
                  enough without two of them interleaved.
-  3. PREPARE     gather everything one modlist needs into its own folder, so
+  4. PREPARE     gather everything one modlist needs into its own folder, so
                  Wabbajack can install it.
-  4. SPACE       what the manifests and the per-game Master pools are costing,
+  5. SPACE       what the manifests and the per-game Master pools are costing,
                  with the option to delete modlists and then clear Master.
 
 Nothing here re-implements the work: every stage drives the same functions the
 flag interface uses (wj_autoupdate.py), so the two cannot drift apart. This
 module only decides what to show you and what to ask.
 
-Order matters in stage 4 and is not cosmetic. Deleting a modlist moves its
+Order matters in stage 5 and is not cosmetic. Deleting a modlist moves its
 archives into Master, which is exactly where step 4b then wants to delete
 from - so the pools are rebuilt in between, and every candidate is re-checked
 against the remaining lists' demands before it is removed. A file that any
@@ -34,6 +38,7 @@ from datetime import datetime, timezone
 
 import wj_autoupdate as A
 import wj_wabbajack as WB
+import wj_gallery as G
 
 try:
     import wj_config as CFG
@@ -59,10 +64,13 @@ def rule(char="-"):
     out(char * WIDTH)
 
 
+STAGES = 5
+
+
 def stage_header(number, title):
     out()
     rule("=")
-    out(f"  STAGE {number} of 4   {title}")
+    out(f"  STAGE {number} of {STAGES}   {title}")
     rule("=")
 
 
@@ -373,10 +381,386 @@ def fit(values, minimum=4):
 
 
 # ----------------------------------------------------------------------
-# Stage 1 - updates
+# Stage 1 - browse the published gallery
+# ----------------------------------------------------------------------
+PAGE = 20
+
+
+def ask_row(count, extra):
+    """Prompt for a row number, or one of `extra` single-letter actions.
+
+    Returns an int index (0-based) or the letter. Numbers outside the table
+    are refused rather than clamped, for the same reason parse_selection()
+    refuses them: acting on a different row than the one typed is worse than
+    asking again."""
+    out()
+    out("   " + "   ".join(list(extra) + ["[q] quit"]))
+    while True:
+        try:
+            raw = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            out()
+            raise Quit()
+        if raw in ("q", "quit", "exit"):
+            raise Quit()
+        for letter in extra:
+            if raw == letter[1:2]:
+                return letter[1:2]
+        # Every other stage uses 's' to step back out, so accept it as a
+        # synonym rather than making this one screen the exception.
+        if raw in ("s", "skip") and any(l[1:2] == "b" for l in extra):
+            return "b"
+        if raw.isdigit() and 1 <= int(raw) <= count:
+            return int(raw) - 1
+        out(f"  Enter a number between 1 and {count}, or one of "
+            f"{'/'.join(l[1:2] for l in extra)}/q.")
+
+
+def gallery_indexes():
+    """Per-game pool index, built once per run.
+
+    index_existing() walks every pool folder for a game, which is 28 seconds
+    for the 15,000-archive Skyrim pool. Browsing 115 Skyrim lists must not pay
+    that 115 times."""
+    return {}
+
+
+def evaluate_rows(rows, pool_dir, indexes, label):
+    """Fill in each row's gap against the pools. Shows progress; it is slow."""
+    key = os.path.normcase(pool_dir)
+    if key not in indexes:
+        out(f"  Indexing {pool_dir} ...")
+        indexes[key] = A.WJ.index_existing(pool_dir)
+        out(f"    {len(indexes[key])} distinct archive name(s) on disk.")
+    existing = indexes[key]
+
+    todo = [r for r in rows if "gap" not in r]
+    if todo:
+        out(f"  Reading {len(todo)} validation report(s) for {label} ...")
+    for i, r in enumerate(todo, 1):
+        rep = G.load_report(r["key"])
+        r["report_status"] = G.report_status(rep) if rep is not None else None
+        if rep is None or G.report_is_empty(rep):
+            r["gap"] = None
+        else:
+            r["gap"] = G.evaluate(G.report_archives(rep, A.WJ), existing, A.WJ)
+        if todo and (i % 25 == 0 or i == len(todo)):
+            out(f"    [{i}/{len(todo)}]")
+    return rows
+
+
+def gap_sort_key(row):
+    """Most-complete first; lists with no published report last.
+
+    A missing report is not 0% - it is unknown - so it sorts to the bottom
+    rather than pretending to be the worst case."""
+    g = row.get("gap")
+    if not g or not g["total"]:
+        return (1, 0.0, row["title"].lower())
+    return (0, -g["percent"], row["title"].lower())
+
+
+def show_gallery_table(rows, label, shown):
+    """The browse table for one game, most-complete first."""
+    out()
+    rule("-")
+    out(f"  {label.upper()}   {len(rows)} list(s), most complete first")
+    rule("-")
+    nw = fit([r["title"] for r in rows[:shown]], 7) + 2
+    vw = fit([r["version"] for r in rows[:shown]], 7) + 2
+    out(f"     {'#':>3} own {'modlist':<{nw}}{'version':<{vw}}"
+        f"{'arch':>6}{'yours':>8}{'to fetch':>11}{'total':>11}")
+    for i, r in enumerate(rows[:shown], 1):
+        g = r.get("gap")
+        mark = "!" if G.unavailable(r) else (">" if r["retired"] else " ")
+        own = "[x]" if r["have"] else "[ ]"
+        if g and g["total"]:
+            tail = (f"{g['total']:>6}{g['percent']:>7.1f}%"
+                    f"{human(g['missing_bytes']):>11}"
+                    f"{human(g['total_bytes']):>11}")
+        else:
+            n = r["archives"] or 0
+            tail = f"{n:>6}{'-':>8}{'-':>11}{human(r['arch_size'] or 0):>11}"
+        out(f"   {mark} {i:>3} {own} {r['title'][:nw - 2]:<{nw}}"
+            f"{r['version'][:vw - 2]:<{vw}}{tail}")
+    if len(rows) > shown:
+        out(f"         ... {len(rows) - shown} more not shown")
+    out()
+    bits = []
+    if any(G.unavailable(r) for r in rows[:shown]):
+        bits.append("!  flagged Unavailable by Wabbajack")
+    if any(r["retired"] for r in rows[:shown]):
+        bits.append(">  retired from the gallery")
+    if any(not r.get("gap") for r in rows[:shown]):
+        bits.append("-  not checked upstream, so the overlap is unknown")
+    if bits:
+        for b in bits:
+            out("   " + b)
+
+
+def show_gallery_detail(state, row):
+    """One list in full, and the offer to fetch its manifest."""
+    g = row.get("gap")
+    out()
+    rule("=")
+    out(f"  {row['title']}   v{row['version']}")
+    out(f"  {row['key']}      {A.WJ.game_label(row['game'])}")
+    rule("=")
+
+    if G.unavailable(row):
+        out("  UNAVAILABLE in the Wabbajack gallery")
+        for why in G.why_unavailable(row):
+            out(f"    - {why}")
+        out()
+        out("  That state only greys out the Install button on Wabbajack's own")
+        out("  gallery tile. The .wabbajack stays on the CDN, and the CLI")
+        out("  installer this tooling drives never reads the flag - so it is a")
+        out("  warning here, not a wall.")
+        out()
+    if row["retired"]:
+        out("  RETIRED from the gallery. Its download link still works, but")
+        out("  there is no feed behind it, so its version can never be")
+        out("  tracked or updated by this tooling.")
+        out()
+
+    if g is None:
+        st = row.get("report_status")
+        if st is None:
+            out("  No validation report is published for this list.")
+        elif st == "ForcedDown":
+            out("  Its report exists but carries no archives: the validator")
+            out("  does not walk a list whose author has pulled it. The zeros")
+            out("  upstream mean NOT CHECKED, not 'none of it works'.")
+        else:
+            out(f"  Its report is present but lists no archives (status "
+                f"{st}).")
+        out("  So how much of it you already hold cannot be worked out without")
+        out("  downloading the .wabbajack itself, which is the offer below.")
+        if row["archives"]:
+            out(f"  Its feed claims {row['archives']} archive(s), "
+                f"{human(row['arch_size'] or 0)}.")
+    else:
+        out(f"  archives           {g['total']:>7}")
+        out(f"  already yours      {g['present']:>7}   ({g['percent']:.1f}%)")
+        out(f"  still to fetch     {g['missing']:>7}   {human(g['missing_bytes'])}")
+        if g["gamefile"]:
+            out(f"  from the game      {g['gamefile']:>7}   "
+                f"supplied by your install, not downloaded")
+        out(f"  list total                 {human(g['total_bytes'])}")
+
+        dead = g["dead_have"] + g["dead_need"]
+        if dead:
+            out()
+            out(f"  {len(dead)} archive(s) the validator can no longer download:")
+            if g["dead_have"]:
+                out("    already in your pools, so they cost you nothing:")
+                for a in g["dead_have"][:10]:
+                    out(f"       {a['name'][:52]:<52}{human(a['size'] or 0):>11}")
+                if len(g["dead_have"]) > 10:
+                    out(f"       ... and {len(g['dead_have']) - 10} more")
+            if g["dead_need"]:
+                out("    NOT on disk - these are what would stop the install:")
+                for a in g["dead_need"][:10]:
+                    out(f"       {a['name'][:52]:<52}{human(a['size'] or 0):>11}")
+                if len(g["dead_need"]) > 10:
+                    out(f"       ... and {len(g['dead_need']) - 10} more")
+            out()
+            if not g["dead_need"]:
+                out("    You already hold every one of them. Nothing here blocks")
+                out("    this install.")
+            else:
+                out(f"    {len(g['dead_need'])} of {len(dead)} is unobtainable and "
+                    f"not on disk.")
+
+    ent = row.get("entry")
+    out()
+    if row["have"]:
+        out("  You already track this list. Stage 2 handles its updates.")
+        ask("   [b] back", ("b",))
+        return
+    if not ent or not ent.get("download"):
+        out("  Its feed carries no download link, so there is nothing to fetch.")
+        ask("   [b] back", ("b",))
+        return
+
+    out(f"  The .wabbajack itself is {human(ent.get('size') or 0)}. That is the")
+    out("  manifest alone; the archives listed above are a separate job that")
+    out("  stage 3 does.")
+    a = ask("   [d] download the .wabbajack and start tracking it   [b] back",
+            ("d", "b"))
+    if a == "b":
+        return
+    adopt_gallery_list(state, row)
+
+
+def adopt_gallery_list(state, row):
+    """Fetch a new list's manifest and record it as tracked.
+
+    Writes the same state shape the update stage does, so from the next run
+    on this list is indistinguishable from one that was always followed."""
+    ent = row["entry"]
+    filename = A.manifest_filename_for(row["key"], ent)
+    out()
+    out(f"  Downloading {filename} ...")
+    if not A.fetch_manifest(ent, filename):
+        out("  The manifest download failed. Nothing was recorded, so this can")
+        out("  simply be tried again.")
+        return False
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    state.setdefault("lists", {})[row["key"]] = {
+        "version": ent.get("version") or "",
+        "hash": ent.get("hash"),
+        "file": filename,
+        "title": ent.get("title") or row["title"],
+        "updated": ent.get("updated") or "",
+        "applied": now,
+        # Its archives have certainly not been fetched yet, and this is the
+        # flag stage 3 keys off.
+        "needs_archives": True,
+    }
+    if row["entry"].get("repo"):
+        state.setdefault("map", {})[filename.lower()] = row["key"]
+    A.save_state(state)
+    row["have"] = True
+    out(f"  Tracked. {filename} is in {A.MANIFESTS}.")
+    out("  Stage 3 will offer to fetch its archives, and stage 4 to stage it")
+    out("  for Wabbajack.")
+    return True
+
+
+def stage_browse(state, tracked):
+    stage_header(1, "BROWSE THE PUBLISHED GALLERY")
+    out("  Every modlist published for a game you keep archives for, and how")
+    out("  much of each one is already in your pools. This reads Wabbajack's")
+    out("  own validation reports, so the answer arrives before committing to")
+    out("  a multi-gigabyte .wabbajack rather than after.")
+    out()
+
+    try:
+        summary = G.load_summary()
+        featured = G.load_featured()
+        disabled = G.load_disabled()
+    except G.GalleryError as e:
+        out(f"  The gallery index could not be read ({e}).")
+        out("  Skipping this stage; nothing else depends on it.")
+        return
+    feeds, complete = A.load_feeds()
+    if not feeds:
+        out("  No feed could be read, so there is no gallery to show.")
+        return
+    if not complete:
+        out("  [WARN] Some author feeds did not respond, so this gallery is")
+        out("  incomplete. Nothing is concluded from an absence here.")
+
+    pooled = G.pooled_games({e.get("game") for e in feeds.values()})
+    if not pooled:
+        out("  None of the published games has a pool folder on the share, so")
+        out("  there is nothing here that could overlap what you own.")
+        return
+    rows = G.build_rows(feeds, summary, featured, disabled, set(tracked),
+                        games=set(pooled))
+
+    out(f"  {len(feeds)} published list(s); {len(rows)} for the "
+        f"{len(pooled)} game(s) you keep pools for.")
+    out(f"  You already track {sum(1 for r in rows if r['have'])} of them.")
+
+    size, files = G.cache_size()
+    have_reports = sum(1 for r in rows if G.have_report(r["key"]))
+    out()
+    out(f"  Report cache: {files} file(s), {human(size)}; "
+        f"{have_reports} of {len(rows)} rows covered.")
+    if have_reports < len(rows):
+        out("  A full sweep is 224 reports, about 45 MB and under a minute.")
+        a = ask("   [f] fetch the missing reports   [c] carry on with what is "
+                "cached", ("f", "c"))
+        if a == "f":
+            sync_gallery_reports([r["key"] for r in rows if not r["retired"]])
+    else:
+        a = ask("   [r] refresh every report   [c] carry on with the cache",
+                ("r", "c"))
+        if a == "r":
+            sync_gallery_reports([r["key"] for r in rows if not r["retired"]],
+                                 force=True)
+
+    indexes = gallery_indexes()
+    while True:
+        games = sorted(pooled, key=lambda k: (
+            -sum(1 for r in rows if r["game_key"] == k), k))
+        out()
+        gw = fit([pooled[k][0] for k in games], 4) + 2
+        out(f"    {'#':>3}  {'game':<{gw}}{'lists':>7}{'yours':>7}")
+        for i, k in enumerate(games, 1):
+            grp = [r for r in rows if r["game_key"] == k]
+            out(f"    {i:>3}  {pooled[k][0]:<{gw}}{len(grp):>7}"
+                f"{sum(1 for r in grp if r['have']):>7}")
+        out()
+        out("   [1-%d] browse a game   [s] skip this stage   [q] quit"
+            % len(games))
+        try:
+            raw = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            out()
+            raise Quit()
+        if raw in ("q", "quit", "exit"):
+            raise Quit()
+        if raw in ("s", "skip", ""):
+            out("  Skipped.")
+            return
+        if not (raw.isdigit() and 1 <= int(raw) <= len(games)):
+            out(f"  Enter a number between 1 and {len(games)}, or s/q.")
+            continue
+
+        gk = games[int(raw) - 1]
+        label, pool = pooled[gk]
+        grp = [r for r in rows if r["game_key"] == gk]
+        evaluate_rows(grp, pool, indexes, label)
+        grp.sort(key=gap_sort_key)
+
+        shown = min(PAGE, len(grp))
+        while True:
+            show_gallery_table(grp, label, shown)
+            extra = ["[m] more"] if len(grp) > shown else []
+            extra.append("[b] back to the games")
+            pick = ask_row(len(grp), extra)
+            if pick == "b":
+                break
+            if pick == "m":
+                shown = min(len(grp), shown + PAGE)
+                continue
+            show_gallery_detail(state, grp[pick])
+
+
+def sync_gallery_reports(keys, force=False):
+    """Pull the per-list reports into the cache, with progress."""
+    out()
+    out(f"  Fetching validation reports ({len(keys)} list(s)) ...")
+    last = [0.0]
+
+    def progress(done, total, cached, key):
+        now = datetime.now(timezone.utc).timestamp()
+        if total and (done == total or now - last[0] > 1.5):
+            last[0] = now
+            out(f"    [{done}/{total}] {(key or '')[:56]}")
+
+    fetched, cached, failed = G.sync_reports(keys, progress=progress,
+                                             force=force)
+    size, files = G.cache_size()
+    out(f"  {fetched} fetched, {cached} already cached, {len(failed)} without "
+        f"a published report.")
+    out(f"  Cache is now {human(size)} across {files} file(s).")
+    if failed:
+        out("  No report published for:")
+        for k in failed[:8]:
+            out(f"    {k}")
+        if len(failed) > 8:
+            out(f"    ... and {len(failed) - 8} more")
+
+
+# ----------------------------------------------------------------------
+# Stage 2 - updates
 # ----------------------------------------------------------------------
 def stage_updates(state, tracked):
-    stage_header(1, "MODLIST UPDATES")
+    stage_header(2, "MODLIST UPDATES")
     seen, pending, resume = A.pending_updates(state, tracked)
     if seen is None:
         out("  Could not read the published feeds. Skipping this stage.")
@@ -443,10 +827,10 @@ def stage_updates(state, tracked):
 
 
 # ----------------------------------------------------------------------
-# Stage 2 - incomplete modlists
+# Stage 3 - incomplete modlists
 # ----------------------------------------------------------------------
 def stage_incomplete(records, assist):
-    stage_header(2, "INCOMPLETE MODLISTS")
+    stage_header(3, "INCOMPLETE MODLISTS")
     out("  Checking what is on disk...")
     A.WJ.invalidate_existing_cache()
 
@@ -544,10 +928,10 @@ def stage_incomplete(records, assist):
 
 
 # ----------------------------------------------------------------------
-# Stage 3 - prepare one modlist for Wabbajack
+# Stage 4 - prepare one modlist for Wabbajack
 # ----------------------------------------------------------------------
 def stage_prepare(records, state=None):
-    stage_header(3, "PREPARE A MODLIST FOR WABBAJACK")
+    stage_header(4, "PREPARE A MODLIST FOR WABBAJACK")
     out("  Gathers everything one modlist needs into its own folder, so")
     out("  Wabbajack can install it. Only one at a time: staging a second")
     out("  list would pull the shared archives back out of the first.")
@@ -714,7 +1098,7 @@ def offer_install(state, filename, st):
 
 
 # ----------------------------------------------------------------------
-# Stage 4 - disk space
+# Stage 5 - disk space
 # ----------------------------------------------------------------------
 def orphan_sidecars():
     """.metadata files whose .wabbajack is no longer there.
@@ -930,7 +1314,7 @@ def write_deletion_record(game, deleted):
 
 
 def stage_space(state, records):
-    stage_header(4, "DISK SPACE")
+    stage_header(5, "DISK SPACE")
     lists, masters = gather_space(records)
     show_space(lists, masters)
 
@@ -1093,6 +1477,12 @@ def run(verbose=False, nexus_mode=None, allow_size_only=False, no_lock=False):
         out(f"  Nexus:     {A.NEXUS_MODE}"
             + ("  (one browser click per file)" if assist else "  (left to Wabbajack)"))
         rule("=")
+
+        stage_browse(state, tracked)
+        # Re-read the tracking map: browsing may have adopted a new list, and
+        # stage 2 has to see it as tracked or it would offer to fetch the
+        # manifest that was just fetched.
+        tracked = A.resolve_tracking(state)
 
         stage_updates(state, tracked)
         # The cache is read after stage 1 so a manifest fetched just now is
