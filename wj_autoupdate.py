@@ -42,9 +42,9 @@ still one click per file, the same manual step Wabbajack asks of you.
 
 Linux, headless
 ---------------
-Same script. Set ARCHIVE_ROOT to a POSIX path in both of the other scripts and
-leave NEXUS_MODE as "skip": --nxm-assist needs winreg and a browser, so the
-script refuses it off Windows. Pair with the systemd timer if you want it on a
+Same script. Set ARCHIVE_ROOT to a POSIX path in wj_config.py and leave
+NEXUS_MODE as "skip": --nxm-assist needs winreg and a browser, so the script
+refuses it off Windows. Pair with the systemd timer if you want it on a
 schedule.
 
 Requirements
@@ -66,6 +66,7 @@ import shutil
 import base64
 import struct
 import logging
+import logging.handlers
 import argparse
 import importlib.util
 import subprocess
@@ -81,12 +82,10 @@ from datetime import datetime, timedelta, timezone
 DOWNLOADER_SCRIPT = "wabbajack_archive_downloader.py"
 SORTER_SCRIPT     = "wabbajack_archive_sorter_v2.py"
 
-# ARCHIVE_ROOT is NOT configured here. It is read from the downloader script so
-# there is exactly one place to set it. Edit ARCHIVE_ROOT in
-# wabbajack_archive_downloader.py and wabbajack_archive_sorter_v2.py to your
-# server-side POSIX path, e.g.:
-#     ARCHIVE_ROOT = "/mnt/dietpi_userdata/mod-archive"
-# Use the local path, not the //server/share SMB path.
+# ARCHIVE_ROOT is NOT configured here. The archive layout - ARCHIVE_ROOT, the
+# game folders, the pool names, the excluded folders - lives in wj_config.py,
+# which the downloader, the sorter and the wizard all import. Edit it there.
+# On Linux use the local mount path, not the //server/share SMB path.
 
 # Which lists to follow.
 #
@@ -126,11 +125,6 @@ MANIFEST_DIR = "modlists"
 # own, so every list you follow costs real bandwidth.
 #     EXCLUDE = ["LoreRim/LoreRim", "ForgottenGlory_@@_masterstroke"]
 EXCLUDE = []
-
-# Folders under the game root that belong to a different installer. Kept in
-# step with EXCLUDE_POOL_DIRS in the other two scripts; Nolvus has its own
-# installer and its archives must never be indexed, pooled, or moved.
-EXCLUDE_POOL_DIRS = {"nolvus"}
 
 # Optional pins, as "<repo>/<machineURL>". Only needed for a list that
 # auto-matching cannot resolve, which it will tell you about. Anything listed
@@ -230,8 +224,12 @@ def setup_logging(verbose=False):
     LOG.addHandler(con)
     _HANDLERS.append(con)
     try:
-        fh = logging.FileHandler(os.path.join(HERE, "wj_autoupdate.log"),
-                                 encoding="utf-8")
+        # Rotated, because nothing else ever trims this file: the two child
+        # scripts keep only their previous and current logs, while this one
+        # had grown without limit. 5 MB is a few hundred runs.
+        fh = logging.handlers.RotatingFileHandler(
+            os.path.join(HERE, "wj_autoupdate.log"), encoding="utf-8",
+            maxBytes=5 * 1024 * 1024, backupCount=2)
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
         LOG.addHandler(fh)
@@ -2015,6 +2013,9 @@ def cmd_run(args, state, tracked):
                                 "sorter")
                 if rc != 0:
                     failures.append(f"sorter exited {rc}")
+                else:
+                    # The wizard's stage 5 warns before a rebuild undoes this.
+                    state.setdefault("staged", {})[WJ.folder_key(rec["game"])] = target
                 summary.append(f"sorter staged '{target}' (exit {rc})")
 
     # ---- Record state and report --------------------------------------
@@ -2104,10 +2105,11 @@ def main():
                     help="Skip the single-instance lock. Use if a stale lock on "
                          "a network share is blocking you.")
     ap.add_argument("--wizard", action="store_true",
-                    help="Interactive mode: walk the four stages (updates, "
-                         "incomplete lists, prepare one for install, disk "
-                         "space) showing status and offering skip / all / some "
-                         "at each. This is what a bare launch does.")
+                    help="Interactive mode: walk the five stages (browse the "
+                         "gallery, updates, incomplete lists, prepare one for "
+                         "install, disk space) showing status and offering "
+                         "skip / all / some at each. This is what a bare "
+                         "launch does.")
     ap.add_argument("--nexus-mode", choices=("skip", "assist"),
                     help="Override NEXUS_MODE for this run. 'assist' opens each "
                          "Nexus page and waits for your click (needs you at the "

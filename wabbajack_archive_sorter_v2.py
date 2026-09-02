@@ -46,6 +46,15 @@ Changes from the original v2 (two edits, both in this file):
   3. The WJ_MANIFEST_DIR environment variable, when set to a real directory,
      overrides where .wabbajack files are looked for, so this script can live
      apart from the manifests. Log files still go beside this script.
+  4. A file parked under a '~N' suffix (two builds, one name) is indexed under
+     the name the manifest uses and gets that name back when it is staged.
+     Before this, a parked build was invisible to demand: never staged, and
+     reclaimable by a cleanup that saw a name nobody asked for.
+  5. Scope is the POOL FOLDER, not the GameType string. Skyrim and Skyrim
+     Special Edition share one folder here, so both games' lists decide what
+     that folder's Master may hold.
+  6. An in-scope manifest that lists no archives at all stops the run, like an
+     unreadable one does: its files would all look unwanted.
 """
 
 import os
@@ -354,7 +363,10 @@ def parse_manifest(wj_path):
 
         if isinstance(data, dict):
             gt = data.get("GameType")
-            if gt:
+            if gt and not CFG.valid_game_type(gt):
+                LOG.error("  [ERROR] %s declares GameType %r, which is not a "
+                          "folder name. Treating it as no game.", base, gt)
+            elif gt:
                 record["game"] = str(gt)
 
         archives = data.get("Archives") if isinstance(data, dict) else None
@@ -420,6 +432,10 @@ def build_disk_index(search_locations, protected_names):
     made staging hand a list whichever build happened to be scanned first,
     which is then rejected by Wabbajack while the correct build sits untouched
     in another list's folder.
+
+    Keys are canonical names (wj_config.canonical_name): 'Name~1.ext', the
+    form park_in_master() gives a second build, is indexed under 'name.ext',
+    which is what the manifests ask for. The tuple keeps the real filename.
     """
     index = {}
     duplicates = defaultdict(list)
@@ -461,13 +477,14 @@ def build_disk_index(search_locations, protected_names):
                 continue  # ignore subfolders / symlinked dirs
 
             counted += 1
-            if low in index:
-                if not duplicates[low]:
-                    duplicates[low].append(index[low][0][0])
-                duplicates[low].append(full)
-                index[low].append((full, name))
+            key = CFG.canonical_name(low)
+            if key in index:
+                if not duplicates[key]:
+                    duplicates[key].append(index[key][0][0])
+                duplicates[key].append(full)
+                index[key].append((full, name))
             else:
-                index[low] = [(full, name)]
+                index[key] = [(full, name)]
 
         LOG.info("  -> Indexed %d file(s) in '%s'", counted, short(loc))
 
@@ -525,9 +542,14 @@ def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
             if n >= 2:
                 dest_dir, reason = SHARED_DIR, f"shared by {n} lists"
                 # Two lists wanting one name at different sizes cannot both be
-                # served from Shared; leave the choice to the first copy and
-                # let the duplicate report say so.
-                wanted = None
+                # served from Shared, and the duplicate report says so. But a
+                # copy that SOME wanting list can use must win over one that
+                # none can: taking the first copy found used to carry a junk
+                # build into Shared while the right one sat in Master.
+                wanted = set()
+                for l in lists:
+                    wanted |= list_sizes.get(l, {}).get(low, set())
+                wanted = wanted or None
             elif n == 1:
                 dest_dir, reason = os.path.join(OUTPUT_BASE_DIR, lists[0]), f"only '{lists[0]}'"
                 wanted = list_sizes.get(lists[0], {}).get(low)
@@ -536,8 +558,14 @@ def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
                 wanted = None
 
         src, name = pick_copy(copies, wanted)
-        dst = os.path.join(dest_dir, name)
-        plan.append({"src": src, "dst": dst, "name": name, "reason": reason})
+        # A '~N' suffix is storage only. Staging gives the file back the name
+        # the manifest uses, so Wabbajack finds it. A copy bound for Master
+        # keeps whatever name it has: renaming there would make every rebuild
+        # churn the parked duplicates.
+        out_name = name if same_path(dest_dir, MASTER_ARCHIVE_DIR) \
+            else CFG.canonical_name(name)
+        dst = os.path.join(dest_dir, out_name)
+        plan.append({"src": src, "dst": dst, "name": out_name, "reason": reason})
 
     return plan
 
@@ -1034,10 +1062,7 @@ def main():
     OUTPUT_BASE_DIR, MASTER_ARCHIVE_DIR, SHARED_DIR = resolve_game_dirs(chosen_game)
     # A modlist called "Master", "Shared" or "Unmanaged" would have its folder
     # collide with a pool, so those names are refused outright.
-    RESERVED_NAMES = {
-        os.path.basename(MASTER_ARCHIVE_DIR).lower(),
-        os.path.basename(SHARED_DIR).lower(),
-    } | set(EXCLUDE_POOL_DIRS)
+    RESERVED_NAMES = CFG.reserved_list_names()
 
     LOG.info("\nGame selected:        %s", game_label(chosen_game))
     LOG.info("Master archive path:  %s", MASTER_ARCHIVE_DIR)
@@ -1048,10 +1073,28 @@ def main():
         LOG.error("[TERMINATED] Fix the path problems above and re-run.")
         sys.exit(1)
 
-    # Keep only the lists that belong to the chosen game.
-    in_scope = [r for r in records if r["game"] == chosen_game]
-    LOG.info("[SUMMARY] %d of %d modlist(s) match %s.",
+    # Keep every list that draws from the chosen game's POOL FOLDER. Two
+    # GameTypes can share one folder (Skyrim and SkyrimSpecialEdition do), and
+    # then both games' lists decide what is wanted there. Scoping by the
+    # GameType string alone made the other game's archives look unused.
+    in_scope = [r for r in records if CFG.same_pool(r["game"], chosen_game)]
+    LOG.info("[SUMMARY] %d of %d modlist(s) draw from the %s pools.",
              len(in_scope), len(records), game_label(chosen_game))
+    sharing = sorted({r["game"] for r in in_scope} - {chosen_game})
+    if sharing:
+        LOG.info("          (%s share this folder, so their lists count too.)",
+                 ", ".join(game_label(g) for g in sharing))
+
+    # A manifest that reads fine but lists no archives is as unsafe a basis as
+    # one that could not be read: every file that list holds would look
+    # unwanted and be moved into Master. No real modlist wants nothing.
+    empty_in_scope = [r["name"] for r in in_scope if not r["names"]]
+    if empty_in_scope:
+        LOG.error("[TERMINATED] %d in-scope manifest(s) list no archives at all: %s",
+                  len(empty_in_scope), ", ".join(empty_in_scope))
+        LOG.error("             Their archives would look unwanted and be moved "
+                  "into Master. Re-download or remove these files, then re-run.")
+        sys.exit(2)
 
     # Reserved-name collision check (only for in-scope lists).
     modlists_map = {}

@@ -103,6 +103,19 @@ rc, out = s.run("wabbajack_archive_downloader.py",
 check("a right-size copy anywhere satisfies the requirement",
       "both.7z" not in planned(out), planned(out).strip()[:120])
 
+print("\n      a copy parked under a '~N' suffix is still that file")
+s = Sandbox(BOX)
+s.manifest("Target", G, [("parked.7z", 500, "nexus"), ("wrong.7z", 5, "nexus")])
+s.pool_file(G, "Master", "parked~1.7z", 500)   # right build, second name
+s.pool_file(G, "Master", "wrong~1.7z", 999)    # wrong build, second name
+rc, out = s.run("wabbajack_archive_downloader.py",
+                ["--game", G, "--list", "Target", "--dry-run", "--yes"],
+                expect=0)
+check("a suffixed copy at the right size counts as present",
+      "parked.7z" not in planned(out), planned(out).strip()[:120])
+check("  a suffixed copy at the wrong size does not",
+      "wrong.7z" in planned(out), planned(out).strip()[:120])
+
 print("\n      and when only the wrong build exists it is not accepted")
 s = Sandbox(BOX)
 s.manifest("Target", G, [("only.7z", 500, "nexus")])

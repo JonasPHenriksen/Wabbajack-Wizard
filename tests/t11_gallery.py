@@ -137,6 +137,9 @@ check("SkyrimSpecialEdition resolves to the shared Skyrim folder",
       os.path.join(CFG.ARCHIVE_ROOT, "Skyrim"), str(G.pool_dir("skyrimspecialedition")))
 check("Skyrim LE resolves to the same folder, as configured",
       G.pool_dir("Skyrim") == G.pool_dir("SkyrimSpecialEdition"))
+check("Skyrim VR resolves to the same folder too",
+      G.pool_dir("skyrimvr") == G.pool_dir("SkyrimSpecialEdition"),
+      str(G.pool_dir("skyrimvr")))
 check("a differently-cased token still finds the folder",
       G.pool_dir("FALLOUT4") == os.path.join(CFG.ARCHIVE_ROOT, "Fallout4"),
       str(G.pool_dir("FALLOUT4")))

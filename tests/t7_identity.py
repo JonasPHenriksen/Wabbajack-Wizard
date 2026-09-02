@@ -112,10 +112,16 @@ r = W.master_report(G, recs)
 check("the 999-byte build in Master counts as reclaimable",
       r["free_files"] == 1 and r["free_bytes"] == 999, str(r))
 
-s.pool_file(G, "Master", "only-a.7z", 10)      # this one ListA does want
+s.pool_file(G, "Master", "shared~1.7z", 200)   # ListA's build; the ONLY copy
 A.WJ.invalidate_existing_cache()
 r = W.master_report(G, recs)
 check("a file a list wants is protected even sharing a folder with junk",
       r["kept_files"] == 1 and r["free_files"] == 1, str(r))
+
+s.pool_file(G, "Master", "only-a.7z", 10)      # ListA wants it - and already holds it
+A.WJ.invalidate_existing_cache()
+r = W.master_report(G, recs)
+check("a wanted build that a list folder already holds is a duplicate, reclaimable",
+      r["dup_files"] == 1 and r["free_files"] == 2 and r["kept_files"] == 1, str(r))
 
 sys.exit(summary())

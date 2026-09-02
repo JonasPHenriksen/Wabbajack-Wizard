@@ -264,6 +264,30 @@ def resolve_game_dirs(game):
     return base, os.path.join(base, "Master"), os.path.join(base, "Shared")
 
 
+# Shared with the sorter and the wizard through wj_config, re-exported here
+# because wj_autoupdate and wj_wizard reach everything through this module.
+folder_key = CFG.folder_key
+same_pool = CFG.same_pool
+canonical_name = CFG.canonical_name
+is_suffixed = CFG.is_suffixed
+reserved_list_names = CFG.reserved_list_names
+
+
+def safe_game_type(gt, base):
+    """A manifest's GameType, or None if it could not name a folder.
+
+    The GameType becomes a folder name under the archive root; see
+    wj_config.valid_game_type() for why that has to be checked."""
+    gt = str(gt or "")
+    if not gt:
+        return None
+    if not CFG.valid_game_type(gt):
+        LOG.error("  [ERROR] %s declares GameType %r, which is not a folder "
+                  "name. Treating it as no game.", base, gt)
+        return None
+    return gt
+
+
 def sanitize_url(url):
     """Percent-encode unsafe characters (notably spaces) in a URL's path and
     query without double-encoding existing %xx escapes.
@@ -384,7 +408,7 @@ def parse_manifest(wj_path):
                 data = json.load(f)
 
         if isinstance(data, dict) and data.get("GameType"):
-            record["game"] = str(data["GameType"])
+            record["game"] = safe_game_type(data["GameType"], base)
 
         archives = data.get("Archives") if isinstance(data, dict) else None
         if not isinstance(archives, list):
@@ -574,7 +598,13 @@ def index_existing(game_base, known_lists=None):
     the root either, so it would never stage such a file into the list folder -
     meaning counting it as present made the archive get skipped here and then be
     missing when Wabbajack looked for it. Better to fetch a redundant copy into
-    the right place than to be quietly short one file."""
+    the right place than to be quietly short one file.
+
+    Keys are CANONICAL names: a copy parked as 'Name~1.ext' is indexed under
+    'name.ext', because that is the name a manifest asks for, and the sorter
+    restores it when it stages the file. Without this a wanted build that had
+    been parked under a suffix was invisible - re-downloaded here, never staged
+    there, and deleted by a cleanup that saw a name nobody wanted."""
     known = (frozenset(n.lower() for n in known_lists)
              if known_lists is not None else KNOWN_LIST_DIRS)
     cache_key = (os.path.normcase(os.path.abspath(game_base)), known)
@@ -638,7 +668,7 @@ def index_existing(game_base, known_lists=None):
                     size = os.path.getsize(full)
                 except OSError:
                     size = None
-                index.setdefault(low, []).append((full, size))
+                index.setdefault(canonical_name(low), []).append((full, size))
         except OSError as e:
             LOG.warning("  [WARN] Cannot read %s: %s", loc, e)
     _EXISTING_CACHE[cache_key] = index
@@ -1316,10 +1346,37 @@ def download_one(url, archive, dest_dir, results):
     # WabbajackCDN URLs are directory prefixes, not files.
     if _HAVE_CDN and (archive.get("_cdn") or _CDN.is_cdn_url(url)):
         os.makedirs(dest_dir, exist_ok=True)
-        if not _CDN.download(url, dest, expected_size=archive["size"],
-                             expected_hash=archive["hash"]):
+        # strict_hash: the CDN checks the assembled file against ITS definition,
+        # which describes whatever is being served today. The manifest pins the
+        # build the list was made against. When the two disagree the file is
+        # one Wabbajack will reject, so it is refused before the download
+        # rather than fetched and then thrown away. The HTTP path below has
+        # always discarded a wrong-hash file; this path used to keep it.
+        ok, got = _CDN.download(url, dest, expected_size=archive["size"],
+                                expected_hash=archive["hash"], detail=True,
+                                strict_hash=True)
+        if not ok:
             results["failed"] += 1
-            results["failures"].append((name, "CDN multi-part download failed"))
+            results["failures"].append((name, "CDN multi-part download failed "
+                                              "(see log: definition, parts, or "
+                                              "a hash that differs from the "
+                                              "manifest)"))
+            return False
+        # The CDN module already hashed the assembled file; do not read a
+        # multi-GB archive off the share a second time just to repeat that.
+        if archive["hash"] and got and got != archive["hash"]:
+            good, reason = False, "hash %s != manifest %s" % (got, archive["hash"])
+        else:
+            good, reason = verify_file(dest, archive["size"],
+                                       None if got else archive["hash"])
+        if not good:
+            LOG.error("  [ERROR] %s failed verification: %s - discarding.", name, reason)
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            results["failed"] += 1
+            results["failures"].append((name, f"verify: {reason}"))
             return False
         write_meta(dest, archive["meta_text"])
         results["done"] += 1
@@ -1783,6 +1840,14 @@ def main():
     banner("STEP 3: SELECT MODLIST")
     target = choose_modlist(modlists_map, preset=args.preset)
     record = next(r for r in in_scope if r["name"] == target)
+
+    # The list's folder is named after it, so a list called "Master" would
+    # download straight into the Master pool. The sorter refuses these names;
+    # so does this.
+    if target.lower() in reserved_list_names():
+        LOG.error("[TERMINATED] Modlist '%s' clashes with a reserved pool folder "
+                  "name. Rename the .wabbajack file.", target)
+        sys.exit(2)
 
     game_base, _, _ = resolve_game_dirs(chosen_game)
     dest_dir = args.dest or os.path.join(game_base, target)

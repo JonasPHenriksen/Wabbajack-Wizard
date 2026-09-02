@@ -255,6 +255,21 @@ def game_key(token):
     return str(canonical_game(token) or "").lower()
 
 
+def pool_key(token):
+    """A case-stable key for the POOL FOLDER a feed's game token maps onto.
+
+    Distinct from game_key(): Skyrim and Skyrim Special Edition are two games
+    but one folder here, and anything deciding what that folder's Master may
+    hold has to consult the lists of both. Without wj_config this collapses to
+    game_key(), which is right for every game that has its own folder."""
+    g = canonical_game(token)
+    if not g:
+        return ""
+    if CFG is not None and hasattr(CFG, "folder_key"):
+        return CFG.folder_key(g)
+    return g.lower()
+
+
 def game_label(token):
     g = canonical_game(token)
     if CFG is not None and hasattr(CFG, "game_label"):
@@ -456,27 +471,49 @@ def sync_reports(keys, progress=None, force=False, workers=WORKERS):
 # ----------------------------------------------------------------------
 # What the whole published gallery wants
 # ----------------------------------------------------------------------
-def published_builds(games, feeds, summary, wj, progress=None):
-    """Every archive build any published list for `games` asks for.
+# Why a published list could not contribute to the protected set. Only the
+# first is permanent: the validator does not walk a list its author has
+# pulled, so its report carries an empty Archives[] for as long as it stays
+# pulled. Every other reason is a gap that a refresh, or the validator's next
+# run, closes - and a caller deciding what to DELETE must treat those as
+# "do not know yet", not as "wants nothing".
+PULLED = "pulled by its author; its report lists no archives"
+UNVALIDATED = "not yet validated (no summary row)"
+UNREADABLE = "report unreadable or not cached"
 
-    Returns (want, checked, unchecked) where `want` is
-    { name_lower: set(sizes) } in the same shape the wizard's wanted_builds()
-    produces, `checked` is how many lists contributed, and `unchecked` names
-    the lists that could not - no published report, or a ForcedDown one whose
-    Archives[] is empty.
+
+def published_builds(pools, feeds, summary, wj, progress=None):
+    """Every archive build any published list for these pool folders asks for.
+
+    `pools` is a set of pool_key() values. Returns (want, checked, unchecked)
+    where `want` is { name_lower: set(sizes) } in the same shape the wizard's
+    wanted_builds() produces, `checked` is how many lists contributed, and
+    `unchecked` maps each list that could not to the reason - PULLED,
+    UNVALIDATED, UNREADABLE, or a description of an empty report that is not
+    ForcedDown.
 
     `unchecked` is the important return value. This set is used to decide what
     is safe to DELETE, so an incomplete answer is not a smaller answer - it is
     a wrong one. A caller must refuse to delete on the strength of a set it
-    knows to be short, rather than quietly reclaiming a few more gigabytes."""
-    keys = [k for k, e in feeds.items()
-            if game_key(e.get("game")) in games and k in summary]
+    knows to be short, rather than quietly reclaiming a few more gigabytes.
+    Every published list for the pools is named here, including those with no
+    summary row: a list the validator has not seen yet wants things too, and
+    silently leaving it out is exactly the short answer this guards against."""
+    keys = [k for k, e in feeds.items() if pool_key(e.get("game")) in pools]
     want = {}
-    checked, unchecked = 0, []
+    checked, unchecked = 0, {}
     for i, key in enumerate(keys, 1):
+        if key not in summary:
+            unchecked[key] = UNVALIDATED
+            continue
         rep = load_report(key)
-        if rep is None or report_is_empty(rep):
-            unchecked.append(key)
+        if rep is None:
+            unchecked[key] = UNREADABLE
+            continue
+        if report_is_empty(rep):
+            st = report_status(rep)
+            unchecked[key] = (PULLED if st == "ForcedDown"
+                              else "report lists no archives (status %s)" % st)
             continue
         checked += 1
         for a in report_archives(rep, wj):

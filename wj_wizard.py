@@ -24,10 +24,30 @@ flag interface uses (wj_autoupdate.py), so the two cannot drift apart. This
 module only decides what to show you and what to ask.
 
 Order matters in stage 5 and is not cosmetic. Deleting a modlist moves its
-archives into Master, which is exactly where step 4b then wants to delete
+archives into Master, which is exactly where step 5c then wants to delete
 from - so the pools are rebuilt in between, and every candidate is re-checked
 against the remaining lists' demands before it is removed. A file that any
 surviving modlist still needs is never deleted, whatever you select.
+
+The rules stage 5 deletes under, all of them checked at the moment of
+deletion rather than trusted from the table:
+
+  * a file is protected by NAME AND SIZE, and the name is read through any
+    '~N' suffix a parked duplicate carries (wj_config.canonical_name);
+  * demand is counted per POOL FOLDER, so every GameType sharing a folder
+    protects it (Skyrim and Skyrim Special Edition share one here);
+  * a manifest named after a pool folder is never deleted - its "folder" IS
+    the pool;
+  * if the rebuild after a deletion fails, that game's Master is not offered;
+  * if any manifest is unreadable, or lists no archives at all, its demand is
+    unknown and Master is not offered - for that game, or for any game when
+    the manifest's game itself cannot be read;
+  * the "any known modlist" rule refuses on any gap in the published picture
+    except the permanent one (lists their authors have pulled), which it names;
+  * a Master copy of a build that also exists in Shared, in a modlist's
+    folder, or under a better name inside Master is a duplicate, reclaimable
+    under either rule; the other copy is re-checked on disk first and named
+    in the record.
 """
 
 import os
@@ -258,16 +278,22 @@ def tree_size(path):
 
 
 def wanted_builds(records, game):
-    """{ name_lower: set(sizes) or None } for everything this game's lists want.
+    """{ name_lower: set(sizes) or None } for everything wanted from this
+    game's POOL FOLDER.
 
     A value of None means "some list wants this name but states no size", in
     which case every copy has to be protected. Keyed by name AND size because
     a name does not identify content: with only names, a junk build of
     Synthesis.zip that no list wants reads as still needed purely because some
-    OTHER build of that name is wanted, and stage 4b then refuses to free it."""
+    OTHER build of that name is wanted, and stage 5c then refuses to free it.
+
+    Every list drawing from the same folder counts, not just those with the
+    same GameType string: Skyrim and Skyrim Special Edition share one Master
+    here, and an LE list's archives in it must not read as unwanted just
+    because the SE lists were the only ones asked."""
     want = {}
     for e in records.values():
-        if e.get("game") != game:
+        if not A.WJ.same_pool(e.get("game"), game):
             continue
         for a in e["archives"]:
             low = a["name"].lower()
@@ -283,16 +309,52 @@ def wanted_builds(records, game):
 
 
 def is_wanted(want, name, size):
-    """Is this exact file one that a remaining modlist asks for?"""
-    if name.lower() not in want:
+    """Is this exact file one that a remaining modlist asks for?
+
+    The name is read through any '~N' suffix: 'Synthesis~1.zip' at a size some
+    list wants IS that list's Synthesis.zip, parked under a second name because
+    another build held the first. Judging it by the suffixed name made every
+    such copy reclaimable, wanted or not."""
+    low = A.WJ.canonical_name(name).lower()
+    if low not in want:
         return False
-    sizes = want[name.lower()]
+    sizes = want[low]
     return sizes is None or size in sizes
 
 
 def known_list_dirs():
     """Lowercased folder names that legitimately belong to a modlist we follow."""
     return A.WJ.known_list_dirs_from(A.MANIFESTS)
+
+
+def refresh_known_dirs():
+    """Re-read which folders belong to a modlist we hold.
+
+    The downloader module snapshots this at start-up. Stage 1 can adopt a
+    list and stage 5 can delete one, and after either the snapshot is stale:
+    a list adopted and fetched in one run read as entirely missing afterwards,
+    because its brand-new folder was not in the snapshot, so it was treated as
+    a stray and left out of the index."""
+    A.WJ.set_known_list_dirs(known_list_dirs())
+
+
+def demand_problems(records):
+    """Manifests whose demand cannot be trusted when deciding what to delete.
+
+    Returns (unreadable, empty): the filenames that could not be read at all,
+    and { folder key: [filenames] } for manifests that read fine but list no
+    archives. The sorter refuses to run on either. Stage 5c refuses likewise,
+    because a list that protects nothing is not a list, it is a gap - and an
+    unreadable one does not even say which game's Master it would have
+    protected."""
+    unreadable = sorted(fn for fn, e in records.items()
+                        if not e.get("readable", True))
+    empty = {}
+    for fn in sorted(records):
+        e = records[fn]
+        if e.get("readable", True) and e.get("game") and not e.get("archives"):
+            empty.setdefault(A.WJ.folder_key(e["game"]), []).append(fn)
+    return unreadable, empty
 
 
 def strays_in(game_dir):
@@ -374,18 +436,23 @@ def park_unmanaged(game, folder):
 
 
 
-def gallery_protection(games, progress=True):
-    """What every published list for these games wants, or None if unknowable.
+def gallery_protection(pools, progress=True):
+    """What every published list drawing from these pool folders wants, or
+    None if that cannot be known.
 
-    Returns (want, note, unchecked). A None want means the picture is
-    incomplete and the caller must not delete on the strength of it.
+    `pools` is a set of folder keys (wj_config.folder_key). Returns
+    (want, note, pulled). A None want means the picture is incomplete and the
+    caller must not delete on the strength of it.
 
-    `unchecked` names published lists that exist but could not be read - in
-    practice the handful whose author has pulled them, whose validation report
-    is published with an empty Archives[]. They are not a reason to refuse
-    outright, because that state is permanent and would disable the feature for
-    good; but an archive belonging only to one of those lists is NOT protected,
-    and the caller must say so where the decision is made."""
+    `pulled` names the published lists whose authors have taken them down.
+    The validator does not walk those, so their report carries an empty
+    Archives[] for as long as they stay down: a permanent gap, which would
+    disable this feature for good if it blocked, so it is named in the
+    confirmation instead. Every OTHER kind of gap - a feed that did not
+    answer, a list with no summary row yet, a report that is missing,
+    unreadable, or empty for some other reason - closes with a refresh or the
+    validator's next run, and so refuses. Before this, all of those were
+    lumped in with the pulled lists and described as pulled."""
     try:
         summary = G.load_summary()
     except G.GalleryError as e:
@@ -397,9 +464,8 @@ def gallery_protection(games, progress=True):
         return None, ("some author feeds did not respond, so the list of "
                       "published modlists is short"), []
 
-    keys = [k for k, e in feeds.items()
-            if G.game_key(e.get("game")) in games and k in summary]
-    missing = [k for k in keys if not G.have_report(k)]
+    keys = [k for k, e in feeds.items() if G.pool_key(e.get("game")) in pools]
+    missing = [k for k in keys if k in summary and not G.have_report(k)]
     if missing:
         return None, (f"{len(missing)} of {len(keys)} published list(s) have no "
                       f"cached validation report; run stage 1 and fetch them, "
@@ -408,16 +474,75 @@ def gallery_protection(games, progress=True):
     if progress:
         out(f"  Reading what {len(keys)} published list(s) want ...")
     want, checked, unchecked = G.published_builds(
-        set(games), feeds, summary, A.WJ)
+        set(pools), feeds, summary, A.WJ)
+    pulled = sorted(k for k, why in unchecked.items() if why == G.PULLED)
+    gaps = sorted((k, why) for k, why in unchecked.items() if why != G.PULLED)
+    if gaps:
+        shown = "; ".join(f"{k}: {why}" for k, why in gaps[:3])
+        return None, (f"{len(gaps)} published list(s) could not be checked and "
+                      f"the gap is not permanent ({shown}"
+                      f"{' ...' if len(gaps) > 3 else ''}); refresh the "
+                      f"reports in stage 1, or wait for the validator's next "
+                      f"run"), []
     note = f"{checked} published list(s) consulted"
-    if unchecked:
-        note += (f"; {len(unchecked)} could not be "
-                 f"({', '.join(sorted(unchecked)[:3])}"
-                 f"{' ...' if len(unchecked) > 3 else ''})")
-    return want, note, sorted(unchecked)
+    if pulled:
+        note += (f"; {len(pulled)} pulled by their authors and publishing no "
+                 f"archive list ({', '.join(pulled[:3])}"
+                 f"{' ...' if len(pulled) > 3 else ''})")
+    return want, note, pulled
 
 
-def master_report(game, records, extra_want=None):
+def _still_there(path, size):
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) == size
+    except OSError:
+        return False
+
+
+def duplicate_of(index, master, path, name, size):
+    """Another copy of this exact build that makes the Master copy redundant,
+    or None.
+
+    `index` is the downloader's index of the game's pools - Master, Shared and
+    every modlist folder, keyed by canonical name - so "the same build" means
+    what it means everywhere else here: the same name, read through any '~N'
+    suffix, at the same size. A copy in a stray or excluded folder is not in
+    the index and so does not count; that errs towards keeping.
+
+    A Master copy is redundant when such a copy exists (a) anywhere outside
+    Master, or (b) inside Master under a better name - the unsuffixed one,
+    then the first in name order. The winner is fixed by that rule rather
+    than by which file is looked at first, so the outcome does not depend on
+    the order the folder is walked in.
+
+    The other copy is re-checked on disk before it counts. The index is a
+    snapshot, and deleting on the strength of a copy that is no longer there
+    is the one mistake this cannot afford."""
+    if size is None:
+        return None
+    key = A.WJ.canonical_name(name).lower()
+    here = os.path.normcase(os.path.abspath(path))
+    mnorm = os.path.normcase(os.path.abspath(master))
+    outside, inside = [], [(path, here)]
+    for p, s in index.get(key) or []:
+        if s != size:
+            continue
+        pn = os.path.normcase(os.path.abspath(p))
+        if pn == here:
+            continue
+        (inside if os.path.dirname(pn) == mnorm else outside).append((p, pn))
+    for p, _pn in outside:
+        if _still_there(p, size):
+            return p
+    inside.sort(key=lambda t: (A.WJ.is_suffixed(os.path.basename(t[0])),
+                               os.path.basename(t[0]).lower()))
+    best, best_norm = inside[0]
+    if best_norm != here and _still_there(best, size):
+        return best
+    return None
+
+
+def master_report(game, records, extra_want=None, label=None):
     """Master's contents for one game, split into kept and reclaimable.
 
     Master is *meant* to hold only what no present modlist needs, but that is
@@ -429,14 +554,22 @@ def master_report(game, records, extra_want=None):
     `extra_want` adds a second body of demand - in practice everything the
     published gallery asks for - and is measured SEPARATELY rather than merged,
     so the two protection modes can be shown side by side and the difference
-    between them is a number rather than a guess."""
+    between them is a number rather than a guess.
+
+    A duplicate (see duplicate_of) is reclaimable under both rules, and is
+    counted apart in dup_files/dup_bytes so the confirmation can say how much
+    of the total is duplication rather than dead weight."""
     keep = wanted_builds(records, game)
     wide = merge_want(keep, extra_want) if extra_want else None
-    _b, master, _s = A.WJ.resolve_game_dirs(game)
+    base, master, _s = A.WJ.resolve_game_dirs(game)
+    index = A.WJ.index_existing(base)
     r = {"game": game, "path": master, "bytes": 0, "files": 0,
          "free_bytes": 0, "free_files": 0, "kept_files": 0,
+         "dup_bytes": 0, "dup_files": 0,
          "wide_free_bytes": 0, "wide_free_files": 0, "wide_kept_files": 0,
-         "wide": wide is not None}
+         "wide": wide is not None,
+         "label": label or A.WJ.game_label(game),
+         "folder": A.WJ.folder_key(game), "games": [game]}
     try:
         with os.scandir(master) as it:
             for x in it:
@@ -448,6 +581,15 @@ def master_report(game, records, extra_want=None):
                     continue
                 r["bytes"] += size
                 r["files"] += 1
+                if duplicate_of(index, master, x.path, x.name, size):
+                    r["dup_files"] += 1
+                    r["dup_bytes"] += size
+                    r["free_files"] += 1
+                    r["free_bytes"] += size
+                    if wide is not None:
+                        r["wide_free_files"] += 1
+                        r["wide_free_bytes"] += size
+                    continue
                 if is_wanted(keep, x.name, size):
                     r["kept_files"] += 1
                 else:
@@ -467,6 +609,28 @@ def master_report(game, records, extra_want=None):
 def merge_want(*maps):
     """Union of { name: sizes | None } maps; None (unstated size) wins."""
     return G.merge_builds(*maps)
+
+
+def measure_masters(records, extra_want=None):
+    """One master_report() per POOL FOLDER the held manifests draw from.
+
+    Grouped by folder rather than by GameType, because two GameTypes can share
+    a folder. Measured per GameType, the shared Skyrim Master appeared twice
+    with two different answers, and clearing it "for Skyrim Special Edition"
+    would have removed what the Skyrim LE lists needed."""
+    groups = {}
+    for e in records.values():
+        g = e.get("game")
+        if g:
+            groups.setdefault(A.WJ.folder_key(g), set()).add(g)
+    out_rows = []
+    for fkey in sorted(groups):
+        games = sorted(groups[fkey])
+        label = " / ".join(A.WJ.game_label(g) for g in games)
+        m = master_report(games[0], records, extra_want, label=label)
+        m["games"] = games
+        out_rows.append(m)
+    return out_rows
 
 
 
@@ -791,6 +955,10 @@ def adopt_gallery_list(state, row):
     if row["entry"].get("repo"):
         state.setdefault("map", {})[filename.lower()] = row["key"]
     A.save_state(state)
+    # Its folder is legitimate from now on. Without this, stage 3's download
+    # into that folder read back as "still missing", because the index
+    # treated a folder it had never heard of as a stray.
+    refresh_known_dirs()
     row["have"] = True
     out(f"  Tracked. {filename} is in {A.MANIFESTS}.")
     out("  Stage 3 will offer to fetch its archives, and stage 4 to stage it")
@@ -1141,6 +1309,10 @@ def stage_prepare(records, state=None):
                       "sorter")
     out(f"  Sorter exited {rc}.")
     if rc == 0 and state is not None:
+        # Remember which list this folder's pools are arranged for, so stage
+        # 5 can say so before a rebuild undoes it.
+        state.setdefault("staged", {})[A.WJ.folder_key(st["game"])] = stem_of(fn)
+        A.save_state(state)
         A.WJ.invalidate_existing_cache()
         fresh = list_status(records[fn]) or st
         offer_install(state, fn, fresh)
@@ -1332,12 +1504,7 @@ def gather_space(records, extra_want=None):
         lists.append({"file": fn, "game": game, "manifest_bytes": msize,
                       "folder_bytes": folder_bytes, "folder_files": folder_files})
 
-    games = {}
-    for e in records.values():
-        if e.get("game"):
-            games.setdefault(e["game"], None)
-    masters = [master_report(game, records, extra_want) for game in sorted(games)]
-    return lists, masters
+    return lists, measure_masters(records, extra_want)
 
 
 def show_space(lists, masters):
@@ -1349,11 +1516,18 @@ def show_space(lists, masters):
               for x in lists], 4) + 2
     out(f"    {'#':>3}  {'modlist':<{nw}}{'game':<{gw}}{'manifest':>10}"
         f"{'its archives':>14}")
+    reserved = A.WJ.reserved_list_names()
+    flagged = False
     for i, x in enumerate(lists, 1):
-        out(f"    {i:>3}  {stem_of(x['file']):<{nw}}"
+        mark = "!" if stem_of(x["file"]).lower() in reserved else " "
+        flagged = flagged or mark == "!"
+        out(f"  {mark} {i:>3}  {stem_of(x['file']):<{nw}}"
             f"{(A.WJ.game_label(x['game']) if x['game'] else '?'):<{gw}}"
             f"{human(x['manifest_bytes']):>10}"
             f"{human(x['folder_bytes']) + ' ' if x['folder_files'] else '- ':>14}")
+    if flagged:
+        out("    !  named after a pool folder, so its 'folder' IS that pool. It")
+        out("       cannot be deleted here; rename the .wabbajack file.")
     orphans = orphan_sidecars()
     if orphans:
         out()
@@ -1368,24 +1542,119 @@ def show_space(lists, masters):
     out()
     out(f"  MASTER POOLS ({human(sum(m['bytes'] for m in masters))}, of which "
         f"{human(sum(m['free_bytes'] for m in masters))} is reclaimable)")
-    gw = fit([A.WJ.game_label(m["game"]) for m in masters], 4) + 2
+    gw = fit([m["label"] for m in masters], 4) + 2
     out(f"    {'#':>3}  {'game':<{gw}}{'files':>8}{'size':>11}"
         f"{'reclaimable':>13}{'still needed':>14}")
     for i, m in enumerate(masters, 1):
-        out(f"    {i:>3}  {A.WJ.game_label(m['game']):<{gw}}"
+        out(f"    {i:>3}  {m['label']:<{gw}}"
             f"{m['files']:>8}{human(m['bytes']):>11}"
             f"{human(m['free_bytes']):>13}{m['kept_files']:>10} file(s)")
 
 
-def delete_modlist(state, entry):
+def _empty_into_master(folder, master, keep):
+    """Move every file in a deleted list's folder into Master.
+
+    Returns (archives moved, archives dropped as redundant). Sidecar .meta
+    files travel with their archive, under whatever name the archive ends up
+    with, so 5c can still judge each one by its owner.
+
+    The hard case is a name already taken in Master by a DIFFERENT build. Both
+    files are kept, but only one can keep the name, and both the sorter and
+    the cleanup find files by name. `keep` - what the surviving lists want -
+    decides: a build a survivor wants keeps the name, and the other is parked
+    under a '~N' suffix. Before this the incoming copy was always the one
+    suffixed, which is how a build another list still needed came to be the
+    one deleted: the rebuild handed that list the junk under the real name,
+    and 5c removed the suffixed file as something nobody asked for."""
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError as e:
+        out(f"    cannot read {folder}: {e}")
+        return 0, 0
+    files = [n for n in names if os.path.isfile(os.path.join(folder, n))]
+    metas = {n.lower(): n for n in files if n.lower().endswith(".meta")}
+    archives = [n for n in files if not n.lower().endswith(".meta")]
+    moved = redundant = 0
+
+    def take_meta(owner):
+        return metas.pop((owner + ".meta").lower(), None)
+
+    def place_meta(meta_name, owner_dst):
+        target = owner_dst + ".meta"
+        try:
+            if os.path.isfile(target):
+                os.remove(target)          # an orphan left from something else
+            shutil.move(os.path.join(folder, meta_name), target)
+        except (OSError, shutil.Error) as e:
+            out(f"    could not move {meta_name}: {e}")
+
+    for name in archives:
+        src = os.path.join(folder, name)
+        dst = os.path.join(master, name)
+        try:
+            size = os.path.getsize(src)
+            if os.path.isfile(dst):
+                there = os.path.getsize(dst)
+                if there == size:
+                    # An identical copy already in Master makes this one
+                    # redundant; keeping both would just be litter for 5c.
+                    os.remove(src)
+                    m = take_meta(name)
+                    if m:
+                        os.remove(os.path.join(folder, m))
+                    redundant += 1
+                    continue
+                inc_wanted = keep is not None and is_wanted(keep, name, size)
+                old_wanted = keep is not None and is_wanted(keep, name, there)
+                if inc_wanted and not old_wanted:
+                    # The survivors want THIS build. The one already there
+                    # gives up the name and is parked, sidecar and all.
+                    aside = unique_path(dst)
+                    shutil.move(dst, aside)
+                    if os.path.isfile(dst + ".meta"):
+                        shutil.move(dst + ".meta", aside + ".meta")
+                else:
+                    dst = unique_path(dst)
+            shutil.move(src, dst)
+            m = take_meta(name)
+            if m:
+                place_meta(m, dst)
+            moved += 1
+        except (OSError, shutil.Error) as e:
+            out(f"    could not move {name}: {e}")
+
+    # Sidecars whose archive was not in the folder go along anyway; 5c judges
+    # a .meta by its archive and removes an orphan.
+    for m in list(metas.values()):
+        try:
+            shutil.move(os.path.join(folder, m),
+                        unique_path(os.path.join(master, m)))
+        except (OSError, shutil.Error) as e:
+            out(f"    could not move {m}: {e}")
+    return moved, redundant
+
+
+def delete_modlist(state, entry, keep=None):
     """Remove one modlist: archives to Master, manifest gone, state cleaned.
 
     The archives are moved rather than deleted because some of them are very
     likely needed by modlists you are keeping. Master is where 'needed by
     nothing' lives, and the cleanup pass that runs next pulls back whatever
-    is still wanted. Only what survives that is a candidate for deletion."""
+    is still wanted. Only what survives that is a candidate for deletion.
+
+    `keep` is what the SURVIVING lists want, as wanted_builds() shapes it; see
+    _empty_into_master() for what it settles. Without it the old behaviour
+    applies: an incoming build that collides with a different one in Master is
+    the one that gets the suffix."""
     fn = entry["file"]
     stem = stem_of(fn)
+    if stem.lower() in A.WJ.reserved_list_names():
+        # Its "folder" is a pool. Emptying it into Master would remove every
+        # file in Master as a redundant copy of itself.
+        out(f"    refusing to delete '{stem}': it is named after a pool folder, "
+            f"so its folder IS that pool.")
+        out("    Rename the .wabbajack file instead.")
+        return 0, 0, 0
     moved = redundant = 0
     if entry["game"]:
         base, master, _s = A.WJ.resolve_game_dirs(entry["game"])
@@ -1395,23 +1664,7 @@ def delete_modlist(state, entry):
                 os.makedirs(master, exist_ok=True)
             except OSError:
                 pass
-            for name in sorted(os.listdir(folder)):
-                src = os.path.join(folder, name)
-                if not os.path.isfile(src):
-                    continue
-                dst = os.path.join(master, name)
-                try:
-                    # An identical copy already in Master makes this one
-                    # redundant; keeping both would just be litter for 4b.
-                    if (os.path.isfile(dst)
-                            and os.path.getsize(dst) == os.path.getsize(src)):
-                        os.remove(src)
-                        redundant += 1
-                        continue
-                    shutil.move(src, unique_path(dst))
-                    moved += 1
-                except (OSError, shutil.Error) as e:
-                    out(f"    could not move {name}: {e}")
+            moved, redundant = _empty_into_master(folder, master, keep)
             try:
                 os.rmdir(folder)
             except OSError:
@@ -1445,7 +1698,7 @@ def delete_modlist(state, entry):
     return moved, redundant, freed
 
 
-def clear_master(game, keep_builds):
+def clear_master(game, keep_builds, on_delete=None):
     """Delete Master files that no remaining modlist demands.
 
     keep_builds maps name -> the sizes a surviving list asks for, from
@@ -1455,55 +1708,116 @@ def clear_master(game, keep_builds):
     it one Nexus click at a time.
 
     Matching on name and size together means a junk build of a shared name is
-    still reclaimable, while the build a list actually wants is not."""
-    _b, master, _s = A.WJ.resolve_game_dirs(game)
+    still reclaimable, while the build a list actually wants is not - and the
+    name is read through a '~N' suffix, so a wanted build parked under one is
+    protected too. A wanted build of which another copy exists elsewhere in
+    the pools is a duplicate (duplicate_of) and goes as well.
+
+    `on_delete(name, size, reason)` is called after each removal, so the
+    caller can write the deletion record as it goes rather than after the
+    fact: a run interrupted half-way used to leave no record of what it had
+    removed. The reason names the other copy for a duplicate."""
+    base, master, _s = A.WJ.resolve_game_dirs(game)
     deleted, kept, freed = [], 0, 0
     try:
         names = sorted(os.listdir(master))
     except OSError as e:
         out(f"    cannot read {master}: {e}")
         return deleted, kept, freed
+    # A fresh index: the rebuild and the parking step have both moved files
+    # since the table was drawn, and a duplicate is only a duplicate if the
+    # other copy is where the index says it is.
+    A.WJ.invalidate_existing_cache()
+    index = A.WJ.index_existing(base)
     for name in names:
         path = os.path.join(master, name)
         if not os.path.isfile(path):
             continue
         low = name.lower()
-        owner = name[:-5] if low.endswith(".meta") else name
+        is_meta = low.endswith(".meta")
+        owner = name[:-5] if is_meta else name
         try:
             size = os.path.getsize(path)
         except OSError:
             continue
         # A .meta rides along with its archive, so judge it by the archive.
         judge_size = size
-        if low.endswith(".meta"):
+        if is_meta:
             try:
                 judge_size = os.path.getsize(os.path.join(master, owner))
             except OSError:
                 judge_size = None
-        if judge_size is not None and is_wanted(keep_builds, owner, judge_size):
-            kept += 1
-            continue
+        if judge_size is None:
+            reason = "sidecar with no archive" if is_meta else "unreadable"
+        elif is_wanted(keep_builds, owner, judge_size):
+            other = duplicate_of(index, master, os.path.join(master, owner),
+                                 owner, judge_size)
+            if other is None:
+                kept += 1
+                continue
+            reason = "duplicate of %s" % other
+        else:
+            reason = "wanted by no list"
         try:
             os.remove(path)
-            deleted.append((name, size))
-            freed += size
         except OSError as e:
             out(f"    could not delete {name}: {e}")
+            continue
+        deleted.append((name, size))
+        freed += size
+        if on_delete:
+            on_delete(name, size, reason)
     return deleted, kept, freed
 
 
-def write_deletion_record(game, deleted):
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(A.HERE, f"deleted_{A.WJ.game_folder(game)}_{stamp}.csv")
-    try:
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["archive", "size_bytes"])
-            w.writerows(deleted)
-        return path
-    except OSError as e:
-        out(f"    could not write the deletion record: {e}")
-        return None
+class DeletionRecord:
+    """The CSV of what stage 5c removed, written one row per deletion.
+
+    Opened before the first removal and flushed after every row, so the file
+    on disk is exact at every moment: what it lists is what is gone, however
+    the run ended. A record written after the loop was no record at all if the
+    loop did not finish."""
+
+    def __init__(self, game, rule, master):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.path = os.path.join(
+            A.HERE, f"deleted_{A.WJ.game_folder(game)}_{stamp}.csv")
+        self.rule, self.master, self.rows = rule, master, 0
+        self._fh = self._w = None
+        try:
+            self._fh = open(self.path, "w", newline="", encoding="utf-8")
+            self._w = csv.writer(self._fh)
+            self._w.writerow(["archive", "size_bytes", "reason", "master", "rule"])
+            self._fh.flush()
+        except OSError as e:
+            out(f"    could not open the deletion record: {e}")
+            self._fh = None
+
+    def note(self, name, size, reason=""):
+        self.rows += 1
+        if self._w is None:
+            return
+        try:
+            self._w.writerow([name, size, reason, self.master, self.rule])
+            self._fh.flush()
+        except OSError as e:
+            out(f"    could not write to the deletion record: {e}")
+
+    def close(self):
+        """Close, dropping the file if nothing was deleted. Returns the path
+        of a record that has rows, else None."""
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+        if self.rows == 0:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+            return None
+        return self.path if self._fh is not None else None
 
 
 def stage_space(state, records):
@@ -1528,7 +1842,7 @@ def stage_space(state, records):
     except OSError:
         pass
 
-    # ---- 4a: delete modlists -----------------------------------------
+    # ---- 5a: delete modlists -----------------------------------------
     out()
     rule()
     out("  5a. Delete modlists?")
@@ -1536,15 +1850,44 @@ def stage_space(state, records):
     out("      so anything another list still needs can be pulled back before")
     out("      any of it is deleted in 5c.")
     deleted_any = False
+    failed_rebuilds = {}          # folder key -> the sorter's exit code
+    reserved = A.WJ.reserved_list_names()
     while True:
         picks = choose(len(lists), "modlists")
         if picks is None:
             out("  Skipped. No modlist deleted.")
             break
         chosen = [lists[i] for i in picks]
+        named = [stem_of(x["file"]) for x in chosen
+                 if stem_of(x["file"]).lower() in reserved]
+        if named:
+            out(f"  Cannot delete {', '.join(named)}: a manifest named after a "
+                f"pool folder claims")
+            out("  that pool as its own folder, and deleting it would empty the "
+                "pool. Rename")
+            out("  the .wabbajack file instead. Choose again.")
+            continue
         lines = [f"{stem_of(x['file'])}  -  manifest {human(x['manifest_bytes'])}, "
                  f"{x['folder_files']} archive(s) ({human(x['folder_bytes'])}) "
                  f"moved to Master" for x in chosen]
+
+        # One rebuild per POOL FOLDER afterwards. It re-sorts everything in
+        # that folder, which un-stages whatever stage 4 arranged there.
+        folders = {}
+        for x in chosen:
+            if x["game"]:
+                folders.setdefault(A.WJ.folder_key(x["game"]), x["game"])
+        staged = state.get("staged") or {}
+        going = {stem_of(x["file"]) for x in chosen}
+        for fkey in sorted(folders):
+            s = staged.get(fkey)
+            if s and s not in going:
+                lines.append("")
+                lines.append(f"Rebuilding the {A.WJ.game_label(folders[fkey])} "
+                             f"pools afterwards UN-STAGES {s}:")
+                lines.append("its shared archives go back to Shared. Run stage "
+                             "4 again before installing it.")
+
         verdict = confirm_destructive(
             f"About to delete {len(chosen)} modlist(s)", lines,
             total_bytes=sum(x["manifest_bytes"] for x in chosen))
@@ -1553,10 +1896,16 @@ def stage_space(state, records):
         if verdict == "no":
             out("  Skipped. No modlist deleted.")
             break
+
+        # What the SURVIVING lists want, so that a build one of them needs
+        # keeps its name when it lands in Master beside a different build.
+        survivors = {fn: e for fn, e in records.items()
+                     if fn not in {x["file"] for x in chosen}}
         total_moved = total_freed = 0
         for x in chosen:
             out(f"  Deleting {stem_of(x['file'])}...")
-            moved, redundant, freed = delete_modlist(state, x)
+            keep = wanted_builds(survivors, x["game"]) if x["game"] else None
+            moved, redundant, freed = delete_modlist(state, x, keep=keep)
             total_moved += moved
             total_freed += freed
             out(f"    {moved} archive(s) moved to Master, "
@@ -1564,18 +1913,28 @@ def stage_space(state, records):
                 f"manifest freed {human(freed)}")
         A.save_state(state)
         deleted_any = True
+        refresh_known_dirs()
         out(f"  Manifests freed {human(total_freed)}; "
             f"{total_moved} archive(s) now sit in Master.")
 
         # Rebuild the pools so Master holds only what nothing needs. Without
-        # this, 4b would be choosing from a Master that still contains other
-        # lists' archives.
-        games = sorted({x["game"] for x in chosen if x["game"]})
-        for game in games:
+        # this, 5c would be choosing from a Master that still contains other
+        # lists' archives. A rebuild that fails leaves exactly that Master,
+        # so it is remembered and 5c refuses to offer it.
+        for fkey, game in sorted(folders.items()):
             out(f"  Rebuilding {A.WJ.game_label(game)} pools so nothing still "
                 f"needed is left in Master...")
-            A.run_script(A.SORTER_SCRIPT, ["--game", game, "--cleanup-only", "--yes"],
-                         "sorter")
+            rc = A.run_script(A.SORTER_SCRIPT,
+                              ["--game", game, "--cleanup-only", "--yes"],
+                              "sorter")
+            (state.get("staged") or {}).pop(fkey, None)
+            if rc != 0:
+                failed_rebuilds[fkey] = rc
+                out(f"  The rebuild for {A.WJ.game_label(game)} FAILED (sorter "
+                    f"exited {rc}). Its Master may still hold archives other")
+                out("  lists need, so it will not be offered for clearing in "
+                    "5c. See the sorter log.")
+        A.save_state(state)
         break
 
     if deleted_any:
@@ -1584,10 +1943,9 @@ def stage_space(state, records):
         _lists, masters = gather_space(records)
         out()
         out("  MASTER POOLS after the rebuild")
-        gw = fit([A.WJ.game_label(m["game"]) for m in masters], 4) + 2
+        gw = fit([m["label"] for m in masters], 4) + 2
         for m in masters:
-            out(f"    {A.WJ.game_label(m['game']):<{gw}}"
-                f"{m['files']:>9}{human(m['bytes']):>12}")
+            out(f"    {m['label']:<{gw}}{m['files']:>9}{human(m['bytes']):>12}")
 
     # ---- 5b: folders that are nobody's -------------------------------
     # Across every game on the share, not just those with a manifest: a game
@@ -1628,6 +1986,37 @@ def stage_space(state, records):
     out("      Master holds archives no modlist you HAVE needs. Some of them")
     out("      are still wanted by modlists published in the gallery, so what")
     out("      counts as protected is worth choosing rather than assuming.")
+    out("      A Master copy of a build that is also held in Shared or in a")
+    out("      modlist's folder is a duplicate, and goes under either rule.")
+
+    # Refusals first. What gets deleted is decided by what the surviving
+    # manifests want, so a manifest whose demand cannot be trusted disarms
+    # this step - for its own game, or for every game when it is not even
+    # readable enough to say which game it belongs to.
+    unreadable, empty = demand_problems(records)
+    if unreadable:
+        out()
+        out(f"  Not clearing any Master: {len(unreadable)} manifest(s) could "
+            f"not be read")
+        out(f"  ({', '.join(unreadable[:4])}{' ...' if len(unreadable) > 4 else ''}).")
+        out("  A list whose manifest cannot be read protects nothing, and does")
+        out("  not even say which game's Master it would have protected.")
+        out("  Re-download or remove it, then run this stage again.")
+        return deleted_any
+    blocked = {}
+    for fkey, rc in failed_rebuilds.items():
+        blocked[fkey] = (f"its rebuild failed (sorter exited {rc}), so Master "
+                         f"may still hold archives other lists need")
+    for fkey, fns in empty.items():
+        blocked.setdefault(fkey, (f"{', '.join(fns)} lists no archives at "
+                                  f"all, which no real modlist does, so its "
+                                  f"demand is unknown"))
+    if blocked:
+        out()
+        for m in masters:
+            if m["folder"] in blocked:
+                out(f"  {m['label']}: not offered - {blocked[m['folder']]}.")
+    masters = [m for m in masters if m["folder"] not in blocked]
 
     # Ask nothing when there is nothing to ask about. The narrow rule protects
     # strictly less than the wide one, so if IT finds nothing reclaimable then
@@ -1648,11 +2037,10 @@ def stage_space(state, records):
     out("          superseded builds and lists that no longer exist.")
     mode = ask("      Which?", ("y", "a"))
 
-    wide_want = None
+    wide_want, pulled = None, []
     if mode == "a":
-        games = sorted({m["game"] for m in masters if m["game"]})
-        keys = {G.game_key(g) for g in games}
-        wide_want, note, unchecked = gallery_protection(keys)
+        pools = {m["folder"] for m in masters}
+        wide_want, note, pulled = gallery_protection(pools)
         if wide_want is None:
             out()
             out(f"  Cannot do that safely: {note}.")
@@ -1665,12 +2053,12 @@ def stage_space(state, records):
         out(f"  {len(wide_want)} archive name(s) are wanted somewhere in the "
             f"gallery.")
         out("  Re-measuring Master against that...")
-        # Only the Master pools need re-measuring, so call master_report
+        # Only the Master pools need re-measuring, so call measure_masters
         # directly rather than gather_space: the latter also walks all 22
         # per-list folders to size them, which is the slow half of stage 5 and
         # cannot have changed since it ran a moment ago.
-        masters = [master_report(m["game"], records, wide_want)
-                   for m in masters]
+        masters = [m for m in measure_masters(records, wide_want)
+                   if m["folder"] not in blocked]
 
     def free_files(m):
         return m["wide_free_files"] if mode == "a" else m["free_files"]
@@ -1694,11 +2082,11 @@ def stage_space(state, records):
         return deleted_any
 
     out()
-    gw = fit([A.WJ.game_label(m["game"]) for m in masters], 4) + 2
+    gw = fit([m["label"] for m in masters], 4) + 2
     out(f"    {'#':>3}  {'game':<{gw}}{'reclaimable':>13}{'files':>8}"
         f"{'protected':>12}")
     for i, m in enumerate(masters, 1):
-        out(f"    {i:>3}  {A.WJ.game_label(m['game']):<{gw}}"
+        out(f"    {i:>3}  {m['label']:<{gw}}"
             f"{human(free_bytes(m)):>13}{free_files(m):>8}"
             f"{kept_files(m):>7} file(s)")
     if mode == "a" and held > 0:
@@ -1706,34 +2094,42 @@ def stage_space(state, records):
         out(f"    {human(held)} is being kept that the [y] rule would have")
         out(f"    deleted, because a published modlist still wants it.")
 
+    rule_name = "any known modlist" if mode == "a" else "your modlists only"
     while True:
         picks = choose(len(masters), "games")
         if picks is None:
             out("  Skipped. Master untouched.")
             return deleted_any
         chosen = [masters[i] for i in picks]
-        lines = [f"{A.WJ.game_label(m['game'])}  -  {free_files(m)} file(s), "
+        lines = [f"{m['label']}  -  {free_files(m)} file(s), "
                  f"{human(free_bytes(m))}   "
                  f"({kept_files(m)} still wanted, kept)" for m in chosen]
+        dups = sum(m["dup_files"] for m in chosen)
+        if dups:
+            lines.append("")
+            lines.append(f"{dups} of those are duplicates: the same build is "
+                         f"also held in Shared or a modlist's")
+            lines.append(f"folder ({human(sum(m['dup_bytes'] for m in chosen))}). "
+                         f"The other copy is checked again before each one goes.")
         lines.append("")
         if mode == "a":
             lines.append("Protected by: your modlists AND every published list.")
-            if unchecked:
+            if pulled:
                 lines.append("")
-                lines.append(f"{len(unchecked)} published list(s) could NOT be "
-                             f"read, so nothing is protected on their behalf:")
-                for k in unchecked[:6]:
+                lines.append(f"{len(pulled)} published list(s) have been pulled "
+                             f"by their authors, so their reports list")
+                lines.append("no archives and nothing is protected on their "
+                             "behalf:")
+                for k in pulled[:6]:
                     lines.append(f"   {k}")
-                if len(unchecked) > 6:
-                    lines.append(f"   ... and {len(unchecked) - 6} more")
-                lines.append("Their authors have pulled them, so their reports "
-                             "list no archives. If you hold")
-                lines.append("archives for one of those and no manifest for "
-                             "it, they are not protected.")
+                if len(pulled) > 6:
+                    lines.append(f"   ... and {len(pulled) - 6} more")
+                lines.append("If you hold archives for one of those and no "
+                             "manifest for it, they are not protected.")
         else:
             lines.append("Protected by: your modlists only. Archives a "
                          "published list wants WILL be deleted.")
-        lines.append("A record of every deleted file is written to a CSV first.")
+        lines.append("Every deleted file is written to a CSV record as it goes.")
         verdict = confirm_destructive(
             f"About to clear Master for {len(chosen)} game(s)", lines,
             total_bytes=sum(free_bytes(m) for m in chosen))
@@ -1752,11 +2148,13 @@ def stage_space(state, records):
             keep = wanted_builds(records, game)
             if mode == "a":
                 keep = merge_want(keep, wide_want)
-            out(f"  Clearing Master for {A.WJ.game_label(game)} "
+            out(f"  Clearing Master for {m['label']} "
                 f"({len(keep)} archive name(s) wanted and protected)...")
-            deleted, kept, freed = clear_master(game, keep)
+            record = DeletionRecord(game, rule_name, m["path"])
+            deleted, kept, freed = clear_master(game, keep,
+                                                on_delete=record.note)
+            rec = record.close()
             grand += freed
-            rec = write_deletion_record(game, deleted) if deleted else None
             out(f"    deleted {len(deleted)} file(s), freed {human(freed)}; "
                 f"kept {kept} still wanted")
             if rec:
@@ -1805,6 +2203,9 @@ def run(verbose=False, nexus_mode=None, allow_size_only=False, no_lock=False):
         tracked = A.resolve_tracking(state)
 
         stage_updates(state, tracked)
+        # A pinned list with no local file yet gets one here; its folder has
+        # to count as a modlist's from now on.
+        refresh_known_dirs()
         # The cache is read after stage 1 so a manifest fetched just now is
         # parsed with its new contents rather than served from a stale entry.
         records = load_records()

@@ -264,11 +264,18 @@ def _drop_sidecar(dest):
 
 
 def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
-             expected_size=None, expected_hash=None, detail=False):
+             expected_size=None, expected_hash=None, detail=False,
+             strict_hash=False):
     """Fetch a Wabbajack CDN multi-part file to `dest`.
 
     Returns True on success. Writes to `dest + ".part"` and renames on
     completion, so a partial file never appears under the real name.
+
+    strict_hash=True refuses, before fetching a single part, a definition
+    whose whole-file Hash differs from `expected_hash`. The definition
+    describes what the CDN serves today; the caller's hash pins what it needs.
+    When they differ the download can only produce a file the caller will
+    reject, so the multi-GB transfer is better not started.
     """
     # detail=True changes the return type, so every exit has to go through
     # this. Updating only the success path left the failure paths returning a
@@ -289,6 +296,12 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
         LOG.warning("  [WARN] CDN says %s bytes but the manifest/feed says %s. "
                     "Trusting the CDN definition.", total_size, expected_size)
     if expected_hash and total_hash and expected_hash != total_hash:
+        if strict_hash:
+            LOG.error("  [ERROR] The CDN is serving a different build: its "
+                      "definition hash is %s, the manifest/feed wants %s. Not "
+                      "downloading a file that would fail verification.",
+                      total_hash, expected_hash)
+            return done_(False)
         LOG.warning("  [WARN] CDN definition hash differs from the expected hash. "
                     "The published build may have been replaced.")
 

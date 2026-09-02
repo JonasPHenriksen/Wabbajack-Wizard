@@ -95,7 +95,7 @@ print("=" * 70)
 
 def clean(name="cdn.bin"):
     p = os.path.join(TMP, name)
-    for suffix in ("", ".part", ".parts.json"):
+    for suffix in ("", ".part", ".parts.json", ".meta"):
         try:
             os.remove(p + suffix)
         except OSError:
@@ -222,6 +222,51 @@ check("failure with detail=True is a 2-tuple",
       isinstance(r, tuple) and len(r) == 2 and r[0] is False, str(r))
 r = C.download(BASE, p, progress=False)
 check("failure with detail=False is a bare bool", r is False, str(r))
+
+# ---------------------------------------------------------------- 3.10
+print("\n 3.10  strict_hash refuses a replaced build before fetching a part")
+reset()
+p = clean()
+ok = C.download(BASE, p, progress=False, expected_hash="AAAAAAAAAAA=",
+                strict_hash=True)
+check("a definition whose hash differs from the expected one is refused",
+      ok is False)
+check("  before any part was requested",
+      not any("/parts/" in k for k in HITS), str(HITS))
+check("  and nothing was written", not os.path.exists(p) and
+      not os.path.exists(p + ".part"))
+ok = C.download(BASE, p, progress=False, expected_hash="AAAAAAAAAAA=")
+check("without strict_hash the same case is a warning and a download",
+      ok is True and os.path.exists(p))
+reset()
+p = clean()
+r = C.download(BASE, p, progress=False, expected_hash="AAAAAAAAAAA=",
+               strict_hash=True, detail=True)
+check("the refusal keeps the detail= contract", r == (False, None), str(r))
+
+# ---------------------------------------------------------------- 3.11
+print("\n 3.11  a CDN archive is verified against the MANIFEST, not just the CDN")
+import wabbajack_archive_downloader as D
+D.LOG.setLevel(logging.CRITICAL)
+reset()
+p = clean("arch.bin")
+archive = {"name": "arch.bin", "size": len(WHOLE), "hash": "AAAAAAAAAAA=",
+           "meta_text": "[General]\n", "_cdn": True}
+results = {"done": 0, "failed": 0, "failures": []}
+ok = D.download_one(BASE, archive, TMP, results)
+check("a build whose hash differs from the manifest's is refused", ok is False)
+check("  counted as a failure", results["failed"] == 1 and results["done"] == 0,
+      str(results))
+check("  and no file or sidecar is left in the pool",
+      not os.path.exists(p) and not os.path.exists(p + ".meta"))
+reset()
+archive["hash"] = C.wj_hash(WHOLE)
+results = {"done": 0, "failed": 0, "failures": []}
+ok = D.download_one(BASE, archive, TMP, results)
+check("the build the manifest pins downloads and verifies", ok is True
+      and results["done"] == 1, str(results))
+check("  byte-exact", io.open(p, "rb").read() == WHOLE)
+check("  with its .meta written", os.path.exists(p + ".meta"))
 
 srv.shutdown()
 sys.exit(summary())

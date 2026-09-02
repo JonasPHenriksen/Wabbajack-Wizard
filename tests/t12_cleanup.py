@@ -234,7 +234,9 @@ check("two lists wanting one name at two sizes protect BOTH builds",
 check("a name only one list wants is still protected",
       want.get("only-one.7z") == {20}, str(want.get("only-one.7z")))
 check("a ForcedDown report with no archives is reported as unchecked",
-      unchecked == ["r/pulled"], str(unchecked))
+      list(unchecked) == ["r/pulled"], str(unchecked))
+check("  with the permanent reason", unchecked.get("r/pulled") == G.PULLED,
+      str(unchecked))
 check("  and contributes nothing to the protected set", len(want) == 2,
       str(sorted(want)))
 

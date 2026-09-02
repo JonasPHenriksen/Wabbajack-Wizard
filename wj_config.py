@@ -16,6 +16,7 @@ Edit this file, not the scripts.
 """
 
 import os
+import re
 
 # ============================ CONFIGURATION ============================
 # Where every game's archive pools live.
@@ -29,9 +30,11 @@ ARCHIVE_ROOT = "../Mod Archive"
 # Maps a GameType onto a pool folder whose name is not the GameType itself.
 # Anything not listed here uses its GameType verbatim.
 #
-#   Skyrim and SkyrimSpecialEdition deliberately share one folder: the same
-#   archives serve both, and splitting them would mean two copies of
-#   everything.
+#   Skyrim, SkyrimSpecialEdition and SkyrimVR deliberately share one folder:
+#   VR lists are built almost entirely from Special Edition archives, LE lists
+#   overlap heavily too, and splitting them would mean a second copy of
+#   everything. Every list drawing from a shared folder also protects it - see
+#   folder_key() below.
 #
 #   DarkSouls3 points at an existing folder that predates this tooling. Without
 #   the entry a Dark Souls 3 list would create a fresh "DarkSouls3" folder and
@@ -40,6 +43,7 @@ ARCHIVE_ROOT = "../Mod Archive"
 GAME_FOLDERS = {
     "SkyrimSpecialEdition": "Skyrim",
     "Skyrim":               "Skyrim",
+    "SkyrimVR":             "Skyrim",
     "DarkSouls3":           "DARK SOULS 3",
 }
 
@@ -48,6 +52,7 @@ GAME_FOLDERS = {
 GAME_DISPLAY = {
     "SkyrimSpecialEdition":  "Skyrim Special Edition",
     "Skyrim":                "Skyrim (Legendary Edition)",
+    "SkyrimVR":              "Skyrim VR",
     "Fallout4":              "Fallout 4",
     "FalloutNewVegas":       "Fallout: New Vegas",
     "Fallout3":              "Fallout 3",
@@ -125,6 +130,49 @@ def excluded_dirs():
     return set(EXCLUDE_POOL_DIRS) | {UNMANAGED_FOLDER.lower()}
 
 
+def reserved_list_names():
+    """Lowercased names a modlist may NOT have.
+
+    A modlist's folder is named after its manifest, so a manifest called
+    Master.wabbajack would claim the Master pool as its own folder. Deleting
+    that "modlist" would then empty the pool. The sorter has always refused
+    these; the wizard and the downloader refuse them for the same reason."""
+    return {p.lower() for p in POOL_FOLDERS} | excluded_dirs()
+
+
+_SUFFIX = re.compile(r"^(.*)~(\d+)$")
+
+
+def canonical_name(name):
+    """The archive name a '~N' disambiguator was added to.
+
+    When two different builds share one filename and both have to survive in
+    the same folder, the second is stored as 'Name~1.ext', 'Name~2.ext', ...
+    (see unique_path() in the sorter and the wizard). That suffix is storage
+    only: no manifest ever asks for a file by that name, so every place that
+    matches a file on disk against a manifest has to look through it, or the
+    suffixed copy is invisible to demand - never staged, never counted as
+    present, and reclaimable by a cleanup that judges by name.
+
+    Checked against every archive name in the 22 manifests held here (26,835)
+    and in all 224 published validation reports (304,477): none ends its stem
+    in '~<digits>', so a real name is never mis-read as a suffixed one.
+
+    Applied repeatedly, because parking an already-suffixed file yields
+    'Name~1~1.ext'."""
+    root, ext = os.path.splitext(name)
+    while True:
+        m = _SUFFIX.match(root)
+        if not m:
+            return root + ext
+        root = m.group(1)
+
+
+def is_suffixed(name):
+    """True if `name` carries a '~N' disambiguator."""
+    return canonical_name(name) != name
+
+
 def unmanaged_dir(game):
     """Where a game's unmanaged archives are parked."""
     return os.path.join(resolved_archive_root(), game_folder(game),
@@ -134,6 +182,32 @@ def unmanaged_dir(game):
 def game_folder(game):
     """Pool folder name for a GameType."""
     return GAME_FOLDERS.get(game, game)
+
+
+def valid_game_type(gt):
+    """Can this GameType safely become a folder name under the archive root?
+
+    Wabbajack serialises GameType from an enum, so it is always a plain word.
+    But a .wabbajack is a zip anyone could have edited, and a value carrying a
+    path separator would put that list's pools outside the archive root."""
+    gt = str(gt or "")
+    return bool(gt) and gt not in (".", "..") and not any(c in gt for c in "/\\:")
+
+
+def folder_key(game):
+    """A case-stable key identifying the POOL a GameType's lists share.
+
+    Two GameTypes can map onto one folder (Skyrim and SkyrimSpecialEdition do
+    here), and then their lists draw from, and protect, one Master. Anything
+    that groups or protects "per game" must group by this and not by the
+    GameType string, or one game's lists read as not wanting what the other
+    game's Master holds."""
+    return str(game_folder(game) or "").lower()
+
+
+def same_pool(game_a, game_b):
+    """Do two GameTypes share a pool folder?"""
+    return bool(game_a) and bool(game_b) and folder_key(game_a) == folder_key(game_b)
 
 
 def game_label(game):

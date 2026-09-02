@@ -20,6 +20,11 @@ Mod Archive/Skyrim/
 └── Nolvus/                       excluded: different installer, left alone
 ```
 
+Skyrim, Skyrim Special Edition and Skyrim VR lists all draw from the one
+`Skyrim` folder, since VR lists are built almost entirely from Special Edition
+archives; `GAME_FOLDERS` in `wj_config.py` is where that is said, and every list
+drawing from a shared folder also protects it.
+
 A folder is only visible to the tooling if a manifest of the same name exists in
 `modlists/`. `modlists/Foo.wabbajack` ↔ `Mod Archive/<Game>/Foo/`. Delete the
 manifest and the folder goes dark, so deletion is handled explicitly (stage 5).
@@ -154,7 +159,43 @@ those cannot block the feature, so they are named in the confirmation instead.
 
 Deletion is otherwise as it has always been: name **and** size must match, every
 file is re-checked at the moment of deletion rather than trusted from the table,
-and every deletion is recorded in `deleted_<game>_<timestamp>.csv`.
+and every deletion is recorded in `deleted_<game>_<timestamp>.csv`, one row per
+file as it goes, with the reason, the folder and the rule used.
+
+One rule reclaims *more*: a Master copy of a build that also exists in Shared,
+in a modlist's folder, or under a better name inside Master itself is a
+**duplicate**, and goes under either protection rule. The sorter creates these
+on purpose, parking a redundant copy rather than overwriting, so a pool that
+has been through a few rebuilds carries a fair number of them. The other copy
+is checked again on disk immediately before each deletion, a copy in a stray or
+excluded folder never counts, and the record names which copy made it
+redundant. Six further rules, each added after a sandbox run showed the
+deletion path removing something it should not have:
+
+- **A name is read through its `~N` suffix.** When two builds share a name and
+  both must survive in one folder, the second is stored as `Name~1.ext`. No
+  manifest asks for that name, so before this a wanted build parked that way was
+  invisible to demand: never staged, never counted as present, and reclaimable.
+  Now `Synthesis~1.zip` at a size some list wants *is* that list's
+  `Synthesis.zip` — protected here, counted as present by the downloader, and
+  given its real name back by the sorter when it is staged. And when a deleted
+  list's build collides with a different build already in Master, the one a
+  surviving list wants keeps the name; the other gets the suffix.
+- **Demand is counted per pool folder.** Skyrim, Skyrim Special Edition and
+  Skyrim VR share one folder here, so all three games' lists protect it, and the
+  space table shows that Master once, under every name that draws from it. Counting per GameType would have cleared
+  the shared Master "for Special Edition" and taken what the LE lists needed.
+- **A manifest named after a pool folder is never deleted.** Its "folder" *is*
+  the pool. Deleting `Master.wabbajack` emptied Master in the sandbox, every
+  file read as a redundant copy of itself. The sorter always refused such
+  names; the wizard and the downloader now do too.
+- **A failed rebuild disarms the step.** If the sorter's cleanup pass after a
+  deletion exits non-zero, that game's Master may still hold what other lists
+  need, and it is not offered for clearing.
+- **Untrustworthy demand disarms the step.** A manifest that cannot be read
+  disarms every Master, since it does not even say which game it belongs to; one
+  that reads fine but lists no archives disarms its own. The sorter refuses both
+  as well.
 
 ### Folders that are not ours
 
@@ -198,6 +239,10 @@ re-checked against the surviving lists' demands before it is removed. A file any
 remaining modlist needs is never deleted, whatever you select. Every deletion is
 recorded in `deleted_<game>_<timestamp>.csv`.
 
+That rebuild re-sorts the whole game folder, which un-stages whatever stage 4
+arranged there: the shared archives go back to Shared. The confirmation says so
+by name, and stage 4 has to be run again before installing that list.
+
 ## Scripted use
 
 Any action flag skips the wizard:
@@ -229,12 +274,11 @@ At the top of `wj_autoupdate.py`:
 | `REQUIRE_HASH` | refuse to run rather than silently degrade to size-only checks |
 | `KEEP_BACKUP_DAYS` | how long superseded manifests are kept |
 | `DOWNLOAD_ORDER` | `smallest` (default), `largest`, or `manifest` — see below |
-| `WABBAJACK_DIR` | where Wabbajack is; `None` auto-detects |
-| `INSTALL_MODE` | `cli` (default), `gui`, or `off` — see below |
 
 The archive layout lives in **`wj_config.py`** — `ARCHIVE_ROOT`,
 `GAME_FOLDERS`, `GAME_DISPLAY`, `POOL_FOLDERS`, `EXCLUDE_POOL_DIRS`,
-`UNMANAGED_FOLDER`. Both the
+`UNMANAGED_FOLDER` — along with `WABBAJACK_DIR` (where Wabbajack is; `None`
+auto-detects) and `INSTALL_MODE` (`cli`, `gui`, or `off`; see below). Both the
 downloader and the sorter import it, so there is one place to edit. A start-up
 check still compares the two, because the downloader decides where an archive is
 written and the sorter decides where it is moved to: a local override re-added
@@ -353,7 +397,7 @@ recognised (if unfetchable) source rather than "unknown".
 
 | file | role |
 | --- | --- |
-| `wj_config.py` | the archive layout: one place, imported by the rest |
+| `wj_config.py` | the archive layout, and the naming rules the rest share: reserved names, the `~N` suffix, which GameTypes share a folder |
 | `wj_wabbajack.py` | finding Wabbajack, the preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_gallery.py` | the published gallery and its validation reports: what exists, and how much of it you hold |
@@ -368,7 +412,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-435 checks across twelve suites. None of them touch the live archive pools:
+575 checks across thirteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -389,14 +433,21 @@ exactly the failure they want to check.
 | `t10_lookup` | every location an archive may sit in and still count as already downloaded |
 | `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, and Wabbajack's own "Unavailable" rule |
 | `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, and the refusal to delete on an incomplete picture |
+| `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row deletion record, the un-staging warning |
 
-Four real bugs were found this way and are covered by regression checks: a
+Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the
 resume logic never engaged); the sorter validated `--list` only after its
 cleanup pass had already moved files; the downloader counted the game root as a
 pool while the sorter did not, so a file loose there was called present and then
-never staged; and `normalise()` dropped `force_down`, which silently disarmed
-half of the Unavailable check.
+never staged; `normalise()` dropped `force_down`, which silently disarmed half
+of the Unavailable check; deleting a modlist renamed a build another list still
+needed to `Name~1.ext`, after which the rebuild handed that list the junk build
+and stage 5c deleted the good one; deleting a manifest named `Master` emptied
+the Master pool; and a list adopted and fetched in one run read as entirely
+missing, because the set of legitimate list folders was snapshotted at start-up.
+A CDN archive was also accepted on the CDN's own hash alone; it is now refused
+before download when that differs from the manifest's.
 
 ## Requirements
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run every sandbox suite and report a combined total.
+r"""Run every sandbox suite and report a combined total.
 
     ..\.venv-win\Scripts\python.exe tests\run_all.py
 
@@ -27,6 +27,7 @@ SUITES = [
     ("t10_lookup.py", "where a file may live and count as present"),
     ("t11_gallery.py", "the published gallery, and what you already own"),
     ("t12_cleanup.py", "deleting what nothing wants; folders that are not ours"),
+    ("t13_delete.py", "stage 5 end to end: what a deletion must never take"),
 ]
 
 total_pass = total_fail = 0

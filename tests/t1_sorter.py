@@ -146,4 +146,53 @@ rc, out = s.run("wabbajack_archive_sorter_v2.py",
                 expect=0)
 check("--list is case-insensitive by name", rc == 0 and "ListB" in out)
 
+# ---------------------------------------------------------------- 1.9
+print("\n 1.9  a build parked under a '~N' suffix gets its name back when staged")
+s = fresh()
+os.remove(os.path.join(s.archives, G, "ListA", "shared.7z"))
+s.pool_file(G, "Master", "shared.7z", 111)          # wrong build, real name
+s.pool_file(G, "Master", "shared~1.7z", 200)        # ListA's build, parked
+s.pool_file(G, "Master", "shared~1.7z.meta", 9)
+s.pool_file(G, "Master", "orphan~2.7z", 5)          # nobody's, parked
+rc, out = s.run("wabbajack_archive_sorter_v2.py",
+                ["--game", G, "--list", "ListA", "--yes"], expect=0)
+hits = dict(s.where("shared.7z"))
+check("ListA receives the parked build under the manifest's name",
+      hits.get("ListA") == 200, str(s.where("shared.7z") + s.where("shared~1.7z")))
+check("  and its sidecar is renamed with it",
+      os.path.isfile(os.path.join(s.archives, G, "ListA", "shared.7z.meta")))
+check("the wrong build is left in Master (nobody wants it; nothing to do)",
+      hits.get("Master") == 111, str(hits))
+check("a nobody's parked file is not renamed in Master",
+      s.where("orphan~2.7z") == [("Master", 5)], str(s.where("orphan~2.7z")))
+
+# ---------------------------------------------------------------- 1.10
+print("\n 1.10  scope is the pool folder, not the GameType string")
+s = Sandbox(BOX)
+s.manifest("SE", "SkyrimSpecialEdition", [("se.7z", 10, "nexus"),
+                                          ("both.7z", 30, "nexus")])
+s.manifest("LE", "Skyrim", [("le.7z", 20, "nexus"), ("both.7z", 30, "nexus")])
+s.pool_file("Skyrim", "SE", "se.7z", 10)
+s.pool_file("Skyrim", "SE", "both.7z", 30)
+s.pool_file("Skyrim", "LE", "le.7z", 20)
+rc, out = s.run("wabbajack_archive_sorter_v2.py",
+                ["--game", "SkyrimSpecialEdition", "--cleanup-only", "--yes"],
+                expect=0)
+check("cleanup for SE counts the LE list's demand",
+      s.where("le.7z") == [("LE", 20)], str(s.where("le.7z")))
+check("  and a file both want goes to Shared, not to Master",
+      s.where("both.7z") == [("Shared", 30)], str(s.where("both.7z")))
+check("  which the log explains", "share this folder" in out)
+
+# ---------------------------------------------------------------- 1.11
+print("\n 1.11  an in-scope manifest that wants nothing stops the run")
+s = fresh()
+s.manifest("Hollow", G, [])
+before = s.files()
+rc, out = s.run("wabbajack_archive_sorter_v2.py",
+                ["--game", G, "--list", "ListA", "--yes"], expect=2)
+check("exit 2", rc == 2)
+check("  naming the manifest", "Hollow" in out and "no archives" in out)
+check("  and moving nothing", s.files() == before)
+
 sys.exit(summary())
