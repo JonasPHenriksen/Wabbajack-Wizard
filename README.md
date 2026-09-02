@@ -53,9 +53,10 @@ independent — skipping one does not affect the others.
 4. **Prepare** — gathers everything one modlist needs into its own folder for
    Wabbajack, then offers to hand it straight over (see below). One at a time by
    design: staging a second list pulls the shared archives back out of the first.
-5. **Space** — what the manifests and per-game Master pools cost, with the
-   option to delete modlists and then clear Master. Both steps confirm, and let
-   you change the selection at the confirmation.
+5. **Space** — what the manifests and the per-game Master pools are costing,
+   with the option to delete modlists, park folders that are not ours, and then
+   clear Master under a protection rule you choose. Every step confirms, and
+   lets you change the selection at the confirmation.
 
 ## Stage 1: what you already own of what you do not have
 
@@ -127,6 +128,54 @@ again today, so they are filtered out rather than listed twice.
 Retired lists appear marked `>`. They can be fetched and installed, but there is
 no feed behind them, so their version can never be tracked.
 
+### What protects an archive from deletion
+
+Stage 5c clears Master, and offers two answers to "what counts as still
+wanted?":
+
+| rule | protected by | on this share |
+| --- | --- | --- |
+| `[y]` your modlists only | the 22 manifests held here | frees ~686 GB |
+| `[a]` any known modlist | those **plus all ~220 published lists** | frees ~364 GB, keeps **321 GB** |
+
+The second is the useful one for a pooled collection. Master is *defined* as
+"needed by no list you have", but a lot of what lands there is still wanted by
+lists in the gallery — 321 GB of it here. Under `[y]` that gets deleted and
+re-downloaded the day you install one of them; under `[a]` only genuine dead
+weight goes: superseded builds from past list updates, and archives for lists
+that no longer exist.
+
+`[a]` **refuses rather than guessing**. If any author feed did not respond, or
+any published list has no cached validation report, the protected set is short —
+and a short protected set does not mean deleting a bit less, it means deleting
+the wrong thing. So it declines and tells you to fetch the reports. The handful
+of lists whose authors have pulled them publish an empty report permanently;
+those cannot block the feature, so they are named in the confirmation instead.
+
+Deletion is otherwise as it has always been: name **and** size must match, every
+file is re-checked at the moment of deletion rather than trusted from the table,
+and every deletion is recorded in `deleted_<game>_<timestamp>.csv`.
+
+### Folders that are not ours
+
+Any subfolder of a game root gets read as a modlist's folder, which is wrong for
+a hand-built install. Three real examples from this share: a `TTW` folder
+holding Tale of Two Wastelands, a `ModEngine-2.1.0.0-win64` tool drop, and a
+`SkyGround_Chronicles_@@_W3VO` folder whose modlist was delisted. Every file in
+them reads as unwanted to a cleanup that judges by demand.
+
+`UNMANAGED_FOLDER` (default `Unmanaged`) is the answer. Stage 5b lists any
+folder that is neither a pool, nor excluded, nor named after a manifest you
+hold, and offers to move it there **intact** — nothing is deleted. Both tools
+then ignore it completely: never indexed, never moved, never deleted, and a
+modlist may not claim the name.
+
+Until a stray is parked, it is excluded from the index and reported, rather
+than counted as archives you own. That matters because the sorter only ever
+scans manifest-named folders: a file counted as present in a stray folder would
+be skipped by the download and then never staged, leaving Wabbajack short of a
+file the tooling had just called downloaded.
+
 ### How stage 5 avoids deleting something you need
 
 Deleting a modlist moves its archives into that game's `Master` rather than
@@ -172,7 +221,8 @@ At the top of `wj_autoupdate.py`:
 | `INSTALL_MODE` | `cli` (default), `gui`, or `off` — see below |
 
 The archive layout lives in **`wj_config.py`** — `ARCHIVE_ROOT`,
-`GAME_FOLDERS`, `GAME_DISPLAY`, `POOL_FOLDERS`, `EXCLUDE_POOL_DIRS`. Both the
+`GAME_FOLDERS`, `GAME_DISPLAY`, `POOL_FOLDERS`, `EXCLUDE_POOL_DIRS`,
+`UNMANAGED_FOLDER`. Both the
 downloader and the sorter import it, so there is one place to edit. A start-up
 check still compares the two, because the downloader decides where an archive is
 written and the sorter decides where it is moved to: a local override re-added
@@ -306,7 +356,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-366 checks across eleven suites. None of them touch the live archive pools:
+419 checks across twelve suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -326,6 +376,7 @@ exactly the failure they want to check.
 | `t9_wabbajack` | finding the newest CLI, the game preflight, path overlap, the install command |
 | `t10_lookup` | every location an archive may sit in and still count as already downloaded |
 | `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, and Wabbajack's own "Unavailable" rule |
+| `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's, and the refusal to delete on an incomplete picture |
 
 Four real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the

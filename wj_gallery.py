@@ -452,6 +452,66 @@ def sync_reports(keys, progress=None, force=False, workers=WORKERS):
     return fetched, cached, failed
 
 
+
+# ----------------------------------------------------------------------
+# What the whole published gallery wants
+# ----------------------------------------------------------------------
+def published_builds(games, feeds, summary, wj, progress=None):
+    """Every archive build any published list for `games` asks for.
+
+    Returns (want, checked, unchecked) where `want` is
+    { name_lower: set(sizes) } in the same shape the wizard's wanted_builds()
+    produces, `checked` is how many lists contributed, and `unchecked` names
+    the lists that could not - no published report, or a ForcedDown one whose
+    Archives[] is empty.
+
+    `unchecked` is the important return value. This set is used to decide what
+    is safe to DELETE, so an incomplete answer is not a smaller answer - it is
+    a wrong one. A caller must refuse to delete on the strength of a set it
+    knows to be short, rather than quietly reclaiming a few more gigabytes."""
+    keys = [k for k, e in feeds.items()
+            if game_key(e.get("game")) in games and k in summary]
+    want = {}
+    checked, unchecked = 0, []
+    for i, key in enumerate(keys, 1):
+        rep = load_report(key)
+        if rep is None or report_is_empty(rep):
+            unchecked.append(key)
+            continue
+        checked += 1
+        for a in report_archives(rep, wj):
+            low = a["name"].lower()
+            size = a.get("size")
+            if size is None:
+                want[low] = None
+            elif low in want:
+                if want[low] is not None:
+                    want[low].add(size)
+            else:
+                want[low] = {size}
+        if progress:
+            progress(i, len(keys), key)
+    return want, checked, unchecked
+
+
+def merge_builds(*maps):
+    """Union of several { name: set(sizes) | None } maps.
+
+    None means "wanted, but at an unstated size", which has to win over any
+    specific set: if one list pins a size and another does not, every copy of
+    that name must be protected."""
+    out = {}
+    for m in maps:
+        for low, sizes in (m or {}).items():
+            if low not in out:
+                out[low] = None if sizes is None else set(sizes)
+            elif out[low] is None or sizes is None:
+                out[low] = None
+            else:
+                out[low].update(sizes)
+    return out
+
+
 # ----------------------------------------------------------------------
 # Assembling a browsable gallery
 # ----------------------------------------------------------------------

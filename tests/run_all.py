@@ -26,6 +26,7 @@ SUITES = [
     ("t9_wabbajack.py", "handing a staged list to Wabbajack"),
     ("t10_lookup.py", "where a file may live and count as present"),
     ("t11_gallery.py", "the published gallery, and what you already own"),
+    ("t12_cleanup.py", "deleting what nothing wants; folders that are not ours"),
 ]
 
 total_pass = total_fail = 0

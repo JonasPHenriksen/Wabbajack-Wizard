@@ -341,6 +341,11 @@ def resolve_dirs():
                       "Create it, or fix MANIFEST_DIR at the top of this script.", d)
             return False
     MANIFESTS = os.path.abspath(d)
+    # Everything that imports the downloader shares one idea of which pool
+    # subfolders are modlist folders. Without this the wizard would index a
+    # stray folder that the sorter never scans, and call its contents present.
+    if WJ is not None:
+        WJ.set_known_list_dirs(WJ.known_list_dirs_from(MANIFESTS))
     BACKUPS = os.path.join(HERE, "manifest_backups")
     try:
         os.makedirs(BACKUPS, exist_ok=True)

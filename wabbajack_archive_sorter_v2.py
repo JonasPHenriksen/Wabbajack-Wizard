@@ -79,7 +79,9 @@ ARCHIVE_ROOT = CFG.resolved_archive_root()
 GAME_FOLDERS = CFG.GAME_FOLDERS
 GAME_DISPLAY = CFG.GAME_DISPLAY
 POOL_FOLDERS = CFG.POOL_FOLDERS
-EXCLUDE_POOL_DIRS = CFG.EXCLUDE_POOL_DIRS
+# Includes CFG.UNMANAGED_FOLDER: a modlist must not be able to claim that
+# name, and its contents must never be pulled into the pools.
+EXCLUDE_POOL_DIRS = CFG.excluded_dirs()
 MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR
 
 # Shared with wj_autoupdate.py: one archive-moving job at a time. Skipped when
@@ -1030,10 +1032,12 @@ def main():
 
     # Resolve the per-game pool layout now that we know the game.
     OUTPUT_BASE_DIR, MASTER_ARCHIVE_DIR, SHARED_DIR = resolve_game_dirs(chosen_game)
+    # A modlist called "Master", "Shared" or "Unmanaged" would have its folder
+    # collide with a pool, so those names are refused outright.
     RESERVED_NAMES = {
         os.path.basename(MASTER_ARCHIVE_DIR).lower(),
         os.path.basename(SHARED_DIR).lower(),
-    }
+    } | set(EXCLUDE_POOL_DIRS)
 
     LOG.info("\nGame selected:        %s", game_label(chosen_game))
     LOG.info("Master archive path:  %s", MASTER_ARCHIVE_DIR)

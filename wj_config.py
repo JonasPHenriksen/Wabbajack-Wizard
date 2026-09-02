@@ -71,6 +71,18 @@ POOL_FOLDERS = ("Master", "Shared")
 # case-insensitively against the folder name.
 EXCLUDE_POOL_DIRS = {"nolvus"}
 
+# A folder under each game root for archives this tooling must never manage:
+# hand-built installs (Tale of Two Wastelands), tool drops (ModEngine), and
+# anything acquired outside Wabbajack.
+#
+# It exists because the alternative is worse. Any subfolder of a game root that
+# is not a pool gets read as a modlist's folder, so its contents count as
+# "already downloaded" while no modlist asks for them - which makes every file
+# in it look like reclaimable junk to a cleanup that judges by demand. Parking
+# such content here states plainly that it is not ours, and both tools then
+# leave it alone completely: never indexed, never moved, never deleted.
+UNMANAGED_FOLDER = "Unmanaged"
+
 # Where the .wabbajack manifests live, relative to the tools folder, when
 # WJ_MANIFEST_DIR is not set.
 MANIFEST_SUBDIR = "modlists"
@@ -105,6 +117,18 @@ def resolved_archive_root():
         return ARCHIVE_ROOT
     return os.path.normpath(os.path.join(
         os.path.dirname(os.path.abspath(__file__)), ARCHIVE_ROOT))
+
+
+def excluded_dirs():
+    """Lowercased folder names under a game root that this tooling must not
+    touch: another installer's, plus the user's own unmanaged store."""
+    return set(EXCLUDE_POOL_DIRS) | {UNMANAGED_FOLDER.lower()}
+
+
+def unmanaged_dir(game):
+    """Where a game's unmanaged archives are parked."""
+    return os.path.join(resolved_archive_root(), game_folder(game),
+                        UNMANAGED_FOLDER)
 
 
 def game_folder(game):

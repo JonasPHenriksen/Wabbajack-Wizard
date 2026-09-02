@@ -133,7 +133,9 @@ ARCHIVE_ROOT = CFG.resolved_archive_root()
 GAME_FOLDERS = CFG.GAME_FOLDERS
 GAME_DISPLAY = CFG.GAME_DISPLAY
 POOL_FOLDERS = CFG.POOL_FOLDERS
-EXCLUDE_POOL_DIRS = CFG.EXCLUDE_POOL_DIRS
+# Includes CFG.UNMANAGED_FOLDER, so the user's own hand-managed store is as
+# invisible to this tooling as another installer's folder is.
+EXCLUDE_POOL_DIRS = CFG.excluded_dirs()
 MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR
 
 # Hash verification is the whole point of downloading a pinned revision. When
@@ -507,7 +509,37 @@ def invalidate_existing_cache():
     _EXISTING_CACHE.clear()
 
 
-def index_existing(game_base):
+# Folder names under a game root that belong to a modlist we follow. None
+# means "unknown, do not restrict". Set once at start-up from the manifest
+# folder - by main() for a standalone run, by wj_autoupdate.resolve_dirs() for
+# an imported one - so the two paths agree without every call site having to
+# remember to pass it.
+KNOWN_LIST_DIRS = None
+
+
+def set_known_list_dirs(names):
+    """Declare which subfolders are legitimate modlist folders.
+
+    An EMPTY set is treated as "unknown" rather than "none are legitimate":
+    excluding every list folder at once would make an entire collection read
+    as absent and trigger a re-download of all of it, which is a far worse
+    failure than indexing one folder too many."""
+    global KNOWN_LIST_DIRS
+    KNOWN_LIST_DIRS = frozenset(n.lower() for n in names) if names else None
+    invalidate_existing_cache()
+    return KNOWN_LIST_DIRS
+
+
+def known_list_dirs_from(manifest_dir):
+    """The folder-name set implied by the manifests in `manifest_dir`."""
+    try:
+        return {os.path.splitext(f)[0].lower()
+                for f in list_manifest_files(manifest_dir)}
+    except OSError:
+        return set()
+
+
+def index_existing(game_base, known_lists=None):
     """Index every archive already sitting in this game's pools.
 
     Returns { name_lower: [(abs_path, size_bytes), ...] } - EVERY copy, not
@@ -524,8 +556,17 @@ def index_existing(game_base):
     Collapsing them to whichever turned up first meant judging one list's
     requirement against another list's file.
 
-    Folders listed in EXCLUDE_POOL_DIRS (e.g. Nolvus) are skipped entirely, so
-    another installer's archives are neither claimed nor disturbed.
+    Folders listed in EXCLUDE_POOL_DIRS - another installer's (Nolvus) and the
+    unmanaged store - are skipped entirely, so archives that are not ours are
+    neither claimed nor disturbed.
+
+    `known_lists`, when given, is the set of lowercased folder names that are
+    legitimate modlist folders. Passing it restricts the scan to Master, Shared
+    and those, and any other subfolder is reported rather than indexed. That
+    matters because the SORTER only ever scans manifest-named folders: a file in
+    some other folder counted as present here would be skipped by the download
+    and then never staged, leaving Wabbajack short of a file this tooling had
+    just called downloaded. Same failure the game root used to cause.
 
     The scanned set is exactly what the sorter scans: Master, Shared, and the
     per-list folders. The game ROOT itself is deliberately excluded, even though
@@ -534,27 +575,50 @@ def index_existing(game_base):
     meaning counting it as present made the archive get skipped here and then be
     missing when Wabbajack looked for it. Better to fetch a redundant copy into
     the right place than to be quietly short one file."""
-    cache_key = os.path.normcase(os.path.abspath(game_base))
+    known = (frozenset(n.lower() for n in known_lists)
+             if known_lists is not None else KNOWN_LIST_DIRS)
+    cache_key = (os.path.normcase(os.path.abspath(game_base)), known)
     if cache_key in _EXISTING_CACHE:
         return _EXISTING_CACHE[cache_key]
 
     index = {}
+    pool_low = {p.lower() for p in POOL_FOLDERS}
     locations = [os.path.join(game_base, p) for p in POOL_FOLDERS]
-    skipped = []
+    skipped, stray = [], []
     try:
         for entry in os.listdir(game_base):
             full = os.path.join(game_base, entry)
             if not os.path.isdir(full):
                 continue
-            if entry.lower() in EXCLUDE_POOL_DIRS:
+            low = entry.lower()
+            if low in pool_low:
+                continue  # already listed, and listing it twice is harmless
+            if low in EXCLUDE_POOL_DIRS:
                 skipped.append(entry)
+                continue
+            if known is not None and low not in known:
+                stray.append(entry)
                 continue
             locations.append(full)
     except OSError:
         pass
-    if skipped:
-        LOG.info("  [SKIP] Ignoring foreign installer folder(s): %s",
-                 ", ".join(sorted(skipped)))
+    # Two different reasons, worth telling apart: one is another installer's
+    # territory, the other is content you told us to keep out of.
+    unmanaged_low = CFG.UNMANAGED_FOLDER.lower()
+    for entry in sorted(skipped):
+        if entry.lower() == unmanaged_low:
+            LOG.info("  [SKIP] Ignoring the unmanaged store '%s' - archives "
+                     "there are yours to manage, not ours.", entry)
+        else:
+            LOG.info("  [SKIP] Ignoring foreign installer folder: %s", entry)
+    if stray:
+        LOG.warning("  [WARN] %d folder(s) under %s are neither a pool nor a "
+                    "modlist this tooling follows, so they are not indexed: %s",
+                    len(stray), os.path.basename(game_base),
+                    ", ".join(sorted(stray)))
+        LOG.warning("         Move them into '%s' to say so deliberately, or "
+                    "put their modlist back in the manifest folder.",
+                    CFG.UNMANAGED_FOLDER)
 
     seen = set()
     for loc in locations:
@@ -1665,6 +1729,11 @@ def main():
     # script otherwise looks in ./modlists). Logs, the API key file and the CSV
     # reports stay in script_dir either way.
     manifest_dir = resolve_manifest_dir(script_dir)
+    if manifest_dir:
+        # Tell the index which subfolders are modlist folders, so one that is
+        # neither a pool nor a modlist is reported rather than counted as
+        # archives we own and then never staged by the sorter.
+        set_known_list_dirs(known_list_dirs_from(manifest_dir))
 
     banner("ENVIRONMENT CHECK")
     LOG.info("Archive root:   %s", ARCHIVE_ROOT)
