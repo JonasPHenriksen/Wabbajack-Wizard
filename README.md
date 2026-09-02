@@ -168,7 +168,19 @@ them reads as unwanted to a cleanup that judges by demand.
 folder that is neither a pool, nor excluded, nor named after a manifest you
 hold, and offers to move it there **intact** — nothing is deleted. Both tools
 then ignore it completely: never indexed, never moved, never deleted, and a
-modlist may not claim the name.
+modlist may not claim the name. Stage 5 reports the store's size, because it is
+usually not small: **79.7 GB** across four folders on this share.
+
+Strays are sized with `tree_size()`, not `dir_size()`. Pool folders are flat, so
+not descending is both right and faster there; a stray folder is whatever
+someone put on the share. `Workbase Improved` reported **81.7 KB** from its
+eight top-level files while actually holding **42.9 GB** in `PatchedBa2` and
+`Repack7z`, and `TTW` reported 1.7 GB against a real 18.8 GB. Those numbers are
+what the decision gets made on.
+
+The search walks the archive root rather than the games named in the manifests.
+A game holding nothing but orphaned content has no manifest by definition —
+`DARK SOULS 3` and `Witcher3` here — and would otherwise never be looked at.
 
 Until a stray is parked, it is excluded from the index and reported, rather
 than counted as archives you own. That matters because the sorter only ever
@@ -356,7 +368,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-419 checks across twelve suites. None of them touch the live archive pools:
+435 checks across twelve suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -376,7 +388,7 @@ exactly the failure they want to check.
 | `t9_wabbajack` | finding the newest CLI, the game preflight, path overlap, the install command |
 | `t10_lookup` | every location an archive may sit in and still count as already downloaded |
 | `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, and Wabbajack's own "Unavailable" rule |
-| `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's, and the refusal to delete on an incomplete picture |
+| `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, and the refusal to delete on an incomplete picture |
 
 Four real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the

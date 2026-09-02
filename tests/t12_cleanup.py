@@ -332,5 +332,77 @@ check("  and says how many lists it consulted",
       "1 published list(s) consulted" in (note or ""), str(note))
 A.reset_feed_cache()
 
+# ---------------------------------------------------------------- 12.7
+print("\n 12.7  a stray folder is a tree, not a flat pool")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("Mine", GAME, [("m.7z", 10, "nexus")])
+A.WJ.set_known_list_dirs(A.WJ.known_list_dirs_from(box.manifests))
+base, _m, _s = A.WJ.resolve_game_dirs(GAME)
+
+# A hand-built install: a few small files at the top, the bulk nested below.
+stray = os.path.join(base, "Workbase")
+os.makedirs(os.path.join(stray, "PatchedBa2", "deeper"))
+io.open(os.path.join(stray, "README.md"), "wb").write(b"x" * 100)
+io.open(os.path.join(stray, "README.md.meta"), "wb").write(b"x" * 7)
+io.open(os.path.join(stray, "PatchedBa2", "big.ba2"), "wb").write(b"x" * 5000)
+io.open(os.path.join(stray, "PatchedBa2", "deeper", "more.ba2"),
+        "wb").write(b"x" * 2000)
+
+flat_b, flat_f = W.dir_size(stray)
+deep_b, deep_f = W.tree_size(stray)
+check("dir_size stays non-recursive, as the pools need",
+      (flat_f, flat_b) == (1, 100), str((flat_f, flat_b)))
+check("tree_size counts the nested files too",
+      (deep_f, deep_b) == (3, 100 + 5000 + 2000), str((deep_f, deep_b)))
+check("tree_size ignores .meta sidecars, as dir_size does",
+      deep_f == 3, str(deep_f))
+check("tree_size on a path that is not there returns zero",
+      W.tree_size(os.path.join(base, "nope")) == (0, 0))
+
+rows = W.strays_in(base)
+check("a stray is reported at its TRUE size, not its top level",
+      rows == [("Workbase", 3, 7100)], str(rows))
+check("  which is what the old flat count got wrong",
+      rows[0][2] != flat_b, str((rows[0][2], flat_b)))
+
+print("\n      and it is found even for a game with no manifest at all")
+other = os.path.join(box.archives, "DarkSouls3")
+os.makedirs(os.path.join(other, "ModEngine"))
+io.open(os.path.join(other, "ModEngine", "tool.exe"), "wb").write(b"x" * 42)
+allrows = W.all_stray_folders()
+check("all_stray_folders walks the archive root, not the manifests",
+      ("DarkSouls3", "ModEngine", 1, 42) in allrows, str(allrows))
+check("  and still reports the one for a game that does have manifests",
+      ("Fallout4", "Workbase", 3, 7100) in allrows, str(allrows))
+check("  finding exactly the two", len(allrows) == 2, str(allrows))
+
+print("\n      parking works from a game folder with no GameType")
+(dst, _o) = quiet(W.park_unmanaged_dir, other, "ModEngine")
+check("park_unmanaged_dir moves it", bool(dst), str(dst))
+check("  intact",
+      os.path.isfile(os.path.join(other, CFG.UNMANAGED_FOLDER, "ModEngine",
+                                  "tool.exe")), str(dst))
+check("nothing is a stray in that game any more",
+      [r for r in W.all_stray_folders() if r[0] == "DarkSouls3"] == [],
+      str(W.all_stray_folders()))
+
+print("\n      the store is reported in the space overview")
+rep_rows = W.unmanaged_report()
+check("unmanaged_report names the game folder and its true size",
+      rep_rows == [("DarkSouls3", 42, 1)], str(rep_rows))
+(_r, spoke) = quiet(W.park_unmanaged_dir, base, "Workbase")
+rep_rows = W.unmanaged_report()
+check("both stores are reported once both exist",
+      sorted(g for g, _b, _f in rep_rows) == ["DarkSouls3", "Fallout4"],
+      str(rep_rows))
+check("  with the nested bytes counted",
+      dict((g, b) for g, b, _f in rep_rows)["Fallout4"] == 7100,
+      str(rep_rows))
+os.makedirs(os.path.join(box.archives, "Oblivion", CFG.UNMANAGED_FOLDER))
+check("an empty store is not reported as costing anything",
+      "Oblivion" not in [g for g, _b, _f in W.unmanaged_report()],
+      str(W.unmanaged_report()))
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

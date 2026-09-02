@@ -234,6 +234,29 @@ def dir_size(path):
     return total, count
 
 
+def tree_size(path):
+    """(bytes, files) for a whole directory tree.
+
+    dir_size() is deliberately non-recursive: a pool folder is flat, and not
+    descending is both correct and faster there. A stray folder is not a pool
+    though - it is whatever someone put on the share. "Workbase Improved" here
+    reported 81.7 KB from its eight top-level files while actually holding
+    42.9 GB in PatchedBa2 and Repack7z, and TTW reported 1.7 GB against a real
+    18.8 GB. Those numbers are what a decision gets made on, so they have to
+    count the whole tree."""
+    total = files = 0
+    for base, _dirs, names in os.walk(path):
+        for n in names:
+            if n.lower().endswith(".meta"):
+                continue
+            try:
+                total += os.path.getsize(os.path.join(base, n))
+                files += 1
+            except OSError:
+                pass
+    return total, files
+
+
 def wanted_builds(records, game):
     """{ name_lower: set(sizes) or None } for everything this game's lists want.
 
@@ -272,44 +295,68 @@ def known_list_dirs():
     return A.WJ.known_list_dirs_from(A.MANIFESTS)
 
 
-def stray_folders(game):
-    """(name, files, bytes) for folders under a game root that are nobody's.
+def strays_in(game_dir):
+    """(folder, files, bytes) for subfolders of one game root that are nobody's.
 
     Not Master, not Shared, not excluded, and not named after a manifest we
     hold. Usually a hand-built install or a tool; occasionally a modlist whose
     manifest was deleted while its archives stayed."""
-    base, _m, _s = A.WJ.resolve_game_dirs(game)
     known = known_list_dirs()
     pools = {p.lower() for p in A.WJ.POOL_FOLDERS}
-    out_rows = []
+    rows = []
     try:
-        names = sorted(os.listdir(base))
+        names = sorted(os.listdir(game_dir))
     except OSError:
-        return out_rows
+        return rows
     for n in names:
-        p = os.path.join(base, n)
+        p = os.path.join(game_dir, n)
         if not os.path.isdir(p):
             continue
         low = n.lower()
         if low in pools or low in A.WJ.EXCLUDE_POOL_DIRS or low in known:
             continue
-        b, f = dir_size(p)
-        out_rows.append((n, f, b))
-    return out_rows
+        b, f = tree_size(p)
+        rows.append((n, f, b))
+    return rows
 
 
-def park_unmanaged(game, folder):
-    """Move one stray folder into the game's Unmanaged store.
+def stray_folders(game):
+    """strays_in() for one GameType."""
+    base, _m, _s = A.WJ.resolve_game_dirs(game)
+    return strays_in(base)
+
+
+def all_stray_folders():
+    """(game_folder, folder, files, bytes) across every game on the share.
+
+    Walks the archive root rather than the games named in the manifests. A game
+    whose ONLY content is orphaned - Dark Souls 3 here, holding a tool drop and
+    no modlist at all - would otherwise never be looked at, and that is exactly
+    the case worth reporting."""
+    root = A.WJ.ARCHIVE_ROOT
+    rows = []
+    try:
+        games = sorted(os.listdir(root))
+    except OSError:
+        return rows
+    for g in games:
+        gp = os.path.join(root, g)
+        if not os.path.isdir(gp):
+            continue
+        for name, files, byts in strays_in(gp):
+            rows.append((g, name, files, byts))
+    return rows
+
+
+def park_unmanaged_dir(game_dir, folder):
+    """Move one stray folder into that game root's Unmanaged store.
 
     Moved rather than deleted, and moved wholesale rather than file by file:
     the point is to record that this content is not ours to judge, and the
     cheapest way to be sure nothing is lost is not to take it apart."""
-    base, _m, _s = A.WJ.resolve_game_dirs(game)
-    src = os.path.join(base, folder)
-    # Derived from resolve_game_dirs rather than from the config directly, so
-    # it follows the same archive root everything else in this run uses.
+    src = os.path.join(game_dir, folder)
     name = CFG.UNMANAGED_FOLDER if CFG else "Unmanaged"
-    store = os.path.join(base, name)
+    store = os.path.join(game_dir, name)
     dst = unique_path(os.path.join(store, folder))
     try:
         os.makedirs(store, exist_ok=True)
@@ -318,6 +365,13 @@ def park_unmanaged(game, folder):
         out(f"    could not move {folder}: {e}")
         return None
     return dst
+
+
+def park_unmanaged(game, folder):
+    """park_unmanaged_dir() for one GameType."""
+    base, _m, _s = A.WJ.resolve_game_dirs(game)
+    return park_unmanaged_dir(base, folder)
+
 
 
 def gallery_protection(games, progress=True):
@@ -1236,6 +1290,29 @@ def orphan_sidecars():
     return sorted(out_list)
 
 
+def unmanaged_report():
+    """(game_folder, bytes, files) for each game's Unmanaged store.
+
+    Shown because it is often not small - 79.7 GB across four folders on this
+    share - and a disk-space stage that silently omits it would leave the
+    biggest single thing on the volume unaccounted for."""
+    name = (CFG.UNMANAGED_FOLDER if CFG else "Unmanaged")
+    root = A.WJ.ARCHIVE_ROOT
+    rows = []
+    try:
+        games = sorted(os.listdir(root))
+    except OSError:
+        return rows
+    for g in games:
+        store = os.path.join(root, g, name)
+        if not os.path.isdir(store):
+            continue
+        b, f = tree_size(store)
+        if f:
+            rows.append((g, b, f))
+    return rows
+
+
 def gather_space(records, extra_want=None):
     """Manifest sizes, per-list pool folder sizes, and Master per game."""
     out("  Measuring... (walking the pools on the share)")
@@ -1434,6 +1511,16 @@ def stage_space(state, records):
     lists, masters = gather_space(records)
     show_space(lists, masters)
 
+    parked = unmanaged_report()
+    if parked:
+        store = CFG.UNMANAGED_FOLDER if CFG else "Unmanaged"
+        out()
+        out(f"  {store.upper()} ({human(sum(b for _g, b, _f in parked))}) - "
+            f"yours, never touched by this tooling")
+        gw = fit([g for g, _b, _f in parked], 4) + 2
+        for g, b, f in parked:
+            out(f"    {g:<{gw}}{f:>9}{human(b):>12}")
+
     try:
         free = shutil.disk_usage(A.WJ.ARCHIVE_ROOT).free
         out()
@@ -1503,10 +1590,9 @@ def stage_space(state, records):
                 f"{m['files']:>9}{human(m['bytes']):>12}")
 
     # ---- 5b: folders that are nobody's -------------------------------
-    strays = []
-    for game in sorted({e.get("game") for e in records.values() if e.get("game")}):
-        for name, files, byts in stray_folders(game):
-            strays.append((game, name, files, byts))
+    # Across every game on the share, not just those with a manifest: a game
+    # holding nothing but orphaned content has no manifest by definition.
+    strays = all_stray_folders()
     if strays:
         out()
         rule()
@@ -1516,10 +1602,10 @@ def stage_space(state, records):
         out(f"      that judges by demand, so move them into '{CFG.UNMANAGED_FOLDER if CFG else 'Unmanaged'}'")
         out("      and both tools will leave them alone for good.")
         out()
-        gw = fit([A.WJ.game_label(g) for g, _n, _f, _b in strays], 4) + 2
-        out(f"    {'#':>3}  {'game':<{gw}}{'folder':<34}{'files':>7}{'size':>11}")
+        gw = fit([g for g, _n, _f, _b in strays], 4) + 2
+        out(f"    {'#':>3}  {'game folder':<{gw}}{'folder':<38}{'files':>7}{'size':>11}")
         for i, (game, name, files, byts) in enumerate(strays, 1):
-            out(f"    {i:>3}  {A.WJ.game_label(game):<{gw}}{name[:34]:<34}"
+            out(f"    {i:>3}  {game:<{gw}}{name[:38]:<38}"
                 f"{files:>7}{human(byts):>11}")
         out()
         out("      Nothing is deleted here - the folder is moved intact.")
@@ -1529,7 +1615,8 @@ def stage_space(state, records):
         else:
             for i in picks:
                 game, name, files, byts = strays[i]
-                dst = park_unmanaged(game, name)
+                dst = park_unmanaged_dir(os.path.join(A.WJ.ARCHIVE_ROOT, game),
+                                         name)
                 if dst:
                     out(f"    {name} -> {dst}")
             A.WJ.invalidate_existing_cache()
