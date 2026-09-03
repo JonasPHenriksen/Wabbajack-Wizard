@@ -26,7 +26,11 @@ Special Edition archives, and Enderal is a total conversion on the same engine
 whose lists are three quarters Skyrim SE Nexus files. `GAME_FOLDERS` in
 `wj_config.py` is where that is said, and every list drawing from a shared
 folder also protects it. Folding an existing folder into another is
-`wj_merge_pool.py`'s job (see below).
+`wj_merge_pool.py`'s job. It was run once, on 2026-09-03, to fold the Enderal
+folder in: 332 of its 938 archives were the same name, size and xxHash64 as a
+copy the Skyrim pool already held, and were dropped for 30.9 GB; none differed
+in content; the two list folders moved across as renames, and the record is in
+`merged_EnderalSpecialEdition_into_Skyrim_<stamp>.csv`.
 
 A folder is only visible to the tooling if a manifest of the same name exists in
 `modlists/`. `modlists/Foo.wabbajack` ↔ `Mod Archive/<Game>/Foo/`. Delete the
