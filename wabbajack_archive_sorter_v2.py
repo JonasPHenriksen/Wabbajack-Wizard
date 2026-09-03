@@ -55,13 +55,19 @@ Changes from the original v2 (two edits, both in this file):
      that folder's Master may hold.
   6. An in-scope manifest that lists no archives at all stops the run, like an
      unreadable one does: its files would all look unwanted.
+  7. Manifests are read through the light cache the wizard and the updater
+     already keep (wj_manifest_cache.json, keyed by each file's mtime and
+     size), so a run no longer opens 22 multi-GB zips on the share to learn
+     22 lists of names and sizes it already knew.
+  8. Identical extra copies of an archive - same name, same size - are parked
+     in Master during the cleanup pass, so the pools converge in one run and
+     stage 5c can reclaim them. Copies of OTHER sizes stay where they are: a
+     name several lists pin at different sizes has one home per build.
 """
 
 import os
 import sys
-import json
 import shutil
-import zipfile
 import filecmp
 import logging
 import argparse
@@ -83,6 +89,11 @@ except ImportError:
         "wj_config.py is missing from the folder holding these scripts. It "
         "defines ARCHIVE_ROOT and the game/pool layout and is not optional.\n")
     raise SystemExit(2)
+
+# The downloader doubles as the shared library: manifest parsing and the
+# light cache live there, so every tool reads a manifest the same way and
+# reads it once.
+import wabbajack_archive_downloader as WJ
 
 ARCHIVE_ROOT = CFG.resolved_archive_root()
 GAME_FOLDERS = CFG.GAME_FOLDERS
@@ -161,6 +172,11 @@ def setup_logging(log_dir, verbose=False):
         LOG.addHandler(fh)
     except OSError as e:
         LOG.warning("[WARN] Could not open a log file in %s: %s", log_dir, e)
+    # The shared library's own logger has no handler here. Its warnings and
+    # errors - an unreadable manifest, above all - must land in this log.
+    WJ.LOG.handlers = list(LOG.handlers)
+    WJ.LOG.setLevel(logging.WARNING)
+    WJ.LOG.propagate = False
     return log_path
 
 
@@ -184,13 +200,9 @@ def acquire_pool_lock(script_dir):
     except OSError:
         return None
     try:
-        if os.name == "nt":
-            import msvcrt
-            fd.seek(0)
-            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        import msvcrt
+        fd.seek(0)
+        msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
     except (OSError, BlockingIOError):
         fd.close()
         LOG.error("[TERMINATED] Another archive job (downloader or updater) is "
@@ -206,14 +218,10 @@ def acquire_pool_lock(script_dir):
 
     def _release():
         try:
-            if os.name == "nt":
-                import msvcrt
-                fd.seek(0)
-                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
+            import msvcrt
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+        except Exception:
             pass
         try:
             fd.close()
@@ -330,89 +338,69 @@ def file_size(path):
 
 
 # ----------------------------------------------------------------------
-# Manifest parsing
+# Manifest records, from the shared light cache
 # ----------------------------------------------------------------------
-def parse_manifest(wj_path):
-    """Open a .wabbajack archive and return a record describing it:
+def light_to_record(entry):
+    """The sorter's view of one cached manifest:
 
         {
-          "game":   GameType string or None,
-          "names":  set of expected download filenames (lower-cased),
-          "sizes":  { name_lower: set(expected_byte_size, ...) },
+          "game":     GameType string or None,
+          "names":    set of expected download filenames (lower-cased),
+          "sizes":    { name_lower: set(expected_byte_size, ...) },
+          "gamefile": names Wabbajack copies out of the game install,
+          "readable": False if the manifest could not be read at all,
         }
 
-    Returns the record with empty fields on any failure (logged)."""
-    record = {"game": None, "names": set(), "sizes": defaultdict(set),
-              "readable": True, "gamefile": set()}
-    base = os.path.basename(wj_path)
-    LOG.info("  [SCAN] %s", base)
-
-    try:
-        with zipfile.ZipFile(wj_path, "r") as z:
-            members = z.namelist()
-            # The manifest is a member literally named "modlist" (no extension),
-            # usually at the archive root. Match on basename to be safe.
-            target = next((m for m in members if os.path.basename(m).lower() == "modlist"), None)
-            if target is None:
-                LOG.warning("  [WARN] No 'modlist' manifest found inside %s - skipping.", base)
-                record["readable"] = False
-                return record
-
-            with z.open(target) as f:
-                data = json.load(f)
-
-        if isinstance(data, dict):
-            gt = data.get("GameType")
-            if gt and not CFG.valid_game_type(gt):
-                LOG.error("  [ERROR] %s declares GameType %r, which is not a "
-                          "folder name. Treating it as no game.", base, gt)
-            elif gt:
-                record["game"] = str(gt)
-
-        archives = data.get("Archives") if isinstance(data, dict) else None
-        if not isinstance(archives, list):
-            LOG.warning("  [WARN] 'Archives' list missing/malformed in %s.", base)
-            return record
-
-        for archive in archives:
-            if not isinstance(archive, dict):
-                continue
-            name = archive.get("Name") or archive.get("NameLog")
-            if not name:
-                continue
-            low = str(name).lower()
-            record["names"].add(low)
-            # GameFile entries are copied out of your game install by
-            # Wabbajack; they are never downloaded and are never expected on
-            # disk. Counting them as "missing" makes a healthy list look as
-            # though hundreds of archives are absent.
-            st = archive.get("State")
-            if isinstance(st, dict) and str(st.get("$type", "")).startswith(
-                    "GameFileSourceDownloader"):
-                record["gamefile"].add(low)
-            size = archive.get("Size")
-            if isinstance(size, int) and size >= 0:
-                record["sizes"][low].add(size)
-
-    except zipfile.BadZipFile:
-        LOG.error("  [ERROR] %s is not a readable zip/wabbajack file.", base)
-        record["readable"] = False
-    except json.JSONDecodeError as e:
-        LOG.error("  [ERROR] Manifest JSON in %s is corrupt: %s", base, e)
-        record["readable"] = False
-    except OSError as e:
-        LOG.error("  [ERROR] Could not open %s: %s", base, e)
-        record["readable"] = False
-    except Exception as e:  # last-resort guard so one bad file never aborts the run
-        LOG.error("  [ERROR] Unexpected failure reading %s: %s", base, e)
-        record["readable"] = False
-
-    if record["names"]:
-        LOG.info("  [OK]   %s -> game=%s, %d archive(s) required.",
-                 base, record["game"] or "unknown", len(record["names"]))
-    else:
-        LOG.warning("  [WARN] %s produced 0 archive entries (treated as empty).", base)
+    GameFile entries are copied out of your game install by Wabbajack; they
+    are never downloaded and are never expected on disk. Counting them as
+    "missing" makes a healthy list look as though hundreds of archives are
+    absent, so they are kept apart."""
+    record = {"game": entry.get("game"), "names": set(),
+              "sizes": defaultdict(set),
+              "readable": bool(entry.get("readable", True)), "gamefile": set()}
+    for a in entry.get("archives") or []:
+        low = str(a.get("name") or "").lower()
+        if not low:
+            continue
+        record["names"].add(low)
+        if a.get("kind") == "gamefile":
+            record["gamefile"].add(low)
+        size = a.get("size")
+        if isinstance(size, int) and size >= 0:
+            record["sizes"][low].add(size)
     return record
+
+
+def load_records(manifest_dir, cache_dir, wj_files):
+    """One record per manifest, from the cache where it is current.
+
+    Only manifests whose mtime or size changed since the cache saw them are
+    opened; the rest cost a JSON read. A manifest that cannot be stat'ed is
+    reported as unreadable, which stops the run further down."""
+    parsed = []
+
+    def progress(n, total, fn):
+        parsed.append(fn)
+        LOG.info("  [SCAN] %s  (%d of %d not in the cache)", fn, n, total)
+
+    light = WJ.load_light_records(
+        manifest_dir, os.path.join(cache_dir, WJ.MANIFEST_CACHE_FILE),
+        progress=progress, files=wj_files)
+    records = []
+    for wj_file in wj_files:
+        entry = light.get(wj_file)
+        if entry is None:
+            LOG.error("  [ERROR] %s could not be read.", wj_file)
+            rec = {"game": None, "names": set(), "sizes": defaultdict(set),
+                   "readable": False, "gamefile": set()}
+        else:
+            rec = light_to_record(entry)
+        rec["file"] = wj_file
+        rec["name"] = os.path.splitext(wj_file)[0]
+        records.append(rec)
+    LOG.info("  %d manifest(s); %d read from the cache.", len(records),
+             len(records) - len(parsed))
+    return records
 
 
 # ----------------------------------------------------------------------
@@ -422,8 +410,13 @@ def build_disk_index(search_locations, protected_names):
     """Index every real file across the search locations.
 
     Returns:
-        index:      { name_lower: [(abs_src_path, actual_case_name), ...] }
+        index:      { name_lower: [(abs_src_path, actual_case_name, size), ...] }
         duplicates: { name_lower: [paths...] }                   (>=2 copies)
+
+    Sizes come from the directory listing itself (scandir), not from a stat
+    per file: over SMB that is one round trip per folder instead of one per
+    archive, and the plan below then never has to stat a file to choose
+    between copies.
 
     EVERY copy is kept, not just the first one found. A filename does not
     identify content here: several modlists legitimately pin different builds
@@ -451,14 +444,15 @@ def build_disk_index(search_locations, protected_names):
             LOG.debug("  [skip] Not a directory: %s", loc)
             continue
         try:
-            entries = os.listdir(loc)
+            entries = list(os.scandir(loc))
         except OSError as e:
             LOG.warning("  [WARN] Cannot read %s: %s", loc, e)
             continue
 
         counted = 0
-        for name in entries:
-            full = os.path.join(loc, name)
+        for e in entries:
+            name = e.name
+            full = e.path
             low = name.lower()
 
             if low.endswith(".meta"):
@@ -473,8 +467,12 @@ def build_disk_index(search_locations, protected_names):
                 continue  # '._x' / '.DS_Store' left by a Mac on the share
             if low in protected_names:
                 continue  # never relocate the manifests or this script
-            if not os.path.isfile(full):
-                continue  # ignore subfolders / symlinked dirs
+            try:
+                if not e.is_file():
+                    continue  # ignore subfolders / symlinked dirs
+                size = e.stat().st_size
+            except OSError:
+                continue
 
             counted += 1
             key = CFG.canonical_name(low)
@@ -482,9 +480,9 @@ def build_disk_index(search_locations, protected_names):
                 if not duplicates[key]:
                     duplicates[key].append(index[key][0][0])
                 duplicates[key].append(full)
-                index[key].append((full, name))
+                index[key].append((full, name, size))
             else:
-                index[key] = [(full, name)]
+                index[key] = [(full, name, size)]
 
         LOG.info("  -> Indexed %d file(s) in '%s'", counted, short(loc))
 
@@ -497,21 +495,18 @@ def build_disk_index(search_locations, protected_names):
 def pick_copy(copies, wanted_sizes):
     """Choose which copy of a name to move, given what the destination wants.
 
-    `copies` is [(path, name)] and `wanted_sizes` the set of byte sizes the
-    receiving modlist's manifest states for that name. The copy that matches is
-    the one that list can actually install; without this the first copy scanned
-    wins, which is arbitrary and frequently wrong when two lists pin different
-    builds under one name. Falls back to the first copy when nothing matches or
-    nothing is known, leaving the existing size-checked collision handling to
-    sort out what it can."""
+    `copies` is [(path, name, size)] and `wanted_sizes` the set of byte sizes
+    the receiving modlist's manifest states for that name. The copy that
+    matches is the one that list can actually install; without this the first
+    copy scanned wins, which is arbitrary and frequently wrong when two lists
+    pin different builds under one name. Falls back to the first copy when
+    nothing matches or nothing is known, leaving the existing size-checked
+    collision handling to sort out what it can. Returns (path, name, size)."""
     if len(copies) == 1 or not wanted_sizes:
         return copies[0]
-    for path, name in copies:
-        try:
-            if os.path.getsize(path) in wanted_sizes:
-                return path, name
-        except OSError:
-            continue
+    for path, name, size in copies:
+        if size in wanted_sizes:
+            return path, name, size
     return copies[0]
 
 
@@ -557,7 +552,14 @@ def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
                 dest_dir, reason = MASTER_ARCHIVE_DIR, "unused -> master"
                 wanted = None
 
-        src, name = pick_copy(copies, wanted)
+        src, name, chosen_size = pick_copy(copies, wanted)
+        # Of the copies at that size, one already sitting in the destination
+        # folder wins: moving another one onto it would only collide with it
+        # and park the mover, while this one was never going anywhere.
+        for p, n, s_ in copies:
+            if s_ == chosen_size and same_path(os.path.dirname(p), dest_dir):
+                src, name = p, n
+                break
         # A '~N' suffix is storage only. Staging gives the file back the name
         # the manifest uses, so Wabbajack finds it. A copy bound for Master
         # keeps whatever name it has: renaming there would make every rebuild
@@ -566,6 +568,23 @@ def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
             else CFG.canonical_name(name)
         dst = os.path.join(dest_dir, out_name)
         plan.append({"src": src, "dst": dst, "name": out_name, "reason": reason})
+
+        # Every OTHER copy of the same build - same name, same size - is
+        # redundant once one copy has a home, and goes to Master for stage 5c
+        # to reclaim. Doing this here, in the cleanup pass, is what lets the
+        # pools settle in one run instead of one copy per run. Copies of other
+        # sizes are left alone: a name several lists pin at different sizes
+        # has one home per build, and Shared can hold only one of them. Only
+        # the cleanup pass does this; staging finds the pools already settled.
+        if target_modlist is None:
+            for p, n, s in copies:
+                if p == src or s != chosen_size:
+                    continue
+                if same_path(os.path.dirname(p), MASTER_ARCHIVE_DIR):
+                    continue
+                plan.append({"src": p, "dst": os.path.join(MASTER_ARCHIVE_DIR, n),
+                             "name": n, "reason": "redundant copy of the same build",
+                             "park": True})
 
     return plan
 
@@ -746,6 +765,12 @@ def execute_plan(moves, expected, dry_run):
                 counters["errors"] += 1
                 continue
 
+            # A redundant copy is parked, not placed: Master may already hold
+            # a file of that name, and park_in_master() finds a free one.
+            if m.get("park"):
+                park_in_master(src, counters, dry_run, m["reason"])
+                continue
+
             # Collision: a *different* file already occupies the destination.
             if (os.path.islink(dst) or os.path.exists(dst)) and not same_path(src, dst):
                 resolve_collision(src, dst, name, expected, counters, dry_run)
@@ -901,9 +926,9 @@ def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
     LOG.info("[SUMMARY] %d unique file(s) indexed on disk.", len(disk_index))
 
     if duplicates:
-        LOG.warning("[WARN] %d filename(s) exist in more than one location. The first copy "
-                    "found is treated as authoritative; collisions are resolved by size "
-                    "during the move:", len(duplicates))
+        LOG.warning("[WARN] %d filename(s) exist in more than one location. The copy "
+                    "whose size a list wants is placed; identical extras are parked "
+                    "in Master for stage 5c; other builds stay put:", len(duplicates))
         for low, paths in sorted(duplicates.items()):
             LOG.warning("  * %s", disk_index[low][0][1])
             for p in paths:
@@ -1016,17 +1041,10 @@ def main():
     if manifest_dir != current_dir:
         LOG.info("Manifest dir:         %s", manifest_dir)
 
-    # ---- Step 1: parse every manifest once ---------------------------
+    # ---- Step 1: read every manifest, from the cache where it is current --
     banner("STEP 1: SCANNING MANIFESTS")
-    records = []
-    empty_lists = []
-    for wj_file in wj_files:
-        rec = parse_manifest(os.path.join(manifest_dir, wj_file))
-        rec["file"] = wj_file
-        rec["name"] = os.path.splitext(wj_file)[0]
-        records.append(rec)
-        if not rec["names"]:
-            empty_lists.append(rec["name"])
+    records = load_records(manifest_dir, current_dir, wj_files)
+    empty_lists = [r["name"] for r in records if not r["names"]]
 
     # A manifest that failed to READ yields an empty demand set, which is
     # indistinguishable from "this list needs nothing". The cleanup pass would

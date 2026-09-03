@@ -3,8 +3,8 @@
 Wabbajack Modlist Auto-Updater
 ==============================
 Front-end for wabbajack_archive_downloader.py and wabbajack_archive_sorter_v2.py.
-Runs on Windows against the mapped share, or headless on Linux against a local
-path. You launch it; it does the rest in one pass.
+Runs on Windows against the mapped share. You launch it; it does the rest in
+one pass.
 
 What one run does
 -----------------
@@ -20,12 +20,11 @@ What one run does
   5. Runs the sorter once to rebuild the pools and stage one list.
   6. Writes a report plus nexus_todo_<list>.csv, and optionally notifies.
 
-Windows, from the share (the usual setup)
------------------------------------------
+From the share (the usual setup)
+--------------------------------
 Put this file next to the two scripts and your .wabbajack files on the mapped
-drive. Leave ARCHIVE_ROOT as your Windows path, the r"Z:\\Mod Archive" you
-already had. Then
-either double-click run.bat or:
+drive. Leave ARCHIVE_ROOT in wj_config.py as your mapped path, the
+r"Z:\\Mod Archive" you already had. Then either double-click run.bat or:
 
     py -3 wj_autoupdate.py --check        # what has updates? changes nothing
     py -3 wj_autoupdate.py                # a real run
@@ -40,25 +39,17 @@ them to Wabbajack, which is simplest. "assist" hands them to your downloader's
 --nxm-assist mode, which opens each mod page and captures your click; it is
 still one click per file, the same manual step Wabbajack asks of you.
 
-Linux, headless
----------------
-Same script. Set ARCHIVE_ROOT to a POSIX path in wj_config.py and leave
-NEXUS_MODE as "skip": --nxm-assist needs winreg and a browser, so the script
-refuses it off Windows. Pair with the systemd timer if you want it on a
-schedule.
-
 Requirements
 ------------
-  * Python 3.8+
+  * Python 3.8+ (setup_env.bat builds the environment run.bat uses)
   * The two existing scripts, in the same folder as this one.
-  * Optional but strongly recommended: xxhash, so manifests and archives get
-    real hash verification instead of a size check.
-        Windows:  py -3 -m pip install xxhash
-        Debian:   sudo apt install python3-xxhash
+  * xxhash, so manifests and archives get real hash verification instead of
+    a size check. Refused without it unless --allow-size-only is passed.
 """
 
 import os
 import re
+import csv
 import sys
 import json
 import time
@@ -141,12 +132,12 @@ STAGE_LIST = "SkrubbySkrubInAShrub_@@_NordicSoulsPBR"
 
 # How to handle the Nexus archives.
 #   "skip"   -> do not touch Nexus at all. Wabbajack fetches them itself later.
-#               The only option on Linux, and the simplest one on Windows.
+#               The simplest option, and the only one for an unattended run.
 #   "assist" -> hand them to your downloader's --nxm-assist mode, which opens
-#               each mod page in turn and captures your click. Windows only,
-#               needs a browser and a real console. Still one click per file:
-#               this is the same manual step Wabbajack would ask of you, just
-#               driven by your script instead.
+#               each mod page in turn and captures your click. Needs a browser
+#               and a real console. Still one click per file: this is the same
+#               manual step Wabbajack would ask of you, just driven by your
+#               script instead.
 NEXUS_MODE = "assist"
 
 # The sorter skips "*.part" when indexing (change 1 in its own docstring), so a
@@ -444,22 +435,18 @@ UNAVAILABLE = object()   # this filesystem cannot lock; caller decides
 def acquire_lock(path):
     """Best-effort exclusive lock. Returns a file object, HELD, or UNAVAILABLE.
 
-    flock does not exist on Windows and msvcrt.locking is unreliable over SMB,
-    so a failure to lock is reported as UNAVAILABLE rather than treated as
-    contention. With a single person launching runs by hand that is fine; the
-    lock only exists to stop an accidental double-click."""
+    msvcrt.locking is unreliable over SMB, so a failure to lock at all is
+    reported as UNAVAILABLE rather than treated as contention. With a single
+    person launching runs by hand that is fine; the lock only exists to stop
+    an accidental double-click."""
     try:
         fd = open(path, "a+")
     except OSError:
         return UNAVAILABLE
     try:
-        if os.name == "nt":
-            import msvcrt
-            fd.seek(0)
-            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        import msvcrt
+        fd.seek(0)
+        msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
     except (OSError, BlockingIOError):
         fd.close()
         return HELD
@@ -467,8 +454,6 @@ def acquire_lock(path):
         fd.close()
         return UNAVAILABLE
     try:
-        fd.seek(0)
-        fd.truncate(0) if os.name != "nt" else None
         fd.write(f"{os.getpid()} {datetime.now().isoformat()}\n")
         fd.flush()
     except OSError:
@@ -480,14 +465,10 @@ def release_lock(fd):
     if fd is None or fd is HELD or fd is UNAVAILABLE:
         return
     try:
-        if os.name == "nt":
-            import msvcrt
-            fd.seek(0)
-            msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
+        import msvcrt
+        fd.seek(0)
+        msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+    except Exception:
         pass
     try:
         fd.close()
@@ -910,71 +891,85 @@ def archive_kind(a):
 def load_plan_records(progress=None, files=None):
     """Lightweight per-list records, cached on disk.
 
-    Planning only needs each archive's name, size and source kind. A full parse
-    also carries every archive's Meta block, which is the bulk of a manifest -
-    and only the downloader needs that, which re-parses the file itself anyway.
-    Caching the light form turns a multi-minute crawl over ~19 GB of zips into
-    a sub-second read.
+    The cache itself lives in the downloader module now, so the sorter reads
+    the same file instead of opening every manifest zip on each run; see
+    load_light_records() there for what is cached and how it is invalidated."""
+    return WJ.load_light_records(MANIFESTS, os.path.join(HERE, MANIFEST_CACHE_FILE),
+                                 progress=progress, files=files)
 
-    An entry is keyed by its manifest's mtime and size, so editing, replacing
-    or re-downloading a manifest invalidates just that entry automatically.
-    There is no way for the cache to describe a file that is no longer there."""
-    path = os.path.join(HERE, MANIFEST_CACHE_FILE)
+
+# ----------------------------------------------------------------------
+# The trash: what stage 5c reclaimed, waiting out its purge date
+# ----------------------------------------------------------------------
+def purge_trash(days=None):
+    """Delete from every game's trash folder what has been there long enough.
+
+    Stage 5c moves reclaimed archives into <game>/<TRASH_FOLDER> and stamps
+    them with the moment they arrived, so age here is time since reclaiming,
+    not the archive's own age. Run at the start of every run, so the undo
+    window is exactly TRASH_KEEP_DAYS and no longer. days=0 empties the
+    trash outright, which is what the wizard's "empty now" does.
+
+    Returns (rows, record_path): one (game_folder, name, size, arrived) per
+    file removed, and the CSV they were written to as it went."""
+    # The layout module is reached through the downloader, like everything
+    # else here.
+    cfg = WJ.CFG
+    days = cfg.TRASH_KEEP_DAYS if days is None else days
+    cutoff = time.time() - days * 86400
+    root = WJ.ARCHIVE_ROOT
+    trash_name = cfg.TRASH_FOLDER
+    rows, record, writer = [], None, None
     try:
-        with open(path, encoding="utf-8") as f:
-            cache = json.load(f)
-        if not isinstance(cache, dict):
-            cache = {}
-    except (OSError, json.JSONDecodeError):
-        cache = {}
-
-    names = files if files is not None else WJ.list_manifest_files(MANIFESTS)
-    out, dirty, misses = {}, False, []
-    for i, fn in enumerate(names, 1):
-        full = os.path.join(MANIFESTS, fn)
+        games = sorted(os.listdir(root))
+    except OSError:
+        return rows, None
+    for g in games:
+        trash = os.path.join(root, g, trash_name)
+        if not os.path.isdir(trash):
+            continue
         try:
-            st = os.stat(full)
+            entries = sorted(os.scandir(trash), key=lambda e: e.name.lower())
         except OSError:
             continue
-        stamp = [int(st.st_mtime), st.st_size]
-        hit = cache.get(fn)
-        if isinstance(hit, dict) and hit.get("stamp") == stamp:
-            out[fn] = hit
-            continue
-        misses.append((i, fn, full, stamp))
-
-    for n, (i, fn, full, stamp) in enumerate(misses, 1):
-        if progress:
-            progress(n, len(misses), fn)
-        rec = WJ.parse_manifest(full)
-        entry = {
-            "stamp": stamp,
-            "game": rec["game"],
-            "readable": rec["readable"],
-            # The raw $type is kept only for the entries we could not
-            # classify, so the cache stays small while an unrecognised
-            # downloader can still be named in a report.
-            "archives": [
-                dict({"name": a["name"], "size": a["size"], "kind": k},
-                     **({"raw": WJ.state_type_raw(a["state"])}
-                        if k == "unknown" else {}))
-                for a, k in ((a, WJ.state_type(a["state"]))
-                             for a in rec["archives"])],
-        }
-        cache[fn] = entry
-        out[fn] = entry
-        dirty = True
-
-    if dirty:
-        cache = {k: v for k, v in cache.items() if k in out}
-        tmp = path + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(cache, f)
-            os.replace(tmp, path)
-        except OSError as e:
-            LOG.debug("Could not write the manifest cache: %s", e)
-    return out
+        for e in entries:
+            try:
+                if not e.is_file():
+                    continue
+                st = e.stat()
+            except OSError:
+                continue
+            if st.st_mtime > cutoff:
+                continue
+            arrived = datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")
+            try:
+                os.remove(e.path)
+            except OSError as ex:
+                LOG.warning("[WARN] Could not purge %s: %s", e.path, ex)
+                continue
+            if record is None:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = os.path.join(HERE, f"purged_trash_{stamp}.csv")
+                try:
+                    record = open(path, "w", newline="", encoding="utf-8")
+                    writer = csv.writer(record)
+                    writer.writerow(["game_folder", "archive", "size_bytes", "arrived"])
+                except OSError as ex:
+                    LOG.warning("[WARN] Could not open the purge record: %s", ex)
+                    record = False
+            row = (g, e.name, st.st_size, arrived)
+            rows.append(row)
+            if writer is not None:
+                writer.writerow(row)
+                record.flush()
+    record_path = None
+    if record:
+        record_path = record.name
+        record.close()
+    if rows:
+        LOG.info("Trash: purged %d file(s) older than %s day(s), %s.", len(rows),
+                 days, WJ.human_bytes(sum(r[2] for r in rows)))
+    return rows, record_path
 
 
 def plan_for(record):
@@ -1042,11 +1037,17 @@ def find_part_files(game_base):
 
 
 def write_nexus_todo(record, nexus_items):
-    """CSV of the Nexus download pages still outstanding, for the desktop."""
-    if not nexus_items:
-        return None
-    import csv
+    """CSV of the Nexus download pages still outstanding, for the desktop.
+
+    Removed again once nothing is outstanding: a to-do list for a finished
+    list is clutter, and ten of them had accumulated here."""
     path = os.path.join(HERE, f"nexus_todo_{record['name']}.csv")
+    if not nexus_items:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
     try:
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
@@ -1070,6 +1071,15 @@ def write_nexus_todo(record, nexus_items):
 # ----------------------------------------------------------------------
 # Driving the two existing scripts
 # ----------------------------------------------------------------------
+def wabbajack_busy():
+    """Is a Wabbajack process running? False when that cannot be checked."""
+    try:
+        import wj_wabbajack as WB
+    except ImportError:
+        return False
+    return bool(WB.running_processes())
+
+
 def child_flags(args):
     """Flags that must reach the child scripts so they behave like the parent."""
     flags = ["--allow-size-only"] if args.allow_size_only else []
@@ -1162,10 +1172,10 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
                   "%s\nIf that is a mapped drive, make sure the share is "
                   "connected before running.", WJ.ARCHIVE_ROOT)
         return 1
-    if NEXUS_MODE == "assist" and os.name != "nt":
-        LOG.error("[TERMINATED] NEXUS_MODE='assist' needs Windows: the downloader "
-                  "registers an nxm:// handler via winreg and opens a browser. "
-                  "Use 'skip' on Linux.")
+    if NEXUS_MODE == "assist" and not getattr(WJ, "_HAVE_WINREG", False):
+        LOG.error("[TERMINATED] NEXUS_MODE='assist' needs the Windows registry: "
+                  "the downloader registers an nxm:// handler via winreg. "
+                  "Use 'skip' here.")
         return 1
     return 0
 
@@ -1799,6 +1809,8 @@ def cmd_check(state, tracked):
 
 
 def cmd_run(args, state, tracked):
+    if not args.dry_run:
+        purge_trash()
     seen, pending, resume = pending_updates(state, tracked)
     if seen is None:
         return 1
@@ -1993,6 +2005,12 @@ def cmd_run(args, state, tracked):
 
         if rec is None or not rec.get("game"):
             LOG.warning("[SKIPPED] Nothing safe to stage this run.")
+        elif wabbajack_busy():
+            # Unattended, so there is nobody to ask to close it. Moving
+            # archives under a running install would break the install.
+            LOG.error("[SKIPPED] Wabbajack is running; not moving archives "
+                      "under it. The sort will happen on the next run.")
+            failures.append("sorter skipped: Wabbajack is running")
         else:
             parts = find_part_files(WJ.resolve_game_dirs(rec["game"])[0])
             if parts and not SORTER_IGNORES_PART:

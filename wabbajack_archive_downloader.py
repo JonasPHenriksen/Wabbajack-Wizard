@@ -576,6 +576,87 @@ def known_list_dirs_from(manifest_dir):
         return set()
 
 
+# ----------------------------------------------------------------------
+# The light manifest cache, shared by every tool that plans against demand
+# ----------------------------------------------------------------------
+MANIFEST_CACHE_FILE = "wj_manifest_cache.json"
+
+
+def load_light_records(manifest_dir, cache_path, progress=None, files=None):
+    """Lightweight per-list records, cached on disk.
+
+    Planning needs each archive's name, size and source kind - and nothing
+    else. A full parse also carries every archive's Meta block, which is the
+    bulk of a manifest; only a download needs that, and the download re-parses
+    the one file it works on anyway. Caching the light form turns a crawl over
+    ~19 GB of zips on the share into a sub-second read, and this cache is what
+    the wizard, the updater AND the sorter plan from, so the manifests are
+    read once per change rather than once per tool per run.
+
+    An entry is keyed by its manifest's mtime and size, so editing, replacing
+    or re-downloading a manifest invalidates just that entry. There is no way
+    for the cache to describe a file that is no longer there: entries for
+    vanished manifests are dropped whenever the cache is rewritten.
+
+    Returns {filename: {"stamp", "game", "readable", "archives": [
+        {"name", "size", "kind"[, "raw"]} ]}}."""
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            cache = json.load(f)
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, json.JSONDecodeError):
+        cache = {}
+
+    names = files if files is not None else list_manifest_files(manifest_dir)
+    out, dirty, misses = {}, False, []
+    for i, fn in enumerate(names, 1):
+        full = os.path.join(manifest_dir, fn)
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        stamp = [int(st.st_mtime), st.st_size]
+        hit = cache.get(fn)
+        if isinstance(hit, dict) and hit.get("stamp") == stamp:
+            out[fn] = hit
+            continue
+        misses.append((i, fn, full, stamp))
+
+    for n, (i, fn, full, stamp) in enumerate(misses, 1):
+        if progress:
+            progress(n, len(misses), fn)
+        rec = parse_manifest(full)
+        entry = {
+            "stamp": stamp,
+            "game": rec["game"],
+            "readable": rec["readable"],
+            # The raw $type is kept only for the entries we could not
+            # classify, so the cache stays small while an unrecognised
+            # downloader can still be named in a report.
+            "archives": [
+                dict({"name": a["name"], "size": a["size"], "kind": k},
+                     **({"raw": state_type_raw(a["state"])}
+                        if k == "unknown" else {}))
+                for a, k in ((a, state_type(a["state"]))
+                             for a in rec["archives"])],
+        }
+        cache[fn] = entry
+        out[fn] = entry
+        dirty = True
+
+    if dirty:
+        cache = {k: v for k, v in cache.items() if k in out}
+        tmp = cache_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f)
+            os.replace(tmp, cache_path)
+        except OSError as e:
+            LOG.debug("Could not write the manifest cache: %s", e)
+    return out
+
+
 def index_existing(game_base, known_lists=None):
     """Index every archive already sitting in this game's pools.
 
@@ -645,13 +726,17 @@ def index_existing(game_base, known_lists=None):
             locations.append(full)
     except OSError:
         pass
-    # Two different reasons, worth telling apart: one is another installer's
-    # territory, the other is content you told us to keep out of.
+    # Three different reasons, worth telling apart: another installer's
+    # territory, content you told us to keep out of, and what stage 5 has
+    # reclaimed and is holding until its purge date.
     unmanaged_low = CFG.UNMANAGED_FOLDER.lower()
+    trash_low = CFG.TRASH_FOLDER.lower()
     for entry in sorted(skipped):
         if entry.lower() == unmanaged_low:
             LOG.info("  [SKIP] Ignoring the unmanaged store '%s' - archives "
                      "there are yours to manage, not ours.", entry)
+        elif entry.lower() == trash_low:
+            LOG.debug("  [SKIP] Ignoring the trash folder '%s'.", entry)
         else:
             LOG.info("  [SKIP] Ignoring foreign installer folder: %s", entry)
     if stray:
@@ -669,19 +754,28 @@ def index_existing(game_base, known_lists=None):
         if key in seen or not os.path.isdir(loc):
             continue
         seen.add(key)
+        # scandir, not listdir + getsize: on Windows the directory listing
+        # already carries each entry's type and size, so this is one pass
+        # over the folder rather than one round trip per file. On an SMB
+        # share holding 15,000 archives that is the difference between a
+        # scan that takes seconds and one that takes half a minute, and the
+        # scan runs in every tool, on every run.
         try:
-            for name in os.listdir(loc):
-                full = os.path.join(loc, name)
-                low = name.lower()
-                if low.endswith(".meta") or low.endswith(".part"):
-                    continue
-                if is_junk_name(name) or not os.path.isfile(full):
-                    continue
-                try:
-                    size = os.path.getsize(full)
-                except OSError:
-                    size = None
-                index.setdefault(canonical_name(low), []).append((full, size))
+            with os.scandir(loc) as it:
+                for e in it:
+                    name = e.name
+                    low = name.lower()
+                    if low.endswith(".meta") or low.endswith(".part"):
+                        continue
+                    if is_junk_name(name):
+                        continue
+                    try:
+                        if not e.is_file():
+                            continue
+                        size = e.stat().st_size
+                    except OSError:
+                        size = None
+                    index.setdefault(canonical_name(low), []).append((e.path, size))
         except OSError as e:
             LOG.warning("  [WARN] Cannot read %s: %s", loc, e)
     _EXISTING_CACHE[cache_key] = index
@@ -1652,7 +1746,7 @@ def download_nexus_from_file(items, nexus, dest_dir, results, nxm_path, limit=0)
 
 def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
     """Interactive free-account capture: open each page, catch the nxm click."""
-    if not _HAVE_WINREG and platform.system() == "Windows":
+    if not _HAVE_WINREG:
         LOG.error("[ERROR] winreg unavailable; cannot register the nxm handler.")
         return
     by_ids = {nexus_ids(a): a for a in items}
@@ -1660,13 +1754,9 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
     learned_domains = {}
 
     # Make sure we are the nxm handler (so clicks reach us).
-    if platform.system() == "Windows":
-        if not register_nxm(script_dir):
-            LOG.error("[ERROR] Could not register the nxm handler; aborting assist mode.")
-            return
-    else:
-        LOG.warning("[WARN] Not on Windows: nxm registration skipped. Clicks will only be "
-                    "captured if something else forwards them to this listener.")
+    if not register_nxm(script_dir):
+        LOG.error("[ERROR] Could not register the nxm handler; aborting assist mode.")
+        return
 
     listener = NxmListener(script_dir)
     LOG.info("Capture listener on %s:%d. For each file, your browser opens the Nexus "
@@ -1725,8 +1815,7 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
         # Wabbajack). Without this, every "download with manager" click on
         # Nexus keeps landing on this script until you notice and fix it by
         # hand - including the clicks Wabbajack itself is waiting for.
-        if platform.system() == "Windows":
-            unregister_nxm(script_dir)
+        unregister_nxm(script_dir)
 
 
 # ----------------------------------------------------------------------

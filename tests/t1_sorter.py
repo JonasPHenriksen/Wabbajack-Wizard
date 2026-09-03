@@ -195,4 +195,41 @@ check("exit 2", rc == 2)
 check("  naming the manifest", "Hollow" in out and "no archives" in out)
 check("  and moving nothing", s.files() == before)
 
+# ---------------------------------------------------------------- 1.12
+print("\n 1.12  identical extra copies settle in ONE cleanup pass")
+s = fresh()
+s.pool_file(G, "Shared", "a1.7z", 100)        # a second, identical a1.7z
+s.pool_file(G, "ListB", "shared.7z", 200)     # ListB holds its own copy of the shared build
+rc, out = s.run("wabbajack_archive_sorter_v2.py",
+                ["--game", G, "--cleanup-only", "--yes"], expect=0)
+check("the placed copy of a1.7z stays in ListA and the identical extra is parked in Master",
+      s.where("a1.7z") == [("ListA", 100), ("Master", 100)], str(s.where("a1.7z")))
+check("one copy of the shared build goes to Shared, the identical extra to Master",
+      s.where("shared.7z") == [("Master", 200), ("Shared", 200)],
+      str(s.where("shared.7z")))
+check("  which the log calls a redundant copy", "redundant copy" in out)
+
+print("\n      copies of OTHER sizes are not touched")
+s = fresh()
+s.pool_file(G, "ListB", "a1.7z", 111)         # a different build nobody wants
+rc, out = s.run("wabbajack_archive_sorter_v2.py",
+                ["--game", G, "--cleanup-only", "--yes"], expect=0)
+check("a different-size copy stays where it was",
+      s.where("a1.7z") == [("ListA", 100), ("ListB", 111)], str(s.where("a1.7z")))
+
+# ---------------------------------------------------------------- 1.13
+print("\n 1.13  manifests are read once, then served from the shared cache")
+s = fresh()
+rc, out1 = s.run("wabbajack_archive_sorter_v2.py",
+                 ["--game", G, "--cleanup-only", "--yes", "--dry-run"], expect=0)
+check("the first run parses every manifest", "2 manifest(s); 0 read from the cache" in out1,
+      str([l for l in out1.split(chr(10)) if "manifest(s);" in l]))
+check("  and writes the cache beside the scripts",
+      os.path.isfile(os.path.join(s.tools, "wj_manifest_cache.json")))
+rc, out2 = s.run("wabbajack_archive_sorter_v2.py",
+                 ["--game", G, "--cleanup-only", "--yes", "--dry-run"], expect=0)
+check("the second run opens no manifest at all", "2 manifest(s); 2 read from the cache" in out2,
+      str([l for l in out2.split(chr(10)) if "manifest(s);" in l]))
+check("  and plans the same moves", out1.count("[MOVE]") == out2.count("[MOVE]"))
+
 sys.exit(summary())

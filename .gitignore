@@ -7,7 +7,6 @@ manifest_backups/
 
 # Local Python environment: platform-specific, rebuilt by setup_env.bat.
 .venv-win/
-.venv-linux/
 lib-win/
 __pycache__/
 *.pyc

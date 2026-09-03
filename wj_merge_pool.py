@@ -146,8 +146,9 @@ def inventory(src, known):
         if low in POOLS:
             pools.append(name)
         elif low in CFG.excluded_dirs():
-            problems.append(f"{name}: another installer's folder or the "
-                            f"unmanaged store; decide about it by hand first")
+            problems.append(f"{name}: another installer's folder, the unmanaged "
+                            f"store, or the trash; decide about it by hand first "
+                            f"(the wizard's stage 5 can empty a trash folder)")
         elif low in known:
             lists.append(name)
         else:

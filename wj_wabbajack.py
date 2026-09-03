@@ -24,6 +24,8 @@ game install, not downloaded - so a list whose game is missing fails after you
 have committed to it. Checking first turns that into a sentence beforehand.
 """
 
+import csv
+import io
 import os
 import re
 import subprocess
@@ -32,6 +34,44 @@ try:
     import wj_config as CFG
 except ImportError:                     # pragma: no cover - see wj_config.py
     CFG = None
+
+# The processes that may be reading a downloads folder or an install: the
+# GUI, and the CLI this tooling itself drives. Moving archives under a running
+# install breaks it, so the wizard waits for these to be gone first.
+WABBAJACK_PROCESSES = ("wabbajack.exe", "wabbajack-cli.exe")
+
+
+def parse_tasklist(text):
+    """[(pid, image)] for Wabbajack processes in `tasklist /FO CSV` output.
+
+    Kept apart from the subprocess call so it can be checked without a
+    running Wabbajack. tasklist prints one CSV row per process: image name,
+    PID, session name, session number, memory."""
+    found = []
+    for row in csv.reader(io.StringIO(text or "")):
+        if len(row) < 2:
+            continue
+        image = row[0].strip().strip('"')
+        if image.lower() in WABBAJACK_PROCESSES:
+            try:
+                found.append((int(row[1].strip().strip('"')), image))
+            except ValueError:
+                continue
+    return found
+
+
+def running_processes():
+    """Wabbajack processes running right now, as (pid, image). Empty when
+    there are none, and also when tasklist itself is unavailable - which is
+    reported as 'not running' because a check that cannot run must not stop
+    every operation forever."""
+    try:
+        proc = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                              capture_output=True, text=True, errors="replace",
+                              timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_tasklist(proc.stdout)
 
 
 # Wabbajack's own game names, as `wabbajack-cli list-games` prints them. These

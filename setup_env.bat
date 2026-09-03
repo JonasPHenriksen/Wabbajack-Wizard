@@ -6,9 +6,8 @@ REM  Makes .venv-win\ in this folder and installs requirements.txt into it.
 REM  Run once. Run it again any time you upgrade Python, or if run.bat
 REM  starts complaining that the environment is broken.
 REM
-REM  The name has -win on it deliberately: a virtual environment is
-REM  platform-specific and cannot be shared with the Linux box. If you ever
-REM  run these on DietPi too, make a separate .venv-linux there.
+REM  The name has -win on it deliberately: a virtual environment is tied to
+REM  the interpreter that built it. Rebuild it here if Python changes.
 REM ---------------------------------------------------------------------
 
 pushd "%~dp0"

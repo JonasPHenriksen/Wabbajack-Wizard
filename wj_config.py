@@ -96,6 +96,17 @@ EXCLUDE_POOL_DIRS = {"nolvus"}
 # leave it alone completely: never indexed, never moved, never deleted.
 UNMANAGED_FOLDER = "Unmanaged"
 
+# Where stage 5c puts what it reclaims from Master, one folder per game root,
+# instead of deleting it outright. A file there is invisible to every tool -
+# never indexed, never counted as present, never moved - and is deleted for
+# good once it has sat there TRASH_KEEP_DAYS days, at the start of the next
+# run. Until then it can be moved back into Master by hand and the next
+# rebuild sorts it home. The record of what went in, and why, is the
+# deleted_<game>_<stamp>.csv stage 5c writes; the record of what was purged
+# is purged_trash_<stamp>.csv.
+TRASH_FOLDER = "Trash"
+TRASH_KEEP_DAYS = 30
+
 # Where the .wabbajack manifests live, relative to the tools folder, when
 # WJ_MANIFEST_DIR is not set.
 MANIFEST_SUBDIR = "modlists"
@@ -115,8 +126,8 @@ INSTALL_MODE = "cli"
 
 
 def looks_absolute(path):
-    """Absolute-path test that recognises Windows forms even on Linux, where
-    posixpath would call 'Z:\\x' relative."""
+    """Absolute-path test that recognises drive-letter and UNC forms whatever
+    flavour of path handling the interpreter was built with."""
     if not path:
         return False
     return (os.path.isabs(path)
@@ -134,8 +145,14 @@ def resolved_archive_root():
 
 def excluded_dirs():
     """Lowercased folder names under a game root that this tooling must not
-    touch: another installer's, plus the user's own unmanaged store."""
-    return set(EXCLUDE_POOL_DIRS) | {UNMANAGED_FOLDER.lower()}
+    index, move or count: another installer's, the user's own unmanaged
+    store, and the trash stage 5c fills."""
+    return set(EXCLUDE_POOL_DIRS) | {UNMANAGED_FOLDER.lower(), TRASH_FOLDER.lower()}
+
+
+def trash_dir(game):
+    """Where a game's reclaimed archives wait out TRASH_KEEP_DAYS."""
+    return os.path.join(resolved_archive_root(), game_folder(game), TRASH_FOLDER)
 
 
 def reserved_list_names():

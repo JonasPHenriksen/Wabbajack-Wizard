@@ -46,13 +46,20 @@ deletion rather than trusted from the table:
     except the permanent one (lists their authors have pulled), which it names;
   * a Master copy of a build that also exists in Shared, in a modlist's
     folder, or under a better name inside Master is a duplicate, reclaimable
-    under either rule; the other copy is re-checked on disk first and named
-    in the record.
+    under either rule; the other copy is re-read and hashed first, a pair
+    that differs is kept, and the copy that made it redundant is named in
+    the record;
+  * nothing is deleted outright: reclaimed files go to <game>/Trash, stamped
+    with their arrival, and are purged TRASH_KEEP_DAYS days later at the
+    start of a run - or at once, from 5d. Until then they can be moved back;
+  * nothing that moves archives starts while a Wabbajack process is running,
+    because it may be reading them.
 """
 
 import os
 import csv
 import sys
+import time
 import shutil
 from datetime import datetime, timezone
 
@@ -208,12 +215,14 @@ def choose(count, what="items", allow_all=True, single=False):
         return got
 
 
-def confirm_destructive(title, lines, total_bytes=None):
+def confirm_destructive(title, lines, total_bytes=None,
+                        total_label="Total to be freed", undo=None):
     """Show exactly what is about to be destroyed and ask.
 
     Returns 'yes', 'no', or 'change'. The 'change' answer exists so a wrong
     selection can be corrected here rather than by aborting the whole stage
-    and walking through it again."""
+    and walking through it again. `undo` replaces the default "cannot be
+    undone" line for a step that can, in fact, be undone for a while."""
     out()
     rule("!")
     out(f"  {title}")
@@ -222,9 +231,9 @@ def confirm_destructive(title, lines, total_bytes=None):
         out("   " + line)
     if total_bytes is not None:
         out()
-        out(f"   Total to be freed: {human(total_bytes)}")
+        out(f"   {total_label}: {human(total_bytes)}")
     out()
-    out("   This cannot be undone.")
+    out("   " + (undo or "This cannot be undone."))
     a = ask("   Proceed?  [y] yes  [n] no, skip  [c] change selection", ("y", "n", "c"))
     return {"y": "yes", "n": "no", "c": "change"}[a]
 
@@ -265,15 +274,26 @@ def tree_size(path):
     18.8 GB. Those numbers are what a decision gets made on, so they have to
     count the whole tree."""
     total = files = 0
-    for base, _dirs, names in os.walk(path):
-        for n in names:
-            if n.lower().endswith(".meta"):
-                continue
-            try:
-                total += os.path.getsize(os.path.join(base, n))
-                files += 1
-            except OSError:
-                pass
+    # A hand-rolled walk over scandir rather than os.walk plus getsize: the
+    # directory listing already carries each entry's size, so a 40 GB tree of
+    # ten thousand files costs one round trip per folder, not one per file.
+    stack = [path]
+    while stack:
+        folder = stack.pop()
+        try:
+            with os.scandir(folder) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                            continue
+                        if e.is_file() and not e.name.lower().endswith(".meta"):
+                            total += e.stat().st_size
+                            files += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
     return total, files
 
 
@@ -492,6 +512,10 @@ def gallery_protection(pools, progress=True):
     return want, note, pulled
 
 
+def _norm(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
 def _still_there(path, size):
     try:
         return os.path.isfile(path) and os.path.getsize(path) == size
@@ -499,15 +523,34 @@ def _still_there(path, size):
         return False
 
 
-def duplicate_of(index, master, path, name, size):
+# xxHash64 by path, for one clearing pass. Cleared at the start of each pass:
+# after a rebuild the same path can hold a different file.
+_HASH_CACHE = {}
+
+
+def file_hash(path):
+    key = _norm(path)
+    if key not in _HASH_CACHE:
+        _HASH_CACHE[key] = A.WJ.wabbajack_hash(path)
+    return _HASH_CACHE[key]
+
+
+def _same_content(a, b):
+    """Both files read in full and hashed. False without xxhash, so nothing
+    is ever called a duplicate on name and size alone when it is about to go."""
+    ha = file_hash(a)
+    return bool(ha) and ha == file_hash(b)
+
+
+def duplicate_of(index, master, path, name, size, verify=False):
     """Another copy of this exact build that makes the Master copy redundant,
     or None.
 
     `index` is the downloader's index of the game's pools - Master, Shared and
     every modlist folder, keyed by canonical name - so "the same build" means
     what it means everywhere else here: the same name, read through any '~N'
-    suffix, at the same size. A copy in a stray or excluded folder is not in
-    the index and so does not count; that errs towards keeping.
+    suffix, at the same size. A copy in a stray, excluded or trash folder is
+    not in the index and so does not count; that errs towards keeping.
 
     A Master copy is redundant when such a copy exists (a) anywhere outside
     Master, or (b) inside Master under a better name - the unsuffixed one,
@@ -515,31 +558,62 @@ def duplicate_of(index, master, path, name, size):
     than by which file is looked at first, so the outcome does not depend on
     the order the folder is walked in.
 
-    The other copy is re-checked on disk before it counts. The index is a
-    snapshot, and deleting on the strength of a copy that is no longer there
-    is the one mistake this cannot afford."""
+    The other copy is re-checked on disk before it counts. With verify=True
+    both files are also read in full and their xxHash64 compared, and a pair
+    that differs does not count: same name and size with different bytes is
+    exactly the case the size model cannot see, and the one place it must
+    not be trusted is the moment before a file goes. The estimate that draws
+    the table skips the hashing; the clearing pass does not."""
     if size is None:
         return None
     key = A.WJ.canonical_name(name).lower()
-    here = os.path.normcase(os.path.abspath(path))
-    mnorm = os.path.normcase(os.path.abspath(master))
+    here = _norm(path)
+    mnorm = _norm(master)
     outside, inside = [], [(path, here)]
     for p, s in index.get(key) or []:
         if s != size:
             continue
-        pn = os.path.normcase(os.path.abspath(p))
+        pn = _norm(p)
         if pn == here:
             continue
         (inside if os.path.dirname(pn) == mnorm else outside).append((p, pn))
     for p, _pn in outside:
-        if _still_there(p, size):
+        if _still_there(p, size) and (not verify or _same_content(path, p)):
             return p
     inside.sort(key=lambda t: (A.WJ.is_suffixed(os.path.basename(t[0])),
                                os.path.basename(t[0]).lower()))
     best, best_norm = inside[0]
-    if best_norm != here and _still_there(best, size):
+    if (best_norm != here and _still_there(best, size)
+            and (not verify or _same_content(path, best))):
         return best
     return None
+
+
+def keep_days():
+    return CFG.TRASH_KEEP_DAYS if CFG else 30
+
+
+def trash_folder_for(game):
+    base, _m, _s = A.WJ.resolve_game_dirs(game)
+    return os.path.join(base, CFG.TRASH_FOLDER if CFG else "Trash")
+
+
+def send_to_trash(path, trash):
+    """Move one file into `trash`, stamped with the moment it arrived.
+
+    A rename keeps the file's own mtime, which says when the archive was
+    built, not when it was reclaimed. The purge judges by arrival, so the
+    stamp is set here. Returns the destination, suffixed if the name was
+    taken."""
+    os.makedirs(trash, exist_ok=True)
+    dst = unique_path(os.path.join(trash, os.path.basename(path)))
+    shutil.move(path, dst)
+    now = time.time()
+    try:
+        os.utime(dst, (now, now))
+    except OSError:
+        pass
+    return dst
 
 
 def master_report(game, records, extra_want=None, label=None):
@@ -1179,6 +1253,10 @@ def stage_incomplete(records, assist):
             continue
         (rows if st["missing"] else complete).append((fn, st))
     rows.sort(key=lambda r: -r[1]["bytes"])
+    stale = prune_stale_csvs(records, dict(rows + complete))
+    if stale:
+        out(f"  Removed {len(stale)} stale to-do CSV(s) for lists that are "
+            f"complete or gone.")
 
     out()
     out(f"  INCOMPLETE ({len(rows)})")
@@ -1304,6 +1382,7 @@ def stage_prepare(records, state=None):
     if st["missing"]:
         out(f"  Note: {st['missing']} archive(s) are still missing, so this")
         out("  prepares what you have. Wabbajack will ask for the rest.")
+    wait_for_wabbajack("Staging")
     rc = A.run_script(A.SORTER_SCRIPT,
                       ["--game", st["game"], "--list", stem_of(fn), "--yes"],
                       "sorter")
@@ -1699,84 +1778,123 @@ def delete_modlist(state, entry, keep=None):
 
 
 def clear_master(game, keep_builds, on_delete=None):
-    """Delete Master files that no remaining modlist demands.
+    """Move Master files that no remaining modlist demands into the trash.
 
     keep_builds maps name -> the sizes a surviving list asks for, from
     wanted_builds(). It is recomputed rather than trusted from earlier in the
     run: between selecting and confirming, a cleanup pass has moved files
-    about, and deleting something a list still needs would mean re-downloading
+    about, and losing something a list still needs would mean re-downloading
     it one Nexus click at a time.
 
     Matching on name and size together means a junk build of a shared name is
     still reclaimable, while the build a list actually wants is not - and the
     name is read through a '~N' suffix, so a wanted build parked under one is
     protected too. A wanted build of which another copy exists elsewhere in
-    the pools is a duplicate (duplicate_of) and goes as well.
+    the pools is a duplicate (duplicate_of, with the hash check) and goes as
+    well; its sidecar follows it under the same final name.
 
-    `on_delete(name, size, reason)` is called after each removal, so the
-    caller can write the deletion record as it goes rather than after the
-    fact: a run interrupted half-way used to leave no record of what it had
-    removed. The reason names the other copy for a duplicate."""
+    Nothing is deleted here. Files go to <game>/Trash stamped with their
+    arrival, and purge_trash() removes them TRASH_KEEP_DAYS days later.
+
+    `on_delete(name, size, reason, destination)` is called after each move,
+    so the caller can write the record as it goes rather than after the fact:
+    a run interrupted half-way used to leave no record of what it had done.
+
+    Returns (moved, kept, bytes): `moved` is [(name, size)] of what went to
+    the trash, `kept` how many files were left because a list wants them."""
     base, master, _s = A.WJ.resolve_game_dirs(game)
+    trash = trash_folder_for(game)
     deleted, kept, freed = [], 0, 0
     try:
-        names = sorted(os.listdir(master))
+        entries = sorted(os.scandir(master), key=lambda e: e.name.lower())
     except OSError as e:
         out(f"    cannot read {master}: {e}")
         return deleted, kept, freed
+    # One listing carries every size; nothing below stats a file to learn it.
+    sizes = {}
+    for e in entries:
+        try:
+            if e.is_file():
+                sizes[e.name] = e.stat().st_size
+        except OSError:
+            continue
     # A fresh index: the rebuild and the parking step have both moved files
     # since the table was drawn, and a duplicate is only a duplicate if the
-    # other copy is where the index says it is.
+    # other copy is where the index says it is. The hash cache is reset for
+    # the same reason.
     A.WJ.invalidate_existing_cache()
+    _HASH_CACHE.clear()
     index = A.WJ.index_existing(base)
-    for name in names:
-        path = os.path.join(master, name)
-        if not os.path.isfile(path):
+    gone = set()
+
+    def move(name, reason):
+        src = os.path.join(master, name)
+        try:
+            dst = send_to_trash(src, trash)
+        except (OSError, shutil.Error) as ex:
+            out(f"    could not move {name} to the trash: {ex}")
+            return None
+        gone.add(name)
+        deleted.append((name, sizes[name]))
+        if on_delete:
+            on_delete(name, sizes[name], reason, dst)
+        return dst
+
+    for e in entries:
+        name = e.name
+        if name not in sizes or name in gone:
             continue
         low = name.lower()
         is_meta = low.endswith(".meta")
         owner = name[:-5] if is_meta else name
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            continue
         # A .meta rides along with its archive, so judge it by the archive.
-        judge_size = size
+        judge_size = sizes[name]
         if is_meta:
-            try:
-                judge_size = os.path.getsize(os.path.join(master, owner))
-            except OSError:
-                judge_size = None
+            judge_size = None if (owner in gone or owner not in sizes) else sizes[owner]
         if judge_size is None:
-            reason = "sidecar with no archive" if is_meta else "unreadable"
+            reason = "sidecar with no archive"
         elif is_wanted(keep_builds, owner, judge_size):
             other = duplicate_of(index, master, os.path.join(master, owner),
-                                 owner, judge_size)
+                                 owner, judge_size, verify=True)
             if other is None:
                 kept += 1
                 continue
-            reason = "duplicate of %s" % other
+            reason = "duplicate of %s (xxh64 %s)" % (other, file_hash(other) or "?")
         else:
             reason = "wanted by no list"
-        try:
-            os.remove(path)
-        except OSError as e:
-            out(f"    could not delete {name}: {e}")
+        dst = move(name, reason)
+        if dst is None:
             continue
-        deleted.append((name, size))
-        freed += size
-        if on_delete:
-            on_delete(name, size, reason)
+        freed += sizes[name]
+        # Its sidecar goes with it, under whatever name it ended up with.
+        meta = name + ".meta"
+        if not is_meta and meta in sizes and meta not in gone:
+            try:
+                mdst = dst + ".meta"
+                if os.path.isfile(mdst):
+                    os.remove(mdst)
+                shutil.move(os.path.join(master, meta), mdst)
+                now = time.time()
+                os.utime(mdst, (now, now))
+            except (OSError, shutil.Error) as ex:
+                out(f"    could not move {meta} to the trash: {ex}")
+                continue
+            gone.add(meta)
+            deleted.append((meta, sizes[meta]))
+            freed += sizes[meta]
+            if on_delete:
+                on_delete(meta, sizes[meta], "sidecar of %s" % name, mdst)
     return deleted, kept, freed
 
 
 class DeletionRecord:
-    """The CSV of what stage 5c removed, written one row per deletion.
+    """The CSV of what stage 5c reclaimed, written one row per file.
 
-    Opened before the first removal and flushed after every row, so the file
-    on disk is exact at every moment: what it lists is what is gone, however
-    the run ended. A record written after the loop was no record at all if the
-    loop did not finish."""
+    Opened before the first move and flushed after every row, so the file on
+    disk is exact at every moment: what it lists is what has gone to the
+    trash, however the run ended. A record written after the loop was no
+    record at all if the loop did not finish. The trashed_to column is what a
+    restore by hand needs."""
 
     def __init__(self, game, rule, master):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1787,18 +1905,19 @@ class DeletionRecord:
         try:
             self._fh = open(self.path, "w", newline="", encoding="utf-8")
             self._w = csv.writer(self._fh)
-            self._w.writerow(["archive", "size_bytes", "reason", "master", "rule"])
+            self._w.writerow(["archive", "size_bytes", "reason", "trashed_to",
+                              "master", "rule"])
             self._fh.flush()
         except OSError as e:
             out(f"    could not open the deletion record: {e}")
             self._fh = None
 
-    def note(self, name, size, reason=""):
+    def note(self, name, size, reason="", to=""):
         self.rows += 1
         if self._w is None:
             return
         try:
-            self._w.writerow([name, size, reason, self.master, self.rule])
+            self._w.writerow([name, size, reason, to, self.master, self.rule])
             self._fh.flush()
         except OSError as e:
             out(f"    could not write to the deletion record: {e}")
@@ -1818,6 +1937,124 @@ class DeletionRecord:
                 pass
             return None
         return self.path if self._fh is not None else None
+
+
+def wait_for_wabbajack(what):
+    """Block while a Wabbajack process is running; it may be reading the pools.
+
+    Asks rather than proceeds: moving archives under a running install breaks
+    that install, and nothing here can tell which folder it is reading. 'q'
+    at the prompt stops the wizard, as everywhere else."""
+    while True:
+        procs = WB.running_processes()
+        if not procs:
+            return True
+        out()
+        out(f"  Wabbajack is running "
+            f"({', '.join(f'{n} pid {p}' for p, n in procs)}).")
+        out(f"  {what} moves archives it may be reading. Close Wabbajack first.")
+        ask("   [r] I have closed it, check again   [q] quit", ("r",))
+
+
+def trash_report():
+    """(game_folder, files, bytes, oldest_arrival) per non-empty trash."""
+    name = CFG.TRASH_FOLDER if CFG else "Trash"
+    rows = []
+    try:
+        games = sorted(os.listdir(A.WJ.ARCHIVE_ROOT))
+    except OSError:
+        return rows
+    for g in games:
+        t = os.path.join(A.WJ.ARCHIVE_ROOT, g, name)
+        if not os.path.isdir(t):
+            continue
+        total = files = 0
+        oldest = None
+        try:
+            with os.scandir(t) as it:
+                for e in it:
+                    try:
+                        if not e.is_file():
+                            continue
+                        st = e.stat()
+                    except OSError:
+                        continue
+                    total += st.st_size
+                    files += 1
+                    oldest = st.st_mtime if oldest is None else min(oldest, st.st_mtime)
+        except OSError:
+            continue
+        if files:
+            rows.append((g, files, total, oldest))
+    return rows
+
+
+def trash_step():
+    """5d: what the trash holds, and the offer to empty it now."""
+    rows = trash_report()
+    if not rows:
+        return False
+    days = keep_days()
+    out()
+    rule()
+    out("  5d. Trash")
+    out(f"      What stage 5c reclaims waits here {days} days, then goes for good at")
+    out("      the start of a run. Until then a file can be moved back into Master")
+    out("      by hand, and the next rebuild sorts it home.")
+    out()
+    gw = fit([g for g, _f, _b, _o in rows], 4) + 2
+    out(f"    {'game folder':<{gw}}{'files':>7}{'size':>11}   purged from")
+    for g, files, byts, oldest in rows:
+        due = datetime.fromtimestamp(oldest + days * 86400).strftime("%Y-%m-%d")
+        out(f"    {g:<{gw}}{files:>7}{human(byts):>11}   {due}")
+    total = sum(b for _g, _f, b, _o in rows)
+    a = ask(f"   [e] empty the trash now ({human(total)})   [s] leave it", ("e", "s"))
+    if a == "s":
+        return False
+    verdict = confirm_destructive(
+        "About to empty the trash",
+        [f"{g}: {f} file(s), {human(b)}" for g, f, b, _o in rows],
+        total_bytes=total, undo="This is the deletion itself. There is no "
+                                "further undo.")
+    if verdict != "yes":
+        out("  Left alone.")
+        return False
+    wait_for_wabbajack("Emptying the trash")
+    purged, rec = A.purge_trash(days=0)
+    out(f"  Purged {len(purged)} file(s), {human(sum(r[2] for r in purged))} freed."
+        + (f" Record: {os.path.basename(rec)}" if rec else ""))
+    return True
+
+
+def prune_stale_csvs(records, statuses):
+    """Remove per-list to-do CSVs for lists that are gone or complete.
+
+    nexus_todo_, nexus_pages_ and download_failures_ files are written per
+    run for lists with work outstanding; nothing removed them once the work
+    was done, and ten had piled up. A list still missing archives keeps its
+    files. Returns the names removed."""
+    stems = {stem_of(fn) for fn in records}
+    busy = {stem_of(fn) for fn, st in statuses.items() if st and st.get("missing")}
+    removed = []
+    try:
+        names = os.listdir(A.HERE)
+    except OSError:
+        return removed
+    for n in names:
+        low = n.lower()
+        if not low.endswith(".csv"):
+            continue
+        for prefix in ("nexus_todo_", "nexus_pages_", "download_failures_"):
+            if low.startswith(prefix):
+                stem = n[len(prefix):-4]
+                if stem not in stems or stem not in busy:
+                    try:
+                        os.remove(os.path.join(A.HERE, n))
+                        removed.append(n)
+                    except OSError:
+                        pass
+                break
+    return removed
 
 
 def stage_space(state, records):
@@ -1897,6 +2134,7 @@ def stage_space(state, records):
             out("  Skipped. No modlist deleted.")
             break
 
+        wait_for_wabbajack("Deleting a modlist")
         # What the SURVIVING lists want, so that a build one of them needs
         # keeps its name when it lands in Master beside a different build.
         survivors = {fn: e for fn, e in records.items()
@@ -1979,7 +2217,14 @@ def stage_space(state, records):
                     out(f"    {name} -> {dst}")
             A.WJ.invalidate_existing_cache()
 
-    # ---- 5c: clear Master --------------------------------------------
+    cleared = clear_master_step(records, masters, failed_rebuilds)
+    trash_step()
+    return deleted_any or cleared
+
+
+def clear_master_step(records, masters, failed_rebuilds):
+    """5c: move what nothing wants out of Master, into the trash."""
+    deleted_any = False
     out()
     rule()
     out("  5c. Clear Master for which games?")
@@ -1988,6 +2233,8 @@ def stage_space(state, records):
     out("      counts as protected is worth choosing rather than assuming.")
     out("      A Master copy of a build that is also held in Shared or in a")
     out("      modlist's folder is a duplicate, and goes under either rule.")
+    out(f"      Nothing is deleted here: files move to that game's Trash and are")
+    out(f"      purged {keep_days()} days later, or at once from 5d.")
 
     # Refusals first. What gets deleted is decided by what the surviving
     # manifests want, so a manifest whose demand cannot be trusted disarms
@@ -2107,10 +2354,11 @@ def stage_space(state, records):
         dups = sum(m["dup_files"] for m in chosen)
         if dups:
             lines.append("")
-            lines.append(f"{dups} of those are duplicates: the same build is "
-                         f"also held in Shared or a modlist's")
+            lines.append(f"Up to {dups} of those are duplicates: the same build "
+                         f"is also held in Shared or a modlist's")
             lines.append(f"folder ({human(sum(m['dup_bytes'] for m in chosen))}). "
-                         f"The other copy is checked again before each one goes.")
+                         f"Each is hashed against its other copy first; a pair")
+            lines.append("that differs is kept.")
         lines.append("")
         if mode == "a":
             lines.append("Protected by: your modlists AND every published list.")
@@ -2129,16 +2377,22 @@ def stage_space(state, records):
         else:
             lines.append("Protected by: your modlists only. Archives a "
                          "published list wants WILL be deleted.")
-        lines.append("Every deleted file is written to a CSV record as it goes.")
+        lines.append("Every file goes to that game's Trash, and into a CSV "
+                     "record, as it happens.")
         verdict = confirm_destructive(
             f"About to clear Master for {len(chosen)} game(s)", lines,
-            total_bytes=sum(free_bytes(m) for m in chosen))
+            total_bytes=sum(free_bytes(m) for m in chosen),
+            total_label="Total moving to Trash",
+            undo=(f"Trash is purged {keep_days()} days after a file arrives, at "
+                  f"the start of a run, or at once from 5d. Until then a file "
+                  f"can be moved back into Master by hand."))
         if verdict == "change":
             continue
         if verdict == "no":
             out("  Skipped. Master untouched.")
             return deleted_any
 
+        wait_for_wabbajack("Clearing Master")
         grand = 0
         for m in chosen:
             game = m["game"]
@@ -2155,12 +2409,13 @@ def stage_space(state, records):
                                                 on_delete=record.note)
             rec = record.close()
             grand += freed
-            out(f"    deleted {len(deleted)} file(s), freed {human(freed)}; "
+            out(f"    {len(deleted)} file(s) moved to Trash ({human(freed)}); "
                 f"kept {kept} still wanted")
             if rec:
                 out(f"    record: {os.path.basename(rec)}")
         out()
-        out(f"  Freed {human(grand)} in total.")
+        out(f"  {human(grand)} moved to Trash in total. It is purged after "
+            f"{keep_days()} days, or now in 5d.")
         return True
 
 
@@ -2195,6 +2450,14 @@ def run(verbose=False, nexus_mode=None, allow_size_only=False, no_lock=False):
         out(f"  Nexus:     {A.NEXUS_MODE}"
             + ("  (one browser click per file)" if assist else "  (left to Wabbajack)"))
         rule("=")
+
+        # What stage 5c reclaimed on earlier runs and has now waited its
+        # TRASH_KEEP_DAYS: gone for good, recorded.
+        purged, rec = A.purge_trash()
+        if purged:
+            out(f"  Trash: {len(purged)} file(s) older than {keep_days()} days "
+                f"purged, {human(sum(r[2] for r in purged))} freed"
+                + (f"  ({os.path.basename(rec)})" if rec else ""))
 
         stage_browse(state, tracked)
         # Re-read the tracking map: browsing may have adopted a new list, and

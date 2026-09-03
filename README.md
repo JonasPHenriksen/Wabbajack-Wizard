@@ -4,8 +4,7 @@ Tracks published Wabbajack modlists, fetches their manifests and archives, and
 organises the archives into per-game pools so Wabbajack can install any one of
 them without re-downloading what is already on disk.
 
-Runs on Windows against the mapped share, or headless on Linux against a local
-path.
+Runs on Windows against the mapped share.
 
 ## The layout everything serves
 
@@ -165,20 +164,31 @@ of lists whose authors have pulled them publish an empty report permanently, or
 drop out of the validator's summary altogether; those cannot block the feature,
 so they are named in the confirmation instead.
 
-Deletion is otherwise as it has always been: name **and** size must match, every
-file is re-checked at the moment of deletion rather than trusted from the table,
-and every deletion is recorded in `deleted_<game>_<timestamp>.csv`, one row per
-file as it goes, with the reason, the folder and the rule used.
+Name **and** size must match, every file is re-checked at the moment it goes
+rather than trusted from the table, and every file is recorded in
+`deleted_<game>_<timestamp>.csv`, one row as it goes, with the reason, where it
+went, the folder and the rule used.
+
+**Nothing is deleted outright.** What stage 5c reclaims moves into that game's
+`Trash` folder, stamped with the moment it arrived, and is purged
+`TRASH_KEEP_DAYS` days later (30) at the start of the next run, with a
+`purged_trash_<timestamp>.csv` record. Until then a file can be moved back into
+Master by hand and the next rebuild sorts it home. Stage 5d shows what the
+trash holds and when each game's oldest file falls due, and offers to empty it
+at once. The trash is invisible to every tool: never indexed, never counted as
+present, never moved, and a modlist may not be called `Trash`.
 
 One rule reclaims *more*: a Master copy of a build that also exists in Shared,
 in a modlist's folder, or under a better name inside Master itself is a
 **duplicate**, and goes under either protection rule. The sorter creates these
 on purpose, parking a redundant copy rather than overwriting, so a pool that
-has been through a few rebuilds carries a fair number of them. The other copy
-is checked again on disk immediately before each deletion, a copy in a stray or
-excluded folder never counts, and the record names which copy made it
-redundant. Six further rules, each added after a sandbox run showed the
-deletion path removing something it should not have:
+has been through a few rebuilds carries a fair number of them. Before a
+duplicate goes, both files are read in full and their xxHash64 compared; a pair
+with the same name and size but different bytes is kept, since that is exactly
+the case a size-based identity cannot see. A copy in a stray, excluded or trash
+folder never counts, and the record names which copy made it redundant. Six
+further rules, each added after a sandbox run showed the deletion path
+removing something it should not have:
 
 - **A name is read through its `~N` suffix.** When two builds share a name and
   both must survive in one folder, the second is stored as `Name~1.ext`. No
@@ -251,6 +261,31 @@ That rebuild re-sorts the whole game folder, which un-stages whatever stage 4
 arranged there: the shared archives go back to Shared. The confirmation says so
 by name, and stage 4 has to be run again before installing that list.
 
+Nothing that moves archives starts while a Wabbajack process is running, in
+case it is reading them: stages 4 and 5 check with `tasklist` and wait for you
+to close it. A scheduled run skips its sort instead and says so.
+
+### What a run reads, and what it does not
+
+The share is where the time goes, so a run rereads only what can have changed.
+The manifests are read once per change: `wj_manifest_cache.json` holds each
+list's archive names, sizes and source kinds, keyed by the manifest's mtime and
+size, and the wizard, the updater *and* the sorter all plan from it, so a sort
+no longer opens 22 multi-gigabyte zips to learn what it already knew. The
+gallery's index files are cached for six hours and its reports for fourteen
+days. Every pool scan reads sizes from the directory listing itself rather than
+statting each file, which over SMB is one round trip per folder instead of one
+per archive.
+
+The pool scan itself is rebuilt on every run and is not cached between runs,
+on purpose. The share can change outside this tooling — a hand-copied file, a
+Wabbajack install writing into a downloads folder — and a stale picture of what
+is on disk is exactly what would make a stage say "present" about something
+that is not there, or move a file it should have left alone. That scan is now
+cheap enough that its freshness costs seconds, not minutes. The two reads that
+cannot be avoided are a downloaded archive being hashed after it lands, and a
+duplicate being hashed before it goes.
+
 ## Scripted use
 
 Any action flag skips the wizard:
@@ -276,7 +311,7 @@ At the top of `wj_autoupdate.py`:
 
 | setting | meaning |
 | --- | --- |
-| `NEXUS_MODE` | `assist` opens each Nexus page for a click; `skip` leaves them to Wabbajack (the only option off Windows) |
+| `NEXUS_MODE` | `assist` opens each Nexus page for a click; `skip` leaves them to Wabbajack |
 | `STAGE_LIST` | which list a non-interactive run stages; `--only` overrides it |
 | `EXCLUDE` | lists to ignore, by feed key or filename stem |
 | `REQUIRE_HASH` | refuse to run rather than silently degrade to size-only checks |
@@ -285,9 +320,10 @@ At the top of `wj_autoupdate.py`:
 
 The archive layout lives in **`wj_config.py`** — `ARCHIVE_ROOT`,
 `GAME_FOLDERS`, `GAME_DISPLAY`, `POOL_FOLDERS`, `EXCLUDE_POOL_DIRS`,
-`UNMANAGED_FOLDER` — along with `WABBAJACK_DIR` (where Wabbajack is; `None`
-auto-detects) and `INSTALL_MODE` (`cli`, `gui`, or `off`; see below). Both the
-downloader and the sorter import it, so there is one place to edit. A start-up
+`UNMANAGED_FOLDER`, `TRASH_FOLDER` and `TRASH_KEEP_DAYS` — along with
+`WABBAJACK_DIR` (where Wabbajack is; `None` auto-detects) and `INSTALL_MODE`
+(`cli`, `gui`, or `off`; see below). Both the downloader and the sorter import
+it, so there is one place to edit. A start-up
 check still compares the two, because the downloader decides where an archive is
 written and the sorter decides where it is moved to: a local override re-added
 to one of them would send every run across two directory trees while both
@@ -424,7 +460,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-618 checks across fourteen suites. None of them touch the live archive pools:
+654 checks across fourteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -433,7 +469,7 @@ exactly the failure they want to check.
 
 | suite | covers |
 | --- | --- |
-| `t1_sorter` | aborting on an unreadable manifest, reserved names, demand-based pooling, staging, size-checked collisions, dry-run purity, bad arguments |
+| `t1_sorter` | aborting on an unreadable manifest, reserved names, demand-based pooling, staging, size-checked collisions, dry-run purity, bad arguments, identical extras settling in one pass, the shared manifest cache |
 | `t2_download` | hard vs transient HTTP failures, retry and resume, truncated transfers, verification, `.meta` sidecars, URL encoding |
 | `t3_cdn` | broken definitions in four shapes, bad part bytes and lengths, whole-file hash mismatch, resume from a partial download, stale and impossible sidecars |
 | `t4_updater` | filename-to-feed-key matching, negative-cache expiry, damaged state files, odd feed shapes, the start-up guards |
@@ -445,7 +481,7 @@ exactly the failure they want to check.
 | `t10_lookup` | every location an archive may sit in and still count as already downloaded |
 | `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, and Wabbajack's own "Unavailable" rule |
 | `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, and the refusal to delete on an incomplete picture |
-| `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row deletion record, the un-staging warning, duplicates |
+| `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row record, the un-staging warning, hash-proven duplicates, the trash and its purge, stale CSVs, waiting for Wabbajack |
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
 
 Seven real bugs were found this way and are covered by regression checks: a

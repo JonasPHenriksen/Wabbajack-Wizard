@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
@@ -34,6 +35,13 @@ import wj_wizard as W
 
 BOX = os.path.join(BOXROOT, "sb13")
 GAME = "Fallout4"
+
+# The stages that move files first ask whether Wabbajack is running, via
+# tasklist. Stubbed to "no" so the suite does not depend on what is open on
+# the machine running it; 13.16 exercises the real check's parser and the
+# waiting itself.
+REAL_RUNNING = W.WB.running_processes
+W.WB.running_processes = lambda: []
 
 print("=" * 70)
 print("  T13  STAGE 5: DELETING, AND WHAT MUST SURVIVE IT")
@@ -304,7 +312,7 @@ unreadable, empty = W.demand_problems(records)
 check("an archive-less manifest is reported against its folder",
       empty == {"fallout4": ["Empty.wabbajack"]}, str(empty))
 check("  and nothing is unreadable", unreadable == [])
-(res, text) = drive(W.stage_space, ["s", "y", "a", "y"], {"lists": {}, "map": {}},
+(res, text) = drive(W.stage_space, ["s", "y", "a", "y", "s"], {"lists": {}, "map": {}},
                     records)
 check("Fallout 4's Master is not offered", "Fallout 4: not offered" in text
       and "lists no archives" in text, text[-700:])
@@ -318,7 +326,7 @@ records = A.load_plan_records()
 unreadable, _e = W.demand_problems(records)
 check("it is reported as unreadable", unreadable == ["Broken.wabbajack"], str(unreadable))
 box.pool_file("Morrowind", "Master", "mjunk2.7z", 777)
-(res, text) = drive(W.stage_space, ["s", "y", "a", "y"], {"lists": {}, "map": {}},
+(res, text) = drive(W.stage_space, ["s", "y", "a", "y", "s"], {"lists": {}, "map": {}},
                     records)
 check("5c refuses outright", "Not clearing any Master" in text, text[-500:])
 check("  and Morrowind's junk is still there",
@@ -487,8 +495,8 @@ class Interrupted(Exception):
     pass
 
 
-def flaky(name, size, reason=""):
-    record.note(name, size, reason)
+def flaky(name, size, reason="", to=""):
+    record.note(name, size, reason, to)
     if record.rows == 2:
         raise Interrupted()        # the run dies after the second deletion
 
@@ -500,14 +508,18 @@ except Interrupted:
     check("the interruption reached us", True)
 rows = list(csv.reader(io.open(record.path, encoding="utf-8")))
 check("the record already holds the two deletions",
-      len(rows) == 3 and rows[0] == ["archive", "size_bytes", "reason", "master", "rule"],
+      len(rows) == 3 and rows[0] == ["archive", "size_bytes", "reason",
+                                     "trashed_to", "master", "rule"],
       str(rows))
 check("  naming the files that are actually gone",
       [r[0] for r in rows[1:]] == ["a.7z", "b.7z"]
       and not os.path.exists(os.path.join(master, "a.7z"))
       and os.path.exists(os.path.join(master, "c.7z")), str(rows))
 check("  with the rule and the folder on every row",
-      all(r[3] == master and r[4] == "your modlists only" for r in rows[1:]))
+      all(r[4] == master and r[5] == "your modlists only" for r in rows[1:]))
+check("  and where each one went",
+      all(os.path.isfile(r[3]) and os.sep + "Trash" + os.sep in r[3]
+          for r in rows[1:]), str([r[3] for r in rows[1:]]))
 check("close() keeps a record that has rows", record.close() == record.path)
 empty_rec = W.DeletionRecord(GAME, "any known modlist", master)
 check("  and drops one that has none",
@@ -620,17 +632,164 @@ check("the copies elsewhere are untouched",
       os.path.isfile(os.path.join(box.archives, GAME, "L", "held.7z"))
       and os.path.isfile(os.path.join(box.archives, GAME, "Shared", "shared.7z")))
 rows = {r[0]: r for r in list(csv.reader(io.open(rec_path, encoding="utf-8")))[1:]}
-check("the record says which copy made each duplicate redundant",
+check("the record says which copy made each duplicate redundant, and its hash",
       rows["held.7z"][2].startswith("duplicate of ")
-      and rows["held.7z"][2].endswith(os.path.join("L", "held.7z")),
+      and os.path.join("L", "held.7z") in rows["held.7z"][2]
+      and "xxh64" in rows["held.7z"][2],
       str(rows.get("held.7z")))
 check("  including a duplicate inside Master",
-      rows["twice~1.7z"][2].endswith(os.path.join("Master", "twice.7z")),
+      os.path.join("Master", "twice.7z") in rows["twice~1.7z"][2],
       str(rows.get("twice~1.7z")))
 check("  and gives the plain reason for the rest",
       rows["wrongsize.7z"][2] == "wanted by no list"
-      and rows["held.7z.meta"][2] == "sidecar with no archive",
+      and rows["held.7z.meta"][2] == "sidecar of held.7z",
       str((rows.get("wrongsize.7z"), rows.get("held.7z.meta"))))
+trash = os.path.join(box.archives, GAME, "Trash")
+check("everything reclaimed is in the trash, sidecars beside their archives",
+      sorted(os.listdir(trash)) == ["held.7z", "held.7z.meta", "shared.7z",
+                                    "twice~1.7z", "twice~1.7z.meta", "wrongsize.7z"],
+      str(sorted(os.listdir(trash))))
 
+# ---------------------------------------------------------------- 13.13
+print("\n 13.13  a duplicate is proven by hash before it goes")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("L", GAME, [("same.7z", 8, "nexus"), ("real.7z", 8, "nexus")])
+box.pool_file(GAME, "L", "real.7z", 8)
+box.pool_file(GAME, "Master", "real.7z", 8)               # identical bytes
+box.pool_file(GAME, "Master", "same.7z", 8)               # same size as L's...
+io.open(os.path.join(box.archives, GAME, "L", "same.7z"), "wb").write(b"y" * 8)
+wire(box)
+records = A.load_plan_records()
+r = W.master_report(GAME, records)
+check("the estimate counts both as duplicates (it does not hash)",
+      r["dup_files"] == 2, str(r))
+(res, _o) = quiet(W.clear_master, GAME, W.wanted_builds(records, GAME))
+deleted, kept, freed = res
+check("only the hash-identical copy goes",
+      [n for n, _s in deleted] == ["real.7z"], str(deleted))
+check("  the same-size pair with different bytes is kept",
+      kept == 1 and os.path.isfile(os.path.join(box.archives, GAME, "Master", "same.7z")))
+
+# ---------------------------------------------------------------- 13.14
+print("\n 13.14  reclaimed files wait in the trash, then go for good")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("L", GAME, [("keep.7z", 1, "nexus")])
+box.pool_file(GAME, "Master", "keep.7z", 1)
+box.pool_file(GAME, "Master", "junk.7z", 50)
+box.pool_file(GAME, "Master", "junk.7z.meta", 5)
+os.utime(os.path.join(box.archives, GAME, "Master", "junk.7z"),
+         (1_000_000, 1_000_000))                          # an ancient archive
+wire(box)
+records = A.load_plan_records()
+(res, _o) = quiet(W.clear_master, GAME, W.wanted_builds(records, GAME))
+trash = os.path.join(box.archives, GAME, "Trash")
+check("the unwanted file is in the trash, not deleted",
+      os.path.isfile(os.path.join(trash, "junk.7z")))
+check("  with its sidecar beside it", os.path.isfile(os.path.join(trash, "junk.7z.meta")))
+check("  stamped with its arrival, not its own old mtime",
+      time.time() - os.path.getmtime(os.path.join(trash, "junk.7z")) < 300)
+check("  while the wanted file stays in Master",
+      os.path.isfile(os.path.join(box.archives, GAME, "Master", "keep.7z")))
+A.WJ.invalidate_existing_cache()
+idx = A.WJ.index_existing(os.path.join(box.archives, GAME))
+check("the trash is invisible to the index", "junk.7z" not in idx, str(sorted(idx)))
+check("  and is not a stray", W.stray_folders(GAME) == [], str(W.stray_folders(GAME)))
+check("  and a modlist may not be called Trash", "trash" in A.WJ.reserved_list_names())
+purged, rec = A.purge_trash()
+check("a fresh arrival survives the 30-day purge",
+      purged == [] and rec is None and os.path.isfile(os.path.join(trash, "junk.7z")))
+stale = time.time() - 31 * 86400
+os.utime(os.path.join(trash, "junk.7z"), (stale, stale))
+purged, rec = A.purge_trash()
+check("a file 31 days in the trash is purged",
+      [p[1] for p in purged] == ["junk.7z"]
+      and not os.path.exists(os.path.join(trash, "junk.7z")), str(purged))
+check("  its sidecar, younger, is not yet",
+      os.path.isfile(os.path.join(trash, "junk.7z.meta")))
+check("  and the purge is recorded",
+      bool(rec) and os.path.isfile(rec)
+      and "junk.7z" in io.open(rec, encoding="utf-8").read(), str(rec))
+purged, rec = A.purge_trash(days=0)
+check("days=0 empties the trash",
+      [p[1] for p in purged] == ["junk.7z.meta"] and os.listdir(trash) == [],
+      str(purged))
+
+# ---------------------------------------------------------------- 13.15
+print("\n 13.15  stale to-do CSVs are removed")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("Done", GAME, [("d.7z", 1, "nexus")])
+box.manifest("Busy", GAME, [("b.7z", 2, "nexus")])
+box.pool_file(GAME, "Done", "d.7z", 1)                     # complete
+wire(box)
+for n in ("nexus_todo_Done.csv", "nexus_pages_Done.csv",
+          "download_failures_Done.csv", "nexus_todo_Busy.csv",
+          "nexus_todo_Gone.csv", "deleted_Fallout4_20260101_000000.csv"):
+    io.open(os.path.join(box.tools, n), "w").write("x")
+records = A.load_plan_records()
+(res, text) = drive(W.stage_incomplete, ["s"], records, False)
+left = sorted(n for n in os.listdir(box.tools) if n.endswith(".csv"))
+check("CSVs for a complete list and a vanished list are gone; a record stays",
+      left == ["deleted_Fallout4_20260101_000000.csv", "nexus_todo_Busy.csv"],
+      str(left))
+check("  and the stage said so", "stale to-do CSV" in text, text[-300:])
+
+# ---------------------------------------------------------------- 13.16
+print("\n 13.16  nothing moves while Wabbajack is running")
+sample = ('"Wabbajack.exe","1234","Console","1","500,000 K"\n'
+          '"notepad.exe","9","Console","1","1 K"\n'
+          '"wabbajack-cli.exe","77","Console","1","2 K"\n')
+check("tasklist output is parsed for both Wabbajack processes",
+      W.WB.parse_tasklist(sample) == [(1234, "Wabbajack.exe"), (77, "wabbajack-cli.exe")],
+      str(W.WB.parse_tasklist(sample)))
+check("  and nothing else", W.WB.parse_tasklist('"notepad.exe","9","Console","1","1 K"') == [])
+calls = {"n": 0}
+
+
+def fake_running():
+    calls["n"] += 1
+    return [(1234, "Wabbajack.exe")] if calls["n"] <= 2 else []
+
+
+W.WB.running_processes = fake_running
+try:
+    (res, text) = drive(W.wait_for_wabbajack, ["r", "r"], "Staging")
+finally:
+    W.WB.running_processes = lambda: []
+check("it waits, re-checks on request, and proceeds once Wabbajack is gone",
+      res is True and calls["n"] == 3, str((res, calls)))
+check("  saying what it is waiting for",
+      "Wabbajack is running" in text and "Staging" in text, text[-300:])
+W.WB.running_processes = lambda: [(1, "Wabbajack.exe")]
+try:
+    (res, text) = drive(W.wait_for_wabbajack, ["q"], "Staging")
+finally:
+    W.WB.running_processes = lambda: []
+check("  and 'q' stops the wizard instead", res is None and text == "(quit)")
+check("the real check answers without error on this machine",
+      isinstance(REAL_RUNNING(), list))
+
+# ---------------------------------------------------------------- 13.17
+print("\n 13.17  stage 5d empties the trash on request")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("L", GAME, [("k.7z", 1, "nexus")])
+box.pool_file(GAME, "Master", "k.7z", 1)
+box.pool_file(GAME, "Trash", "old.7z", 40)
+wire(box)
+records = A.load_plan_records()
+(res, text) = drive(W.stage_space, ["s", "e", "y"], {"lists": {}, "map": {}}, records)
+check("5d shows the trash", "5d. Trash" in text, text[-500:])
+check("  and empties it on request",
+      os.listdir(os.path.join(box.archives, GAME, "Trash")) == []
+      and "Purged 1 file(s)" in text, text[-300:])
+box.pool_file(GAME, "Trash", "again.7z", 4)
+(res, text) = drive(W.stage_space, ["s", "s"], {"lists": {}, "map": {}}, records)
+check("  or leaves it alone",
+      os.path.isfile(os.path.join(box.archives, GAME, "Trash", "again.7z")), text[-300:])
+
+W.WB.running_processes = REAL_RUNNING
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())
