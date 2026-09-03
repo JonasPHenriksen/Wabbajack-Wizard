@@ -147,12 +147,12 @@ wanted?":
 
 | rule | protected by | on this share |
 | --- | --- | --- |
-| `[y]` your modlists only | the 22 manifests held here | frees ~686 GB |
-| `[a]` any known modlist | those **plus all ~220 published lists** | frees ~364 GB, keeps **321 GB** |
+| `[y]` your modlists only | the 22 manifests held here | frees ~717 GB |
+| `[a]` any known modlist | those **plus all ~220 published lists** | frees ~386 GB, keeps **330 GB** |
 
 The second is the useful one for a pooled collection. Master is *defined* as
 "needed by no list you have", but a lot of what lands there is still wanted by
-lists in the gallery — 321 GB of it here. Under `[y]` that gets deleted and
+lists in the gallery — 330 GB of it here, measured on 2026-09-03. Under `[y]` that gets deleted and
 re-downloaded the day you install one of them; under `[a]` only genuine dead
 weight goes: superseded builds from past list updates, and archives for lists
 that no longer exist.
@@ -161,8 +161,9 @@ that no longer exist.
 any published list has no cached validation report, the protected set is short —
 and a short protected set does not mean deleting a bit less, it means deleting
 the wrong thing. So it declines and tells you to fetch the reports. The handful
-of lists whose authors have pulled them publish an empty report permanently;
-those cannot block the feature, so they are named in the confirmation instead.
+of lists whose authors have pulled them publish an empty report permanently, or
+drop out of the validator's summary altogether; those cannot block the feature,
+so they are named in the confirmation instead.
 
 Deletion is otherwise as it has always been: name **and** size must match, every
 file is re-checked at the moment of deletion rather than trusted from the table,
@@ -423,7 +424,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-616 checks across fourteen suites. None of them touch the live archive pools:
+618 checks across fourteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

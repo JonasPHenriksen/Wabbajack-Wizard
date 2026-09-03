@@ -424,11 +424,17 @@ def row(key):
 
 
 feeds = {"r/ok": feed("ok"), "r/pulled": feed("pulled", force_down=True),
-         "r/new": feed("new"), "r/odd": feed("odd")}
-summ = {k: row(k) for k in ("r/ok", "r/pulled", "r/odd")}     # r/new: no row yet
+         "r/new": feed("new"), "r/odd": feed("odd"),
+         # Pulled lists that have dropped out of the summary altogether, as
+         # LegacyRim did on 2026-09-03: known from the feed's flag, or from a
+         # report cached before they vanished.
+         "r/gone": feed("gone", force_down=True),
+         "r/gone2": feed("gone2")}
+summ = {k: row(k) for k in ("r/ok", "r/pulled", "r/odd")}     # the rest: no row
 G._write_cache(G.report_rel("r/ok"), json.dumps(rep([("g.7z", 7)])).encode())
 G._write_cache(G.report_rel("r/pulled"), json.dumps(rep([], "ForcedDown")).encode())
 G._write_cache(G.report_rel("r/odd"), json.dumps(rep([], "Available")).encode())
+G._write_cache(G.report_rel("r/gone2"), json.dumps(rep([], "ForcedDown")).encode())
 want, checked, unchecked = G.published_builds({"fallout4"}, feeds, summ, A.WJ)
 check("one list contributed", checked == 1 and want == {"g.7z": {7}}, str(want))
 check("a pulled list is named with the permanent reason",
@@ -437,6 +443,10 @@ check("a list with no summary row is named as not yet validated",
       unchecked.get("r/new") == G.UNVALIDATED, str(unchecked))
 check("an empty report that is NOT ForcedDown is named as such",
       "status Available" in unchecked.get("r/odd", ""), str(unchecked))
+check("a pulled list with no summary row is still pulled, by its feed flag",
+      unchecked.get("r/gone") == G.PULLED, str(unchecked))
+check("  or by the ForcedDown report cached before it vanished",
+      unchecked.get("r/gone2") == G.PULLED, str(unchecked))
 
 G._write_cache(G.SUMMARY_PATH, json.dumps(list(summ.values())).encode())
 A.reset_feed_cache()
@@ -447,13 +457,15 @@ check("gallery_protection refuses on the non-permanent gaps",
       want is None, str(note))
 check("  naming them and their reasons",
       "r/new" in (note or "") and "r/odd" in (note or ""), str(note))
-check("  and not blaming the pulled list", "r/pulled" not in (note or ""), str(note))
+check("  and not blaming the pulled lists",
+      not any(k in (note or "") for k in ("r/pulled", "r/gone", "r/gone2")), str(note))
 
-A._FEED_CACHE["all"] = {"r/ok": feeds["r/ok"], "r/pulled": feeds["r/pulled"]}
+A._FEED_CACHE["all"] = {k: feeds[k] for k in ("r/ok", "r/pulled", "r/gone", "r/gone2")}
 want, note, pulled = quiet(W.gallery_protection, {"fallout4"})[0]
-check("with only the permanent gap left it answers",
+check("with only the permanent gaps left it answers",
       want == {"g.7z": {7}}, str(want))
-check("  naming the pulled list separately", pulled == ["r/pulled"], str(pulled))
+check("  naming every pulled list separately",
+      pulled == ["r/gone", "r/gone2", "r/pulled"], str(pulled))
 check("  and saying so in the note", "pulled by their authors" in note, note)
 A.reset_feed_cache()
 

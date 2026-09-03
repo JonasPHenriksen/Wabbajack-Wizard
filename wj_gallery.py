@@ -504,7 +504,19 @@ def published_builds(pools, feeds, summary, wj, progress=None):
     checked, unchecked = 0, {}
     for i, key in enumerate(keys, 1):
         if key not in summary:
-            unchecked[key] = UNVALIDATED
+            # A pulled list can drop out of the summary altogether - LegacyRim
+            # did, between one day and the next - and that is as permanent as
+            # an empty ForcedDown report. The feed's own force_down flag, or a
+            # cached report that says ForcedDown, tells the two apart from a
+            # list the validator simply has not reached yet. Only the cache is
+            # consulted here, so a brand-new list costs no request.
+            rep = load_report(key) if have_report(key) else None
+            if (feeds[key].get("force_down")
+                    or (rep is not None and report_is_empty(rep)
+                        and report_status(rep) == "ForcedDown")):
+                unchecked[key] = PULLED
+            else:
+                unchecked[key] = UNVALIDATED
             continue
         rep = load_report(key)
         if rep is None:
