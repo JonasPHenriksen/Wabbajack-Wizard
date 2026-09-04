@@ -1002,6 +1002,7 @@ class App:
         self.trash_note = tk.StringVar(value="")
         ttk.Label(bar3, textvariable=self.trash_note).pack(side="right")
         self.action(bar3, "Empty the trash now", self.space_empty_trash).pack(side="right", padx=(0, 8))
+        self.action(bar3, "Remove leftovers", self.space_leftovers).pack(side="right", padx=(0, 8))
         cols = [("game", "game folder", 150, "w"), ("folder", "folder", 300, "w"),
                 ("files", "files", 70, "e"), ("size", "size", 90, "e"),
                 ("note", "where it came from", 250, "w")]
@@ -1275,6 +1276,44 @@ class App:
                   + (f" Record: {os.path.basename(rec)}" if rec else ""))
             self.space_measure()
         self.run_job("Emptying the trash", lambda: A.purge_trash(days=0), done)
+
+    def space_leftovers(self):
+        """Debris no other step reaches: OS metadata, bytecode folders, a
+        captured run's output, a sidecar whose modlist is gone. Never an
+        archive, and never live state a running session owns."""
+        def scan():
+            return W.leftover_report()
+
+        def found(rows):
+            if not rows:
+                messagebox.showinfo("Leftovers", "Nothing left over. Every file here is "
+                                                 "either in use or something a stage manages.",
+                                    parent=self.root)
+                return
+            by_cat = {}
+            for cat, _p, b in rows:
+                n, t = by_cat.get(cat, (0, 0))
+                by_cat[cat] = (n + 1, t + b)
+            total = sum(b for _c, _p, b in rows)
+            lines = [f"{cat}: {n} item(s), {human(t)}" for cat, (n, t) in sorted(by_cat.items())]
+            lines.append("")
+            lines += [p for _c, p, _b in rows[:8]]
+            if len(rows) > 8:
+                lines.append(f"... and {len(rows) - 8} more")
+            if not self.confirm("Delete leftovers", lines, total=total, total_label="Total",
+                                undo="This is the deletion itself. There is no undo."):
+                return
+
+            def done(res):
+                count, freed, failures = res
+                W.out(f"  {count} leftover(s) deleted, {human(freed)} freed.")
+                for p, err in failures:
+                    W.out(f"  [WARN] {p}: {err}")
+                self.space_measure()
+            self.run_job("Deleting leftovers",
+                         lambda: W.remove_leftovers(rows, lambda c, p, b: W.out(f"    {p}")),
+                         done)
+        self.run_job("Looking for leftovers", scan, found)
 
     # ==================================================================
     # Settings

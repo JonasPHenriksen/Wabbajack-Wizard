@@ -2361,6 +2361,143 @@ def trash_report():
     return rows
 
 
+# Files an operating system or an editor drops beside real content. None of
+# them is ever read by anything here, and they accumulate for good, because
+# every other step in this suite only ever judges archives.
+JUNK_NAMES = (".ds_store", "thumbs.db", "desktop.ini")
+
+# Never swept, whatever they contain: managed on their own schedule, or by git,
+# or by the interpreter. __pycache__ is deliberately here rather than in the
+# sweep - Python rebuilds it on the very next import, so offering to delete it
+# would put a prompt in front of you on every single run and reclaim nothing
+# that stays reclaimed.
+LEFTOVER_SKIP_DIRS = (".git", ".venv-win", ".venv", "dist", "node_modules",
+                      ".gallery-cache", "manifest_backups", "__pycache__")
+
+
+def _is_junk_file(name):
+    low = name.lower()
+    # AppleDouble sidecars: a Mac writes '._x' beside 'x' on a non-HFS share.
+    return low in JUNK_NAMES or (name.startswith("._") and len(name) > 2)
+
+
+def leftover_report(roots=None):
+    """Files nothing else in the suite ever removes.
+
+    Stage 5 judges archives by demand, the trash is purged on its own timer,
+    and backups expire on theirs. What none of that reaches is the debris
+    beside them: operating-system metadata, AppleDouble sidecars from a Mac
+    that touched the share, and Wabbajack's .metadata sidecar for a modlist
+    that is gone.
+
+    Only debris that stays gone is listed. __pycache__ and the captured
+    output of the last child run are both rewritten by the very next run, so
+    sweeping them would put a prompt in front of you every time and reclaim
+    nothing lasting.
+
+    Returns [(category, path, bytes)], never touching live state: the lock, a
+    resumable .part, the nxm listener files a running assist session owns, the
+    API key, settings, manifests, or the deletion records, which are the only
+    account of what stage 5 took."""
+    seen, rows = set(), []
+
+    def add(cat, path):
+        p = os.path.abspath(path)
+        if p in seen:
+            return
+        seen.add(p)
+        try:
+            # tree_size returns (bytes, files); a plain getsize returns bytes.
+            size = tree_size(p)[0] if os.path.isdir(p) else os.path.getsize(p)
+        except OSError:
+            size = 0
+        rows.append((cat, p, size))
+
+    if roots is None:
+        roots = [A.HERE, A.WJ.ARCHIVE_ROOT]
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d.lower() not in LEFTOVER_SKIP_DIRS
+                           and d.lower() not in A.WJ.EXCLUDE_POOL_DIRS]
+            for n in filenames:
+                if _is_junk_file(n):
+                    add("OS metadata", os.path.join(dirpath, n))
+
+    for n in orphan_sidecars():
+        add("orphaned sidecar", os.path.join(A.MANIFESTS, n))
+
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return rows
+
+
+def remove_leftovers(rows, on_delete=None):
+    """Delete what leftover_report() found. Returns (count, bytes, failures)."""
+    count = total = 0
+    failures = []
+    for cat, path, size in rows:
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        except OSError as e:
+            failures.append((path, str(e)))
+            continue
+        count += 1
+        total += size
+        if on_delete:
+            on_delete(cat, path, size)
+    return count, total, failures
+
+
+def leftover_step():
+    """5e: the debris no other step reaches."""
+    rows = leftover_report()
+    if not rows:
+        return False
+    total = sum(b for _c, _p, b in rows)
+    out()
+    rule()
+    out("  5e. Leftovers")
+    out("      Debris beside the archives that nothing else here ever removes:")
+    out("      operating-system metadata, compiled-bytecode folders, a captured")
+    out("      run's output, and Wabbajack's .metadata sidecar for a modlist")
+    out("      that is gone. No archive is ever in this list.")
+    out()
+    by_cat = {}
+    for cat, _p, b in rows:
+        n, t = by_cat.get(cat, (0, 0))
+        by_cat[cat] = (n + 1, t + b)
+    cw = fit(list(by_cat), 4) + 2
+    out(f"    {'what':<{cw}}{'items':>7}{'size':>11}")
+    for cat in sorted(by_cat):
+        n, t = by_cat[cat]
+        out(f"    {cat:<{cw}}{n:>7}{human(t):>11}")
+    out()
+    for _c, p, _b in rows[:8]:
+        out(f"      {p}")
+    if len(rows) > 8:
+        out(f"      ... and {len(rows) - 8} more")
+    a = ask(f"   [d] delete these {len(rows)} item(s) ({human(total)})   [s] leave them",
+            ("d", "s"))
+    if a == "s":
+        return False
+    verdict = confirm_destructive(
+        "About to delete leftovers",
+        [f"{cat}: {n} item(s), {human(t)}" for cat, (n, t) in sorted(by_cat.items())],
+        total=total, total_label="Total", undo="This cannot be undone.")
+    if not verdict:
+        return False
+    count, freed, failures = remove_leftovers(rows, lambda c, p, b: out(f"    {p}"))
+    out(f"  {count} item(s) deleted, {human(freed)} freed.")
+    for p, err in failures:
+        out(f"  [WARN] {p}: {err}")
+    return count > 0
+
+
 def trash_step():
     """5d: what the trash holds, and the offer to empty it now."""
     rows = trash_report()
@@ -2576,6 +2713,7 @@ def stage_space(state, records):
 
     cleared = clear_master_step(records, masters, failed_rebuilds)
     trash_step()
+    leftover_step()
     return deleted_any or cleared
 
 

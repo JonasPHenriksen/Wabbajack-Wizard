@@ -464,5 +464,77 @@ check("the table rows carry the note alongside the size",
       len(rows) == 2 and rows[0][4] and rows[1][4] is None, str(rows))
 
 A._FEED_CACHE["all"] = SAVED_FEEDS
+
+# ---------------------------------------------------------------------------
+# Debris no other step reaches. Stage 5 judges archives, the trash runs on a
+# timer and backups on theirs; none of that touches what an operating system
+# or an editor drops beside them. What matters most here is the second list:
+# what the sweep must never pick up.
+# ---------------------------------------------------------------------------
+print("\n 12.y  leftovers, and everything the sweep must not take")
+
+box = Sandbox(BOX)
+wire(box)
+box.manifest("Live", GAME, [("a.7z", 10, "nexus")])
+box.pool_file(GAME, "Live", "a.7z", 10)
+
+
+def put(path, body=b"x"):
+    full = os.path.join(box.tools, path) if not os.path.isabs(path) else path
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with io.open(full, "wb") as f:
+        f.write(body)
+    return full
+
+
+junk = [put(".DS_Store"), put("._run.bat"), put("Thumbs.db"),
+        put(os.path.join(box.manifests, "Gone_@@_gone.wabbajack.metadata"), b"{}"),
+        put(os.path.join(box.archives, GAME, "Live", ".DS_Store"))]
+
+# Live state, records and managed content. None of this may ever be swept.
+keep = [put("nexus_api_key.txt", b"secret"), put("wj_settings.json", b"{}"),
+        put(".wj_autoupdate.lock", b"pid"), put(".nxm_listener_port", b"53443"),
+        put(".nxm_prev_handler", b""), put("wj_autoupdate_state.json", b"{}"),
+        put("deleted_Fallout4_20260903_165237.csv", b"a,b"),
+        put("purged_trash_20260903_165352.csv", b"a,b"),
+        put(os.path.join("manifest_backups", "Live.wabbajack.bak"), b"z" * 20),
+        put(os.path.join(".gallery-cache", "summary.json"), b"[]"),
+        put(os.path.join(".venv-win", "Scripts", "._python.exe")),
+        put(os.path.join(box.archives, GAME, "Live", "b.7z.part"), b"partial"),
+        os.path.join(box.archives, GAME, "Live", "a.7z"),
+        os.path.join(box.manifests, "Live.wabbajack")]
+
+rows = W.leftover_report()
+found = {os.path.normcase(p) for _c, p, _b in rows}
+missed = [p for p in junk if os.path.normcase(os.path.abspath(p)) not in found]
+check("every kind of leftover is found", not missed, str(missed))
+taken = [p for p in keep if os.path.normcase(os.path.abspath(p)) in found]
+check("and nothing live, recorded or managed is", not taken, str(taken))
+check("  the API key is never in the list",
+      not any("nexus_api_key" in p for _c, p, _b in rows))
+check("  nor a resumable .part", not any(p.endswith(".part") for _c, p, _b in rows))
+check("  nor anything under .venv-win or .gallery-cache",
+      not any(".venv-win" in p or ".gallery-cache" in p for _c, p, _b in rows))
+check("  nor a deletion record, which is the only account of what stage 5 took",
+      not any("deleted_" in p or "purged_trash_" in p for _c, p, _b in rows))
+put(os.path.join("__pycache__", "wj_wizard.pyc"), b"xx")
+put(os.path.join("__pycache__", "wj_wizard.pyc"), b"xx")
+put("wj_autoupdate_sorter.out", b"y" * 50)
+check("  nor what the next run rewrites anyway: __pycache__, captured output",
+      not any("__pycache__" in p or p.endswith(".out")
+              for _c, p, _b in W.leftover_report()), str(W.leftover_report()))
+check("the sidecar of a modlist that is gone is included",
+      any(c == "orphaned sidecar" for c, _p, _b in rows), str(rows))
+check("sizes are numbers, folders included",
+      all(isinstance(b, int) for _c, _p, b in rows), str(rows))
+
+count, freed, failures = W.remove_leftovers(rows)
+check("they all delete", count == len(rows) and not failures, str(failures))
+check("  and the bytes are reported", freed > 0, str(freed))
+check("  every leftover is gone", not any(os.path.exists(p) for p in junk))
+check("  everything else is untouched", all(os.path.exists(p) for p in keep),
+      str([p for p in keep if not os.path.exists(p)]))
+check("a second sweep finds nothing", W.leftover_report() == [], str(W.leftover_report()))
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

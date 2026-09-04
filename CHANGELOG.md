@@ -23,6 +23,16 @@
   you own from the list that wants them. The published check reads only feeds
   already loaded that run, so stage 5 still never touches the network.
 
+- A leftovers sweep, `5e` in the console and **Remove leftovers** in the Space
+  tab. Every other step judges archives, so nothing ever reached the debris
+  beside them: operating-system metadata, the `._name` files a Mac writes on a
+  non-HFS share, and Wabbajack's `.metadata` sidecar for a modlist that is
+  gone. It reports what it found, asks twice, and never touches the API key,
+  the lock, a resumable `.part`, a running assist session's files, or the
+  deletion records. `__pycache__` and the captured output of the last child run
+  are deliberately excluded: the next run rewrites both, so sweeping them would
+  prompt every time and reclaim nothing lasting.
+
 ### Fixed
 
 - The Space tab gathered the orphaned-sidecar report and never displayed it,
@@ -33,7 +43,7 @@
   true at a glance. The count was right, 220 live plus 5 retired lists still
   listed, and the line now says so.
 
-Tests: 773 checks across 16 sandbox suites, up from 698 across 15.
+Tests: 792 checks across 16 sandbox suites, up from 698 across 15.
 
 ## 1.0.0 — 2026-09-04
 

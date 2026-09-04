@@ -439,6 +439,31 @@ check("nothing measured is left unshown",
           for k in ("lists", "masters", "strays", "trash", "orphans")),
       str(sorted(app.space)))
 
+# ---------------------------------------------------------------- 15.11
+print("\n 15.11  Remove leftovers, through the button")
+
+junk = os.path.join(box.archives, GAME, "Keep", ".DS_Store")
+with io.open(junk, "wb") as fh:
+    fh.write(b"junk")
+key = os.path.join(box.tools, "nexus_api_key.txt")
+with io.open(key, "wb") as fh:
+    fh.write(b"secret")
+kept_archive = os.path.join(box.archives, GAME, "Keep", "k.7z")
+
+DLG.calls.clear()
+app.space_leftovers()
+settle()
+check("the leftover is gone", not os.path.exists(junk))
+check("  the archive beside it is not", os.path.exists(kept_archive))
+check("  and neither is the API key", os.path.exists(key))
+check("  the window asked before deleting", DLG.calls, str(DLG.calls))
+
+DLG.calls.clear()
+app.space_leftovers()
+settle()
+check("a second press says there is nothing to do", DLG.shown("Nothing left over"),
+      str(DLG.calls))
+
 # ---- put everything back ---------------------------------------------------
 root.destroy()
 W.out = REAL_WOUT

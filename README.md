@@ -79,9 +79,10 @@ console uses. Stages are independent: skipping one does not affect the others.
    Wabbajack, then offers to hand it straight over (see below). One at a time by
    design: staging a second list pulls the shared archives back out of the first.
 5. **Space** — what the manifests and the per-game Master pools are costing,
-   with the option to delete modlists, park folders that are not ours, and then
-   clear Master under a protection rule you choose. Every step confirms, and
-   lets you change the selection at the confirmation.
+   with the option to delete modlists, park folders that are not ours, clear
+   Master under a protection rule you choose, empty the trash, and sweep the
+   leftovers no other step reaches. Every step confirms, and lets you change
+   the selection at the confirmation.
 
 ## Stage 1: what you already own of what you do not have
 
@@ -291,8 +292,34 @@ never reaches for the network mid-deletion, so a cold cache reports the
 sidecar and leaves the rest unknown rather than guessing.
 
 Sidecars whose modlist is gone entirely, with no folder left either, are listed
-too. They are tiny and are left alone, because an orphan is usually the last
-trace of a list that went missing and is worth seeing.
+too, and stage 5e can now delete them.
+
+### Stage 5e: leftovers
+
+Every other step here judges archives. Stage 5 goes by demand, the trash runs
+on a thirty-day timer, backups expire on `KEEP_BACKUP_DAYS`, and the stale
+`nexus_todo` CSVs go when the list they describe is complete. Nothing reaches
+the debris that lands *beside* the archives, so it accumulates for good.
+
+**Remove leftovers** in the Space tab, `5e` in the console, sweeps two kinds:
+
+| what | why it is there |
+| --- | --- |
+| OS metadata | `.DS_Store`, `Thumbs.db`, `desktop.ini`, and the `._name` AppleDouble files a Mac writes beside real files on a non-HFS share |
+| orphaned sidecars | Wabbajack's `.metadata` for a modlist that is no longer here |
+
+It lists what it found and what it will free, and asks twice before deleting.
+
+Only debris that **stays** gone is swept. `__pycache__` and the captured output
+of the last child run are both rewritten by the very next run, so offering them
+would put a prompt in front of you every time and reclaim nothing lasting.
+
+Never swept, whatever a sweep might think of them: `nexus_api_key.txt`, the
+settings, the state and manifest caches, the manifests themselves, the lock, a
+resumable `.part`, the `.nxm_*` files a running assist session owns, anything
+under `.venv-win`, `.gallery-cache`, `manifest_backups` or `dist`, and the
+`deleted_*.csv`, `purged_trash_*.csv` and `merged_*.csv` records, which are the
+only account of what stage 5 ever took.
 
 Strays are sized with `tree_size()`, not `dir_size()`. Pool folders are flat, so
 not descending is both right and faster there; a stray folder is whatever
@@ -537,7 +564,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-773 checks across sixteen suites. None of them touch the live archive pools:
+792 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
