@@ -54,7 +54,7 @@ s.pool_file(G, "Nolvus", "in-nolvus.7z", 600)
 root_file = os.path.join(s.archives, G, "in-gameroot.7z")
 open(root_file, "wb").write(b"x" * 500)
 
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "Target", "--dry-run", "--yes"],
                 expect=0)
 plan = planned(out)
@@ -74,7 +74,7 @@ for name, where, expect_present in (
 
 # ---------------------------------------------------------------- 10.2
 print("\n 10.2  the two tools agree on what the pools ARE")
-rc, sout = s.run("wabbajack_archive_sorter_v2.py",
+rc, sout = s.run("wj_sorter.py",
                  ["--game", G, "--list", "Target", "--yes", "--dry-run"],
                  expect=0)
 scanned = set()
@@ -97,7 +97,7 @@ s.manifest("Target", G, [("both.7z", 500, "nexus")])
 s.manifest("Other", G, [("both.7z", 111, "nexus")])
 s.pool_file(G, "Shared", "both.7z", 111)      # the OTHER list's build
 s.pool_file(G, "Target", "both.7z", 500)      # the build Target wants
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "Target", "--dry-run", "--yes"],
                 expect=0)
 check("a right-size copy anywhere satisfies the requirement",
@@ -108,7 +108,7 @@ s = Sandbox(BOX)
 s.manifest("Target", G, [("parked.7z", 500, "nexus"), ("wrong.7z", 5, "nexus")])
 s.pool_file(G, "Master", "parked~1.7z", 500)   # right build, second name
 s.pool_file(G, "Master", "wrong~1.7z", 999)    # wrong build, second name
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "Target", "--dry-run", "--yes"],
                 expect=0)
 check("a suffixed copy at the right size counts as present",
@@ -120,7 +120,7 @@ print("\n      and when only the wrong build exists it is not accepted")
 s = Sandbox(BOX)
 s.manifest("Target", G, [("only.7z", 500, "nexus")])
 s.pool_file(G, "Shared", "only.7z", 111)
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "Target", "--dry-run", "--yes"],
                 expect=0)
 check("a wrong-size copy is re-downloaded",

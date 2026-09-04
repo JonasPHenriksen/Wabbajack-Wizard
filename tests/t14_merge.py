@@ -148,7 +148,7 @@ check("  with a hash on every drop",
           if r.startswith("dropped-duplicate")), str(rows))
 
 print("\n      and the merged folder is sound for the tools that use it")
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", "GameA", "--list", "LA", "--dry-run", "--yes"])
 # GameA maps to its own folder in the test config, so this only proves the
 # manifests still parse; the shared-folder behaviour is covered elsewhere.

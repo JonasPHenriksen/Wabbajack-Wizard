@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Wabbajack Archive Downloader
-============================
-A companion to wabbajack_archive_sorter.py. Instead of *sorting* archives you
-already have, this script *fetches* the archives a chosen modlist needs and
-drops them straight into that list's folder, ready for Wabbajack to verify and
-install.
+Wabbajack Wizard - the downloader, and the shared library
+=========================================================
+Fetches the archives a chosen modlist needs and drops them straight into that
+list's folder, ready for Wabbajack to verify and install. It is also the
+module every other tool imports for what they all need to agree on: how a
+.wabbajack manifest is parsed, how a file on disk is judged present, how the
+pools are indexed, and the light manifest cache.
 
-It reads the same .wabbajack manifests as the sorter and supports the download
-sources that appear in them:
+It supports the download sources that appear in manifests:
 
   * Nexus Mods   -> see "Premium vs. free" below.
   * Direct HTTP  -> downloaded straight from the manifest URL.  (no account)
@@ -58,21 +58,17 @@ API key:
   as the documented `apikey` header and is never written to the log.
 
 Notes:
-  * xxHash64 verification (matching Wabbajack) runs if the optional `xxhash`
-    package is installed; otherwise a size check is used.
+  * Every download is verified by xxHash64, the hash Wabbajack itself uses.
+    Without the xxhash package only sizes can be compared, and the tool
+    refuses to run unless --allow-size-only says that is acceptable.
   * Downloads stream to a .part file and resume when the server allows it.
-
-Changes from the original (three edits):
-  1. WabbajackCDN archives now go through wabbajack_cdn.py, which speaks the
-     definition.json.gz + parts/N protocol. Previously they were treated as
-     plain HTTP URLs, which yields a ~1 KB CDN error page instead of the file.
-  2. An archive that fails size/hash verification is deleted and counted as a
-     failure, instead of being kept with a .meta sidecar written beside it.
-  3. wabbajack_cdn.py must sit next to this script; a clear error is logged per
-     affected archive if it is missing.
-  4. The WJ_MANIFEST_DIR environment variable, when set to a real directory,
-     overrides where .wabbajack files are looked for. Logs, nexus_api_key.txt
-     and the CSV reports still live beside this script.
+    An archive that fails verification is discarded, never kept.
+  * WabbajackCDN archives go through wj_cdn.py, which speaks the CDN's
+    definition.json.gz + parts/N protocol; a plain GET on such a URL returns
+    a ~1 KB error page.
+  * WJ_MANIFEST_DIR, when set to a real directory, says where .wabbajack files
+    are; the orchestrator sets it for the children it launches. Logs, the API
+    key file and the CSV reports live beside this script regardless.
 """
 
 import os
@@ -100,7 +96,7 @@ from collections import defaultdict
 # served as a definition plus numbered parts; a plain GET on the URL returns a
 # ~1 KB error page, so these must not go through stream_download().
 try:
-    import wabbajack_cdn as _CDN
+    import wj_cdn as _CDN
     _HAVE_CDN = True
 except Exception:
     _CDN = None
@@ -116,7 +112,7 @@ except Exception:
 # ============================ CONFIGURATION ============================
 # ---------------------------------------------------------------------
 # Layout settings come from wj_config.py, which both this script and
-# wabbajack_archive_sorter_v2.py import. They used to be duplicated here and
+# wj_sorter.py import. They used to be duplicated here and
 # there: editing one copy and forgetting the other left the downloader writing
 # into one directory tree while the sorter moved files out of another, with
 # both reporting success. Edit wj_config.py.
@@ -143,29 +139,16 @@ MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR
 # which passes a file that is the right length but the wrong content. Rather
 # than quietly downgrading (the same command giving different guarantees
 # depending on which Python picked it up), stop and say so. --allow-size-only
-# is the deliberate opt-out.
-REQUIRE_HASH = True
-
-# The order archives are fetched in.
-#
-#   "smallest"  - smallest first. The count of finished files climbs quickly,
-#                 an interruption costs the least, and the long tail of small
-#                 mods is out of the way before a multi-gigabyte download
-#                 monopolises the session. On a free Nexus account, where every
-#                 file is a click, it also means the clicks that finish fastest
-#                 come first.
-#   "largest"   - largest first. Gets the risky, slow files done while you are
-#                 paying attention.
-#   "manifest"  - the order the modlist itself lists them, which is arbitrary.
-#
-# Archives whose manifest states no size always go last: there is no way to
-# place them sensibly, and they are rare.
-DOWNLOAD_ORDER = "smallest"
+# is the deliberate opt-out. Both settings live in wj_config.py.
+REQUIRE_HASH = CFG.REQUIRE_HASH
+DOWNLOAD_ORDER = CFG.DOWNLOAD_ORDER or "smallest"
 
 # Nexus API tuning -----------------------------------------------------
 NEXUS_API_BASE   = "https://api.nexusmods.com/v1"
-APP_NAME         = "WJArchiveDownloader"
-APP_VERSION      = "1.1"
+# Sent as the Application-Name and Application-Version headers Nexus asks
+# API clients to identify themselves with.
+APP_NAME         = CFG.APP_NAME
+APP_VERSION      = CFG.__version__
 REQUEST_PAUSE_S  = 0.30          # polite gap between Nexus API calls
 DOWNLOAD_CHUNK   = 1 << 20       # 1 MiB streaming chunks
 NEXUS_DAILY_FLOOR = 5            # stop minting links when daily allowance hits this
@@ -1491,10 +1474,10 @@ def download_one(url, archive, dest_dir, results):
 
     if _HAVE_CDN is False and isinstance(url, str) and (
             "wabbajack.org" in url or "b-cdn.net" in url):
-        LOG.error("  [SKIP] %s needs wabbajack_cdn.py, which is not next to "
+        LOG.error("  [SKIP] %s needs wj_cdn.py, which is not next to "
                   "this script.", name)
         results["failed"] += 1
-        results["failures"].append((name, "wabbajack_cdn.py missing"))
+        results["failures"].append((name, "wj_cdn.py missing"))
         return False
 
     if not stream_download(url, dest, expected_size=archive["size"]):

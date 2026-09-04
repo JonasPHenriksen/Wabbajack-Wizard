@@ -20,8 +20,8 @@ Each part is hash-checked on arrival and written at its own Offset, then the
 assembled file is checked against the definition's Hash.
 
 This module is used by both wj_autoupdate.py (for .wabbajack manifests, which
-are served this way) and wabbajack_archive_downloader.py (for archives whose
-State is WabbajackCDNDownloader).
+are served this way) and wj_downloader.py (for archives whose State is
+WabbajackCDNDownloader).
 
 Resume: completed part indices are recorded in a small "<dest>.parts.json"
 sidecar, so an interrupted 4 GB download picks up where it stopped instead of
@@ -58,7 +58,11 @@ DOMAIN_REMAPS = {
     "wabbajacktest.b-cdn.net":     "test-files.wabbajack.org",
 }
 
-USER_AGENT   = "WJArchiveDownloader/1.1"
+try:
+    import wj_config as _CFG
+    USER_AGENT = _CFG.USER_AGENT
+except ImportError:                     # usable on its own, with a plain name
+    USER_AGENT = "WabbajackWizard"
 HTTP_TIMEOUT = 120
 PART_RETRIES = 4
 DEFAULT_WORKERS = 4

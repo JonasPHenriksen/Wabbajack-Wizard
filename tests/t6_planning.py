@@ -46,7 +46,7 @@ box.pool_file(G, "ListA", "stale.7z", 199)          # one byte short
 box.pool_file(G, "Shared", "elsewhere.7z", 400)
 box.pool_file(G, "Nolvus", "absent.7z", 300)        # must NOT count as present
 
-rc, out = box.run("wabbajack_archive_downloader.py",
+rc, out = box.run("wj_downloader.py",
                   ["--game", G, "--list", "ListA", "--dry-run", "--yes"],
                   expect=0)
 check("dry-run exits 0", rc == 0)
@@ -77,7 +77,7 @@ check("  and is NOT offered as something we can fetch",
 
 # ---------------------------------------------------------------- 6.2
 print("\n 6.2  --force ignores what is already on disk")
-rc, out = box.run("wabbajack_archive_downloader.py",
+rc, out = box.run("wj_downloader.py",
                   ["--game", G, "--list", "ListA", "--dry-run", "--yes",
                    "--force"], expect=0)
 check("--force exits 0", rc == 0)
@@ -88,7 +88,7 @@ check("--force reports nothing as already present",
 # ---------------------------------------------------------------- 6.3
 print("\n 6.3  an unreadable manifest is reported but does not stop a download")
 box.manifest("Broken", G, [], corrupt="notzip")
-rc, out = box.run("wabbajack_archive_downloader.py",
+rc, out = box.run("wj_downloader.py",
                   ["--game", G, "--list", "ListA", "--dry-run", "--yes"],
                   expect=0)
 check("the downloader still runs (unlike the sorter, which must abort)",

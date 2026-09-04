@@ -1,68 +1,43 @@
 #!/usr/bin/env python3
 """
-Wabbajack Archive Sorter
-========================
-Stages the downloaded archives for a chosen Wabbajack modlist by relocating
-files into:
+Wabbajack Wizard - the sorter
+=============================
+Arranges the archives of one game's pool folder by demand, then gathers what
+one chosen modlist needs into that list's own folder for Wabbajack:
 
   * a per-list folder            -> files needed by exactly one present list
   * the Shared pool              -> files needed by two or more present lists
   * the Master pool              -> files needed by none of the present lists
 
-In every run the pools are first rebuilt from scratch based on demand (the
-automatic cleanup/reset pass), and then every archive the chosen list needs is
-gathered into that list's folder (the staging pass).
+Every run rebuilds the pools from current demand first (the cleanup pass),
+then stages the chosen list. --cleanup-only stops after the first pass, which
+is what the wizard runs after deleting a modlist.
 
-This version adds:
-  * an automatic cleanup/reset pass that runs before you pick a list, so staging
-    always starts from a freshly-sorted state (reset is no longer a menu choice).
-  * log retention: only the previous and current run's log files are kept.
-  * a GAME prompt: you pick a game first, and only modlists for that game are
-    considered, so the disk scan and demand calculation stay relevant.
-  * game-aware pools: Master/Shared/list folders live under a per-game root, so
-    files are never mis-classified just because a *different* game's list does
-    not need them.
-  * size-checked conflict handling: when a move would collide with an existing
-    file, both copies are checked against the manifest's expected Size. The copy
-    that matches the manifest keeps the destination; any copy that does NOT match
-    is moved into Master instead of being silently overwritten. (Size is a cheap,
-    dependency-free proxy: it reliably catches truncated/partial/wrong-version
-    files; Wabbajack still hash-verifies everything on its end afterwards.)
-  * structured logging to console + a timestamped log file
-  * a --dry-run preview that performs no moves
-  * duplicate-file detection across all search locations
-  * a "required but missing on disk" report for the target list
-  * confirmation prompts before any destructive operation
-  * Windows-safe path comparison and Unicode-safe console output
-  * an explicit, non-destructive failure on invalid menu input
+The rules it moves under:
 
-Changes from the original v2 (two edits, both in this file):
-  1. build_disk_index() now skips "*.part" as well as "*.meta". A failed
-     download leaves a .part file behind on purpose so the next attempt can
-     resume; indexing it would park it in Master and lose that progress.
-  2. main() adds the companion scripts and their log/state files to the
-     protected set, so they can never be relocated even if the script folder
-     and a pool folder turn out to be the same directory.
-  3. The WJ_MANIFEST_DIR environment variable, when set to a real directory,
-     overrides where .wabbajack files are looked for, so this script can live
-     apart from the manifests. Log files still go beside this script.
-  4. A file parked under a '~N' suffix (two builds, one name) is indexed under
-     the name the manifest uses and gets that name back when it is staged.
-     Before this, a parked build was invisible to demand: never staged, and
-     reclaimable by a cleanup that saw a name nobody asked for.
-  5. Scope is the POOL FOLDER, not the GameType string. Skyrim and Skyrim
-     Special Edition share one folder here, so both games' lists decide what
-     that folder's Master may hold.
-  6. An in-scope manifest that lists no archives at all stops the run, like an
-     unreadable one does: its files would all look unwanted.
-  7. Manifests are read through the light cache the wizard and the updater
-     already keep (wj_manifest_cache.json, keyed by each file's mtime and
-     size), so a run no longer opens 22 multi-GB zips on the share to learn
-     22 lists of names and sizes it already knew.
-  8. Identical extra copies of an archive - same name, same size - are parked
-     in Master during the cleanup pass, so the pools converge in one run and
-     stage 5c can reclaim them. Copies of OTHER sizes stay where they are: a
-     name several lists pin at different sizes has one home per build.
+  * Scope is the POOL FOLDER, not the GameType. Skyrim, Skyrim SE, Skyrim VR
+    and Enderal SE share one folder, so all their lists decide what that
+    folder's Master may hold.
+  * A file is identified by name AND size, never by name alone: several lists
+    pin different builds of one filename, and the copy a list can install is
+    the one whose size its manifest states. When a move collides with a
+    different build, the copy matching the manifest keeps the destination and
+    the other is parked in Master under a '~N' suffix rather than overwritten.
+  * A '~N' suffix is storage only. A parked build is indexed under the name
+    the manifest uses and gets that name back when staged.
+  * Identical extra copies of a build are parked in Master during the cleanup
+    pass, so the pools settle in one run and the wizard's stage 5c can
+    reclaim them. Copies of other sizes stay where they are.
+  * A manifest that cannot be read, or lists no archives, stops the run: its
+    archives would all look unwanted and be moved into Master.
+  * "*.part" files are never indexed or moved; a failed download leaves one
+    behind on purpose so the next attempt can resume.
+  * Manifests are read through the light cache shared with the other tools
+    (wj_manifest_cache.json, keyed by each file's mtime and size), so a run
+    opens no manifest it already knows.
+
+Logs: a timestamped wj_sorter_*.log beside this script; only the previous
+and current run's are kept. --dry-run previews every move and performs none.
 """
 
 import os
@@ -77,7 +52,7 @@ from collections import defaultdict
 # ============================ CONFIGURATION ============================
 # ---------------------------------------------------------------------
 # Layout settings come from wj_config.py, which both this script and
-# wabbajack_archive_sorter_v2.py import. They used to be duplicated here and
+# wj_sorter.py import. They used to be duplicated here and
 # there: editing one copy and forgetting the other left the downloader writing
 # into one directory tree while the sorter moved files out of another, with
 # both reporting success. Edit wj_config.py.
@@ -93,7 +68,7 @@ except ImportError:
 # The downloader doubles as the shared library: manifest parsing and the
 # light cache live there, so every tool reads a manifest the same way and
 # reads it once.
-import wabbajack_archive_downloader as WJ
+import wj_downloader as WJ
 
 ARCHIVE_ROOT = CFG.resolved_archive_root()
 GAME_FOLDERS = CFG.GAME_FOLDERS
@@ -187,7 +162,7 @@ def banner(title):
 def acquire_pool_lock(script_dir):
     """Best-effort exclusive lock over the archive pools.
 
-    This script relocates files while wabbajack_archive_downloader.py may be
+    This script relocates files while wj_downloader.py may be
     writing them. Serialising the two avoids a move landing on a file that is
     still being written. A filesystem that cannot lock (SMB sometimes cannot)
     is reported and the run continues - the lock is a guard rail, not a
@@ -459,7 +434,7 @@ def build_disk_index(search_locations, protected_names):
                 continue  # meta sidecars travel with their parent file
             if low.endswith(".part"):
                 # An in-flight (or failed-and-resumable) download from
-                # wabbajack_archive_downloader.py. No modlist demands a file by
+                # wj_downloader.py. No modlist demands a file by
                 # this name, so indexing it would park it in Master and destroy
                 # the resume progress. Leave it exactly where it is.
                 continue

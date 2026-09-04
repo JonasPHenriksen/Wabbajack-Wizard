@@ -41,7 +41,7 @@ print("\n 7.1  staging must take the build the TARGET asked for")
 s = two_lists()
 s.pool_file(G, "Shared", "shared.7z", 111)     # ListB's build - wrong for ListA
 s.pool_file(G, "ListB", "shared.7z", 200)      # ListA's build - right one
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListA", "--yes"], expect=0)
 hits = dict(s.where("shared.7z"))
 check("ListA receives the 200-byte build it asked for",
@@ -54,7 +54,7 @@ print("\n 7.2  and the same in reverse, so it is not passing by luck")
 s = two_lists()
 s.pool_file(G, "Shared", "shared.7z", 200)     # ListA's build
 s.pool_file(G, "ListA", "shared.7z", 111)      # ListB's build, misfiled
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListB", "--yes"], expect=0)
 hits = dict(s.where("shared.7z"))
 check("ListB receives the 111-byte build it asked for",
@@ -67,7 +67,7 @@ print("\n 7.3  duplicates are reported, not passed over in silence")
 s = two_lists()
 s.pool_file(G, "Shared", "shared.7z", 111)
 s.pool_file(G, "ListB", "shared.7z", 200)
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListA", "--yes", "--dry-run"], expect=0)
 check("the run says a name exists in more than one place",
       "more than one location" in out)
@@ -77,14 +77,14 @@ check("  and lists where", out.count("shared.7z") >= 2)
 print("\n 7.4  the downloader must not call a foreign build 'present'")
 s = two_lists()
 s.pool_file(G, "ListB", "shared.7z", 111)      # only ListB's build exists
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "ListA", "--dry-run", "--yes"], expect=0)
 plan = (out.split("FILES THAT WOULD BE DOWNLOADED", 1)[1]
         .split("[DRY-RUN COMPLETE]", 1)[0]
         if "FILES THAT WOULD BE DOWNLOADED" in out else "")
 check("ListA still needs its own build of shared.7z", "shared.7z" in plan,
       plan.strip()[:200])
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "ListB", "--dry-run", "--yes"], expect=0)
 plan = (out.split("FILES THAT WOULD BE DOWNLOADED", 1)[1]
         .split("[DRY-RUN COMPLETE]", 1)[0]

@@ -1,0 +1,28 @@
+{
+  "ARCHIVE_ROOT": "../Mod Archive",
+  "MANIFEST_DIR": "modlists",
+  "GAME_FOLDERS": {
+    "SkyrimSpecialEdition": "Skyrim",
+    "Skyrim": "Skyrim",
+    "SkyrimVR": "Skyrim",
+    "EnderalSpecialEdition": "Skyrim",
+    "Enderal": "Skyrim"
+  },
+  "GAME_DISPLAY": {},
+  "EXCLUDE_POOL_DIRS": ["nolvus"],
+  "UNMANAGED_FOLDER": "Unmanaged",
+  "TRASH_FOLDER": "Trash",
+  "TRASH_KEEP_DAYS": 30,
+  "WABBAJACK_DIR": null,
+  "INSTALL_MODE": "cli",
+  "AUTO_TRACK": true,
+  "EXCLUDE": [],
+  "TRACK": [],
+  "STAGE_LIST": null,
+  "NEXUS_MODE": "assist",
+  "KEEP_BACKUP_DAYS": 14,
+  "REQUIRE_HASH": true,
+  "DOWNLOAD_ORDER": "smallest",
+  "FREE_SPACE_MARGIN_GB": 20,
+  "NOTIFY_URL": null
+}

@@ -145,7 +145,13 @@ import wj_wizard as W
 buf = io.StringIO()
 real_out = W.out
 W.out = lambda msg="": buf.write(str(msg) + "\n")
-# A Skyrim list, whose game Wabbajack cannot find on this machine.
+# A Skyrim list, against a stubbed Wabbajack install whose detected games
+# (set in 9.3) do not include it. Stubbed, so this does not depend on which
+# games THIS machine has, nor run the real list-games probe, which scans
+# every store and can take minutes.
+real_find = WB.find_wabbajack
+WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None,
+                                       "cli": "stub", "version": "9.9"}
 st = {"game": "SkyrimSpecialEdition", "missing": 5, "bytes": 1234,
       "present": 10, "nexus": 5, "direct": 0, "stale": 0, "gamefile": 0,
       "other": 0, "nexus_bytes": 1234, "direct_bytes": 0}
@@ -153,6 +159,7 @@ try:
     res = W.offer_install({}, "Some_@@_list.wabbajack", st)
 finally:
     W.out = real_out
+    WB.find_wabbajack = real_find
 text = buf.getvalue()
 check("it does not claim to have installed anything", res is False)
 check("it shows the two paths it would have used",

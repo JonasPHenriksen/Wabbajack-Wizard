@@ -1,10 +1,11 @@
-# Wabbajack modlist tooling
+# Wabbajack Wizard
 
 Tracks published Wabbajack modlists, fetches their manifests and archives, and
 organises the archives into per-game pools so Wabbajack can install any one of
 them without re-downloading what is already on disk.
 
-Runs on Windows against the mapped share.
+Runs on Windows against the mapped share. MIT licensed; the version history
+is in `CHANGELOG.md`.
 
 ## The layout everything serves
 
@@ -43,14 +44,23 @@ matched to its published list — exactly, with no guessing from titles.
 
 ```
 setup_env.bat        once, creates .venv-win and installs xxhash
-run.bat              the interactive manager
+run.bat              opens the window
+run.bat --wizard     the same five stages in the console
 ```
 
-## The interactive manager
+Settings are optional: copy `wj_settings.example.json` to `wj_settings.json`
+and change what differs, or use the window's Settings tab. Without it the
+defaults in `wj_config.py` apply.
 
-`run.bat` with no arguments walks five stages. Each shows what it can currently
-see, then offers **skip**, **all**, or **some** (`1,3,5-7`). Stages are
-independent — skipping one does not affect the others.
+## The window, and the console wizard
+
+`run.bat` opens a window with a tab per stage and a log pane below; `run.bat
+--wizard` walks the same five stages in the console, each showing what it can
+see and offering **skip**, **all**, or **some** (`1,3,5-7`). The two front
+ends drive the same functions in `wj_wizard.py`, so they cannot drift apart;
+every job in the window runs on a worker thread with its output streaming
+into the log pane, and anything destructive asks first in the same words the
+console uses. Stages are independent: skipping one does not affect the others.
 
 1. **Browse** — every modlist published for a game you keep archives for, and
    how much of each one is already in your pools, sorted most-complete first.
@@ -291,6 +301,7 @@ duplicate being hashed before it goes.
 Any action flag skips the wizard:
 
 ```
+run.bat --gui                         the window, from a console
 run.bat --gallery                     summarise the published gallery
 run.bat --gallery --sync-reports      refresh the validation-report cache
 run.bat --check                       report what has updates, change nothing
@@ -307,27 +318,37 @@ Exit codes: `0` clean, `1` finished with problems, `2` could not start,
 
 ## Configuration
 
-At the top of `wj_autoupdate.py`:
+Every setting has a default in `wj_config.py` and can be overridden in
+**`wj_settings.json`** beside it: your file, which the GUI's Settings tab writes
+and a code update never touches. Copy `wj_settings.example.json` to start; only
+the keys you change need to be in it. A dict setting (`GAME_FOLDERS`,
+`GAME_DISPLAY`) is merged over its default; every other setting replaces it. A
+bad value is reported at start-up and its default used, never fatal.
 
-| setting | meaning |
-| --- | --- |
-| `NEXUS_MODE` | `assist` opens each Nexus page for a click; `skip` leaves them to Wabbajack |
-| `STAGE_LIST` | which list a non-interactive run stages; `--only` overrides it |
-| `EXCLUDE` | lists to ignore, by feed key or filename stem |
-| `REQUIRE_HASH` | refuse to run rather than silently degrade to size-only checks |
-| `KEEP_BACKUP_DAYS` | how long superseded manifests are kept |
-| `DOWNLOAD_ORDER` | `smallest` (default), `largest`, or `manifest` — see below |
+| setting | default | meaning |
+| --- | --- | --- |
+| `ARCHIVE_ROOT` | `../Mod Archive` | where the per-game pools live; a relative path is resolved against the tools folder |
+| `MANIFEST_DIR` | `modlists` | where the `.wabbajack` manifests live |
+| `GAME_FOLDERS` | the Skyrim family, all to `Skyrim` | GameType to pool folder, for games that share one or whose folder is not named after them |
+| `GAME_DISPLAY` | | friendly names for menus; an unknown game shows its GameType |
+| `EXCLUDE_POOL_DIRS` | `nolvus` | folders under a game root that belong to another installer: never indexed, moved or deleted |
+| `UNMANAGED_FOLDER` | `Unmanaged` | where stage 5b parks folders that are not ours |
+| `TRASH_FOLDER`, `TRASH_KEEP_DAYS` | `Trash`, 30 | where stage 5c puts what it reclaims, and how long before it is purged |
+| `WABBAJACK_DIR` | `null` | where Wabbajack is installed; `null` auto-detects |
+| `INSTALL_MODE` | `cli` | how a staged list is handed over: `cli`, `gui`, or `off` |
+| `AUTO_TRACK` | `true` | match every manifest in the folder against the feeds automatically |
+| `EXCLUDE`, `TRACK` | `[]` | lists to leave alone, and pins for lists auto-matching cannot resolve |
+| `STAGE_LIST` | `null` | which list a scheduled run stages; `--only` overrides it |
+| `NEXUS_MODE` | `skip` | `assist` opens each Nexus page for a click; `skip` leaves them to Wabbajack |
+| `KEEP_BACKUP_DAYS` | 14 | how long superseded manifests are kept |
+| `REQUIRE_HASH` | `true` | refuse to run rather than silently degrade to size-only checks |
+| `DOWNLOAD_ORDER` | `smallest` | `smallest`, `largest`, or `manifest`; see below |
+| `FREE_SPACE_MARGIN_GB` | 20 | refuse a download batch that would leave less than this free |
+| `NOTIFY_URL` | `null` | an ntfy topic or Discord webhook for a scheduled run's report |
 
-The archive layout lives in **`wj_config.py`** — `ARCHIVE_ROOT`,
-`GAME_FOLDERS`, `GAME_DISPLAY`, `POOL_FOLDERS`, `EXCLUDE_POOL_DIRS`,
-`UNMANAGED_FOLDER`, `TRASH_FOLDER` and `TRASH_KEEP_DAYS` — along with
-`WABBAJACK_DIR` (where Wabbajack is; `None` auto-detects) and `INSTALL_MODE`
-(`cli`, `gui`, or `off`; see below). Both the downloader and the sorter import
-it, so there is one place to edit. A start-up
-check still compares the two, because the downloader decides where an archive is
-written and the sorter decides where it is moved to: a local override re-added
-to one of them would send every run across two directory trees while both
-reported success.
+The downloader decides where an archive is written and the sorter decides where
+it is moved to, so both read the layout from the same module, and a start-up
+check still confirms they agree.
 
 ## Nexus accounts
 
@@ -413,7 +434,7 @@ quickly, an interruption costs the least, and the long tail of small mods is out
 of the way before a multi-gigabyte download monopolises the session. In practice
 that runs from a few hundred bytes up to a few gigabytes.
 
-`DOWNLOAD_ORDER` in `wabbajack_archive_downloader.py` (or `--order` for one run)
+`DOWNLOAD_ORDER` in `wj_settings.json` (or `--order` for one run)
 takes `smallest`, `largest`, or `manifest`. Archives whose manifest states no
 size always go last, whichever order is chosen: there is nowhere sensible to put
 them. `nexus_todo_<list>.csv` follows the same order, so it can be worked through
@@ -444,14 +465,16 @@ recognised (if unfetchable) source rather than "unknown".
 
 | file | role |
 | --- | --- |
-| `wj_config.py` | the archive layout, and the naming rules the rest share: reserved names, the `~N` suffix, which GameTypes share a folder |
+| `wj_config.py` | every setting's default, the archive layout, and the naming rules the rest share: reserved names, the `~N` suffix, which GameTypes share a folder |
+| `wj_settings.json` | your settings; `wj_settings.example.json` documents every key |
 | `wj_wabbajack.py` | finding Wabbajack, the preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_gallery.py` | the published gallery and its validation reports: what exists, and how much of it you hold |
-| `wj_wizard.py` | the interactive five-stage front end |
-| `wabbajack_archive_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
-| `wabbajack_archive_sorter_v2.py` | moves archives between pools |
-| `wabbajack_cdn.py` | the Wabbajack CDN's multi-part protocol |
+| `wj_gui.py` | the desktop window: a tab per stage, a log pane, a Settings tab |
+| `wj_wizard.py` | the console wizard, and the per-stage helpers both front ends share |
+| `wj_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
+| `wj_sorter.py` | moves archives between pools |
+| `wj_cdn.py` | the Wabbajack CDN's multi-part protocol |
 | `wj_merge_pool.py` | folds one game's pool folder into another's, once: renames, hash-proven drops, a record |
 
 ## Tests
@@ -460,7 +483,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-654 checks across fourteen suites. None of them touch the live archive pools:
+698 checks across fifteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -483,6 +506,7 @@ exactly the failure they want to check.
 | `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, and the refusal to delete on an incomplete picture |
 | `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row record, the un-staging warning, hash-proven duplicates, the trash and its purge, stale CSVs, waiting for Wabbajack |
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
+| `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the

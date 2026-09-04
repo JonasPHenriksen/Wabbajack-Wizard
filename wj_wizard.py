@@ -1215,6 +1215,19 @@ def stage_updates(state, tracked):
         out("  Not enough free space. Skipping this stage.")
         return False
 
+    done = fetch_updates(state, want)
+    out()
+    out(f"  {done} of {len(want)} manifest(s) updated.")
+    return done > 0
+
+
+# ----------------------------------------------------------------------
+# The work each stage does, apart from the asking. Both front ends - this
+# console wizard and the desktop window - call these, so they cannot drift.
+# ----------------------------------------------------------------------
+def fetch_updates(state, want):
+    """Fetch each (key, entry, prev, filename) in `want`. Returns how many
+    landed. State is saved after each, so a crash loses nothing done."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     done = 0
     for key, ent, prev, filename in want:
@@ -1225,7 +1238,7 @@ def stage_updates(state, tracked):
                 "version": ent["version"], "hash": ent["hash"],
                 "file": filename, "title": ent["title"],
                 "updated": ent["updated"], "applied": now,
-                # A new manifest almost always wants new archives. Stage 2
+                # A new manifest almost always wants new archives. Stage 3
                 # measures it properly; this only ensures it is looked at.
                 "needs_archives": True,
             }
@@ -1233,9 +1246,143 @@ def stage_updates(state, tracked):
             done += 1
         else:
             out("    Failed. Your existing copy is untouched.")
-    out()
-    out(f"  {done} of {len(want)} manifest(s) updated.")
-    return done > 0
+    return done
+
+
+def download_list(records, fn, st, assist):
+    """Run the downloader for one list. Returns (ran, rc, status_after)."""
+    base, _, _ = A.WJ.resolve_game_dirs(st["game"])
+    if not A.free_space_ok(base, st["bytes"]):
+        out("  Not enough free space for this list. Skipping it.")
+        return False, None, st
+    flag = ["--nxm-assist"] if assist else ["--skip-nexus"]
+    if A.DOWNLOAD_ORDER:
+        flag += ["--order", A.DOWNLOAD_ORDER]
+    rc = A.run_script(A.DOWNLOADER_SCRIPT,
+                      ["--game", st["game"], "--list", stem_of(fn), "--yes"] + flag,
+                      "downloader", interactive=assist)
+    A.WJ.invalidate_existing_cache()
+    after = list_status(records[fn]) or st
+    if after["missing"]:
+        out(f"  {after['missing']} archive(s) still missing "
+            f"({human(after['bytes'])}). Re-run to continue.")
+    else:
+        out("  Complete.")
+    if rc not in (0, 1):
+        out(f"  The downloader exited {rc}; see the log.")
+    return True, rc, after
+
+
+def stage_list(state, fn, st):
+    """Run the sorter to gather one list, and remember that it is staged.
+    Returns the sorter's exit code. The caller checks for Wabbajack first."""
+    rc = A.run_script(A.SORTER_SCRIPT,
+                      ["--game", st["game"], "--list", stem_of(fn), "--yes"],
+                      "sorter")
+    out(f"  Sorter exited {rc}.")
+    if rc == 0 and state is not None:
+        # Remember which list this folder's pools are arranged for, so stage
+        # 5 can say so before a rebuild undoes it.
+        state.setdefault("staged", {})[A.WJ.folder_key(st["game"])] = stem_of(fn)
+        A.save_state(state)
+        A.WJ.invalidate_existing_cache()
+    return rc
+
+
+def delete_modlists(state, records, chosen):
+    """Delete the chosen modlists (rows from gather_space), then rebuild each
+    affected game's pools. Returns (failed_rebuilds, archives_moved,
+    manifest_bytes_freed). The caller confirms, and checks for Wabbajack."""
+    folders = {}
+    for x in chosen:
+        if x["game"]:
+            folders.setdefault(A.WJ.folder_key(x["game"]), x["game"])
+    # What the SURVIVING lists want, so that a build one of them needs
+    # keeps its name when it lands in Master beside a different build.
+    survivors = {fn: e for fn, e in records.items()
+                 if fn not in {x["file"] for x in chosen}}
+    total_moved = total_freed = 0
+    for x in chosen:
+        out(f"  Deleting {stem_of(x['file'])}...")
+        keep = wanted_builds(survivors, x["game"]) if x["game"] else None
+        moved, redundant, freed = delete_modlist(state, x, keep=keep)
+        total_moved += moved
+        total_freed += freed
+        out(f"    {moved} archive(s) moved to Master, "
+            f"{redundant} redundant copy(ies) removed, "
+            f"manifest freed {human(freed)}")
+    A.save_state(state)
+    refresh_known_dirs()
+    out(f"  Manifests freed {human(total_freed)}; "
+        f"{total_moved} archive(s) now sit in Master.")
+
+    # Rebuild the pools so Master holds only what nothing needs. Without
+    # this, 5c would be choosing from a Master that still contains other
+    # lists' archives. A rebuild that fails leaves exactly that Master, so
+    # it is remembered and 5c refuses to offer it.
+    failed_rebuilds = {}
+    for fkey, game in sorted(folders.items()):
+        out(f"  Rebuilding {A.WJ.game_label(game)} pools so nothing still "
+            f"needed is left in Master...")
+        rc = A.run_script(A.SORTER_SCRIPT,
+                          ["--game", game, "--cleanup-only", "--yes"],
+                          "sorter")
+        (state.get("staged") or {}).pop(fkey, None)
+        if rc != 0:
+            failed_rebuilds[fkey] = rc
+            out(f"  The rebuild for {A.WJ.game_label(game)} FAILED (sorter "
+                f"exited {rc}). Its Master may still hold archives other")
+            out("  lists need, so it will not be offered for clearing in "
+                "5c. See the sorter log.")
+    A.save_state(state)
+    A.WJ.invalidate_existing_cache()
+    return failed_rebuilds, total_moved, total_freed
+
+
+def master_refusals(records, failed_rebuilds):
+    """Why stage 5c must not offer some, or any, Master.
+
+    Returns (unreadable, blocked): the unreadable manifests, which disarm
+    every Master because they do not even say which game they belong to; and
+    {folder key: reason} for folders whose demand cannot be trusted or whose
+    rebuild failed."""
+    unreadable, empty = demand_problems(records)
+    blocked = {}
+    for fkey, rc in failed_rebuilds.items():
+        blocked[fkey] = (f"its rebuild failed (sorter exited {rc}), so Master "
+                         f"may still hold archives other lists need")
+    for fkey, fns in empty.items():
+        blocked.setdefault(fkey, (f"{', '.join(fns)} lists no archives at "
+                                  f"all, which no real modlist does, so its "
+                                  f"demand is unknown"))
+    return unreadable, blocked
+
+
+def clear_masters(records, chosen, mode, wide_want):
+    """Clear Master for each chosen master row, under `mode` ("y" or "a").
+    Returns the bytes moved to the trash. The caller confirms, and checks
+    for Wabbajack."""
+    rule_name = "any known modlist" if mode == "a" else "your modlists only"
+    grand = 0
+    for m in chosen:
+        game = m["game"]
+        # Recomputed here rather than reused from the table: a cleanup pass
+        # may have moved files since, and the whole point of this map is
+        # that it is current.
+        keep = wanted_builds(records, game)
+        if mode == "a":
+            keep = merge_want(keep, wide_want)
+        out(f"  Clearing Master for {m['label']} "
+            f"({len(keep)} archive name(s) wanted and protected)...")
+        record = DeletionRecord(game, rule_name, m["path"])
+        deleted, kept, freed = clear_master(game, keep, on_delete=record.note)
+        rec = record.close()
+        grand += freed
+        out(f"    {len(deleted)} file(s) moved to Trash ({human(freed)}); "
+            f"kept {kept} still wanted")
+        if rec:
+            out(f"    record: {os.path.basename(rec)}")
+    return grand
 
 
 # ----------------------------------------------------------------------
@@ -1313,26 +1460,8 @@ def stage_incomplete(records, assist):
         out(f"  [{n}/{len(want)}]  {stem_of(fn)}   "
             f"{st['missing']} archive(s), {human(st['bytes'])}")
         rule()
-        base, _, _ = A.WJ.resolve_game_dirs(st["game"])
-        if not A.free_space_ok(base, st["bytes"]):
-            out("  Not enough free space for this list. Skipping it.")
-            continue
-        flag = ["--nxm-assist"] if assist else ["--skip-nexus"]
-        if A.DOWNLOAD_ORDER:
-            flag += ["--order", A.DOWNLOAD_ORDER]
-        rc = A.run_script(A.DOWNLOADER_SCRIPT,
-                          ["--game", st["game"], "--list", stem_of(fn), "--yes"] + flag,
-                          "downloader", interactive=assist)
-        any_done = True
-        A.WJ.invalidate_existing_cache()
-        after = list_status(records[fn])
-        if after and after["missing"]:
-            out(f"  {after['missing']} archive(s) still missing "
-                f"({human(after['bytes'])}). Re-run to continue.")
-        else:
-            out("  Complete.")
-        if rc not in (0, 1):
-            out(f"  The downloader exited {rc}; see the log.")
+        ran, _rc, _after = download_list(records, fn, st, assist)
+        any_done = any_done or ran
         # One list at a time, on purpose: a long click session is unstable
         # enough without the next one starting behind it.
         if n < len(want):
@@ -1383,16 +1512,8 @@ def stage_prepare(records, state=None):
         out(f"  Note: {st['missing']} archive(s) are still missing, so this")
         out("  prepares what you have. Wabbajack will ask for the rest.")
     wait_for_wabbajack("Staging")
-    rc = A.run_script(A.SORTER_SCRIPT,
-                      ["--game", st["game"], "--list", stem_of(fn), "--yes"],
-                      "sorter")
-    out(f"  Sorter exited {rc}.")
+    rc = stage_list(state, fn, st)
     if rc == 0 and state is not None:
-        # Remember which list this folder's pools are arranged for, so stage
-        # 5 can say so before a rebuild undoes it.
-        state.setdefault("staged", {})[A.WJ.folder_key(st["game"])] = stem_of(fn)
-        A.save_state(state)
-        A.WJ.invalidate_existing_cache()
         fresh = list_status(records[fn]) or st
         offer_install(state, fn, fresh)
     return rc == 0
@@ -2135,44 +2256,9 @@ def stage_space(state, records):
             break
 
         wait_for_wabbajack("Deleting a modlist")
-        # What the SURVIVING lists want, so that a build one of them needs
-        # keeps its name when it lands in Master beside a different build.
-        survivors = {fn: e for fn, e in records.items()
-                     if fn not in {x["file"] for x in chosen}}
-        total_moved = total_freed = 0
-        for x in chosen:
-            out(f"  Deleting {stem_of(x['file'])}...")
-            keep = wanted_builds(survivors, x["game"]) if x["game"] else None
-            moved, redundant, freed = delete_modlist(state, x, keep=keep)
-            total_moved += moved
-            total_freed += freed
-            out(f"    {moved} archive(s) moved to Master, "
-                f"{redundant} redundant copy(ies) removed, "
-                f"manifest freed {human(freed)}")
-        A.save_state(state)
+        failed, _moved, _freed = delete_modlists(state, records, chosen)
+        failed_rebuilds.update(failed)
         deleted_any = True
-        refresh_known_dirs()
-        out(f"  Manifests freed {human(total_freed)}; "
-            f"{total_moved} archive(s) now sit in Master.")
-
-        # Rebuild the pools so Master holds only what nothing needs. Without
-        # this, 5c would be choosing from a Master that still contains other
-        # lists' archives. A rebuild that fails leaves exactly that Master,
-        # so it is remembered and 5c refuses to offer it.
-        for fkey, game in sorted(folders.items()):
-            out(f"  Rebuilding {A.WJ.game_label(game)} pools so nothing still "
-                f"needed is left in Master...")
-            rc = A.run_script(A.SORTER_SCRIPT,
-                              ["--game", game, "--cleanup-only", "--yes"],
-                              "sorter")
-            (state.get("staged") or {}).pop(fkey, None)
-            if rc != 0:
-                failed_rebuilds[fkey] = rc
-                out(f"  The rebuild for {A.WJ.game_label(game)} FAILED (sorter "
-                    f"exited {rc}). Its Master may still hold archives other")
-                out("  lists need, so it will not be offered for clearing in "
-                    "5c. See the sorter log.")
-        A.save_state(state)
         break
 
     if deleted_any:
@@ -2240,7 +2326,7 @@ def clear_master_step(records, masters, failed_rebuilds):
     # manifests want, so a manifest whose demand cannot be trusted disarms
     # this step - for its own game, or for every game when it is not even
     # readable enough to say which game it belongs to.
-    unreadable, empty = demand_problems(records)
+    unreadable, blocked = master_refusals(records, failed_rebuilds)
     if unreadable:
         out()
         out(f"  Not clearing any Master: {len(unreadable)} manifest(s) could "
@@ -2250,14 +2336,6 @@ def clear_master_step(records, masters, failed_rebuilds):
         out("  not even say which game's Master it would have protected.")
         out("  Re-download or remove it, then run this stage again.")
         return deleted_any
-    blocked = {}
-    for fkey, rc in failed_rebuilds.items():
-        blocked[fkey] = (f"its rebuild failed (sorter exited {rc}), so Master "
-                         f"may still hold archives other lists need")
-    for fkey, fns in empty.items():
-        blocked.setdefault(fkey, (f"{', '.join(fns)} lists no archives at "
-                                  f"all, which no real modlist does, so its "
-                                  f"demand is unknown"))
     if blocked:
         out()
         for m in masters:
@@ -2393,26 +2471,7 @@ def clear_master_step(records, masters, failed_rebuilds):
             return deleted_any
 
         wait_for_wabbajack("Clearing Master")
-        grand = 0
-        for m in chosen:
-            game = m["game"]
-            # Recomputed here rather than reused from the table: a cleanup pass
-            # may have moved files since, and the whole point of this map is
-            # that it is current.
-            keep = wanted_builds(records, game)
-            if mode == "a":
-                keep = merge_want(keep, wide_want)
-            out(f"  Clearing Master for {m['label']} "
-                f"({len(keep)} archive name(s) wanted and protected)...")
-            record = DeletionRecord(game, rule_name, m["path"])
-            deleted, kept, freed = clear_master(game, keep,
-                                                on_delete=record.note)
-            rec = record.close()
-            grand += freed
-            out(f"    {len(deleted)} file(s) moved to Trash ({human(freed)}); "
-                f"kept {kept} still wanted")
-            if rec:
-                out(f"    record: {os.path.basename(rec)}")
+        grand = clear_masters(records, chosen, mode, wide_want)
         out()
         out(f"  {human(grand)} moved to Trash in total. It is purged after "
             f"{keep_days()} days, or now in 5d.")

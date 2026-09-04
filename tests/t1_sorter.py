@@ -45,7 +45,7 @@ for kind, label in (("notzip", "not a zip"),
     s = fresh()
     s.manifest("Broken", G, [], corrupt=kind)
     before = s.files()
-    rc, out = s.run("wabbajack_archive_sorter_v2.py",
+    rc, out = s.run("wj_sorter.py",
                     ["--game", G, "--list", "ListA", "--yes"], expect=2)
     check("aborts on %-20s (exit 2)" % label, rc == 2)
     check("  and moved no file at all", s.files() == before)
@@ -56,7 +56,7 @@ print("\n 1.2  a modlist named after a reserved pool folder must abort")
 s = fresh()
 s.manifest("Master", G, [("m1.7z", 10, "nexus")])
 before = s.files()
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListA", "--yes"], expect=1)
 check("aborts when a list is called 'Master'", rc == 1)
 check("  and moved nothing", s.files() == before)
@@ -65,7 +65,7 @@ check("  and explained why", "reserved" in out.lower())
 # ---------------------------------------------------------------- 1.3
 print("\n 1.3  cleanup pass: demand decides where each archive lives")
 s = fresh()
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--cleanup-only", "--yes"], expect=0)
 check("cleanup exits 0", rc == 0)
 check("shared.7z (2 lists want it) -> Shared",
@@ -84,7 +84,7 @@ check("Nolvus not even scanned", "Nolvus" not in out.split("DISK SCAN")[-1]
 
 # ---------------------------------------------------------------- 1.4
 print("\n 1.4  staging gathers what the target needs into its folder")
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListA", "--yes"], expect=0)
 check("staging exits 0", rc == 0)
 check("shared.7z pulled out of Shared into ListA",
@@ -101,7 +101,7 @@ s = fresh()
 os.remove(os.path.join(s.archives, G, "ListA", "shared.7z"))
 s.pool_file(G, "ListA", "shared.7z", 111)      # wrong: manifest says 200
 s.pool_file(G, "Shared", "shared.7z", 200)     # right
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListA", "--yes"], expect=0)
 hits = dict(s.where("shared.7z"))
 check("the 200-byte copy ends up in ListA", hits.get("ListA") == 200, str(hits))
@@ -116,7 +116,7 @@ check("conflict was reported", "CONFLICT" in out.upper())
 print("\n 1.6  dry-run must move nothing whatsoever")
 s = fresh()
 before = s.files()
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListA", "--yes", "--dry-run"],
                 expect=0)
 check("dry-run exits 0", rc == 0)
@@ -127,10 +127,10 @@ check("dry-run still printed a plan", "move(s)" in out)
 print("\n 1.7  bad --list / --game are refused, not guessed at")
 s = fresh()
 before = s.files()
-rc, _o = s.run("wabbajack_archive_sorter_v2.py",
+rc, _o = s.run("wj_sorter.py",
                ["--game", G, "--list", "NoSuchList", "--yes"], expect=2)
 check("unknown --list exits 2", rc == 2)
-rc, _o = s.run("wabbajack_archive_sorter_v2.py",
+rc, _o = s.run("wj_sorter.py",
                ["--game", "NoSuchGame", "--list", "ListA", "--yes"], expect=2)
 check("unknown --game exits 2", rc == 2)
 check("nothing moved by either", s.files() == before)
@@ -138,10 +138,10 @@ check("nothing moved by either", s.files() == before)
 # ---------------------------------------------------------------- 1.8
 print("\n 1.8  a list can be selected by name OR by menu number")
 s = fresh()
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "1", "--yes", "--dry-run"], expect=0)
 check("numeric --list still works (back-compat)", rc == 0)
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "listb", "--yes", "--dry-run"],
                 expect=0)
 check("--list is case-insensitive by name", rc == 0 and "ListB" in out)
@@ -154,7 +154,7 @@ s.pool_file(G, "Master", "shared.7z", 111)          # wrong build, real name
 s.pool_file(G, "Master", "shared~1.7z", 200)        # ListA's build, parked
 s.pool_file(G, "Master", "shared~1.7z.meta", 9)
 s.pool_file(G, "Master", "orphan~2.7z", 5)          # nobody's, parked
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListA", "--yes"], expect=0)
 hits = dict(s.where("shared.7z"))
 check("ListA receives the parked build under the manifest's name",
@@ -175,7 +175,7 @@ s.manifest("LE", "Skyrim", [("le.7z", 20, "nexus"), ("both.7z", 30, "nexus")])
 s.pool_file("Skyrim", "SE", "se.7z", 10)
 s.pool_file("Skyrim", "SE", "both.7z", 30)
 s.pool_file("Skyrim", "LE", "le.7z", 20)
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", "SkyrimSpecialEdition", "--cleanup-only", "--yes"],
                 expect=0)
 check("cleanup for SE counts the LE list's demand",
@@ -189,7 +189,7 @@ print("\n 1.11  an in-scope manifest that wants nothing stops the run")
 s = fresh()
 s.manifest("Hollow", G, [])
 before = s.files()
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--list", "ListA", "--yes"], expect=2)
 check("exit 2", rc == 2)
 check("  naming the manifest", "Hollow" in out and "no archives" in out)
@@ -200,7 +200,7 @@ print("\n 1.12  identical extra copies settle in ONE cleanup pass")
 s = fresh()
 s.pool_file(G, "Shared", "a1.7z", 100)        # a second, identical a1.7z
 s.pool_file(G, "ListB", "shared.7z", 200)     # ListB holds its own copy of the shared build
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--cleanup-only", "--yes"], expect=0)
 check("the placed copy of a1.7z stays in ListA and the identical extra is parked in Master",
       s.where("a1.7z") == [("ListA", 100), ("Master", 100)], str(s.where("a1.7z")))
@@ -212,7 +212,7 @@ check("  which the log calls a redundant copy", "redundant copy" in out)
 print("\n      copies of OTHER sizes are not touched")
 s = fresh()
 s.pool_file(G, "ListB", "a1.7z", 111)         # a different build nobody wants
-rc, out = s.run("wabbajack_archive_sorter_v2.py",
+rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--cleanup-only", "--yes"], expect=0)
 check("a different-size copy stays where it was",
       s.where("a1.7z") == [("ListA", 100), ("ListB", 111)], str(s.where("a1.7z")))
@@ -220,13 +220,13 @@ check("a different-size copy stays where it was",
 # ---------------------------------------------------------------- 1.13
 print("\n 1.13  manifests are read once, then served from the shared cache")
 s = fresh()
-rc, out1 = s.run("wabbajack_archive_sorter_v2.py",
+rc, out1 = s.run("wj_sorter.py",
                  ["--game", G, "--cleanup-only", "--yes", "--dry-run"], expect=0)
 check("the first run parses every manifest", "2 manifest(s); 0 read from the cache" in out1,
       str([l for l in out1.split(chr(10)) if "manifest(s);" in l]))
 check("  and writes the cache beside the scripts",
       os.path.isfile(os.path.join(s.tools, "wj_manifest_cache.json")))
-rc, out2 = s.run("wabbajack_archive_sorter_v2.py",
+rc, out2 = s.run("wj_sorter.py",
                  ["--game", G, "--cleanup-only", "--yes", "--dry-run"], expect=0)
 check("the second run opens no manifest at all", "2 manifest(s); 2 read from the cache" in out2,
       str([l for l in out2.split(chr(10)) if "manifest(s);" in l]))

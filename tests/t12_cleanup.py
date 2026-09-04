@@ -77,7 +77,7 @@ wire(box)
 box.manifest("Target", GAME, [("parked.7z", 500, "nexus")])
 A.WJ.set_known_list_dirs(A.WJ.known_list_dirs_from(box.manifests))
 box.pool_file(GAME, CFG.UNMANAGED_FOLDER, "parked.7z", 500)
-rc, out = box.run("wabbajack_archive_downloader.py",
+rc, out = box.run("wj_downloader.py",
                   ["--game", GAME, "--list", "Target", "--dry-run", "--yes"],
                   expect=0)
 check("a file in Unmanaged does NOT count as already downloaded",
@@ -86,7 +86,7 @@ check("a file in Unmanaged does NOT count as already downloaded",
 check("  and the store is named as skipped, not as a foreign installer",
       "unmanaged store" in out.lower(), out.strip()[-200:])
 
-rc, sout = box.run("wabbajack_archive_sorter_v2.py",
+rc, sout = box.run("wj_sorter.py",
                    ["--game", GAME, "--cleanup-only", "--yes", "--dry-run"],
                    expect=0)
 check("the sorter never indexes Unmanaged",
@@ -100,7 +100,7 @@ print("\n      a modlist may not claim a reserved pool name")
 box2 = Sandbox(BOX + "r")
 A.WJ.set_known_list_dirs(None)
 box2.manifest(CFG.UNMANAGED_FOLDER, GAME, [("a.7z", 10, "nexus")])
-rc, out2 = box2.run("wabbajack_archive_sorter_v2.py",
+rc, out2 = box2.run("wj_sorter.py",
                     ["--game", GAME, "--cleanup-only", "--yes"], expect=1)
 check("a list called Unmanaged is refused outright",
       "clashes with a reserved pool folder name" in out2, out2.strip()[-200:])

@@ -147,8 +147,8 @@ box.manifest("ListA", G, [("a1.7z", 100, "nexus")])
 # wj_autoupdate SETS WJ_MANIFEST_DIR for its children; the guard against a
 # bad value lives in the two scripts that READ it.
 bogus = {"WJ_MANIFEST_DIR": os.path.join(box.tools, "does-not-exist")}
-for script in ("wabbajack_archive_downloader.py",
-               "wabbajack_archive_sorter_v2.py"):
+for script in ("wj_downloader.py",
+               "wj_sorter.py"):
     rc, out = box.run(script, ["--game", G, "--list", "ListA", "--dry-run",
                                "--yes"], env_extra=bogus)
     check("%-34s refuses a bad WJ_MANIFEST_DIR" % script.split("_")[-1], rc == 2,
@@ -159,7 +159,7 @@ for script in ("wabbajack_archive_downloader.py",
 # GAME_FOLDERS disagreeing between the two scripts. Both now take it from
 # wj_config.py, so the way it can still go wrong is a local override added
 # back into one of them - which is exactly what the check exists to catch.
-sp = os.path.join(box.tools, "wabbajack_archive_sorter_v2.py")
+sp = os.path.join(box.tools, "wj_sorter.py")
 s = io.open(sp, encoding="utf-8").read()
 anchor = "MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR"
 assert anchor in s, "config import block not found in the sorter"
@@ -170,7 +170,7 @@ io.open(sp, "w", encoding="utf-8", newline="").write(
 rc, out = box.run("wj_autoupdate.py", ["--check", "--nexus-mode", "skip"])
 check("mismatched GAME_FOLDERS stops the run", rc == 2, "exit %d" % rc)
 check("  and names the setting", "GAME_FOLDERS" in out)
-shutil.copy2(os.path.join(REPO, "wabbajack_archive_sorter_v2.py"), sp)
+shutil.copy2(os.path.join(REPO, "wj_sorter.py"), sp)
 
 # xxhash missing -> refuse rather than silently weaken verification
 sysver = None

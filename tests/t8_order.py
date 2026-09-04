@@ -12,7 +12,7 @@ from harness import Sandbox, check, summary
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import logging
-import wabbajack_archive_downloader as D
+import wj_downloader as D
 D.LOG.setLevel(logging.CRITICAL)
 
 BOX = os.path.join(BOXROOT, "sb8")
@@ -78,7 +78,7 @@ def listed(out):
     return re.findall(r"\[(?:nexus|http|wabbajackcdn|mediafire)\]\s+(\S+)", body)
 
 
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "ListA", "--dry-run", "--yes",
                  "--order", "smallest"], expect=0)
 names = listed(out)
@@ -88,7 +88,7 @@ nex = [n for n in names if n in ("huge.7z", "tiny.7z", "medium.7z")]
 check("Nexus files ascending by size",
       nex == ["tiny.7z", "medium.7z", "huge.7z"], str(names))
 
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "ListA", "--dry-run", "--yes",
                  "--order", "largest"], expect=0)
 names = listed(out)
@@ -97,7 +97,7 @@ check("largest first is honoured",
       nex == ["huge.7z", "medium.7z", "tiny.7z"], str(names))
 check("  and reported", "largest first" in out)
 
-rc, out = s.run("wabbajack_archive_downloader.py",
+rc, out = s.run("wj_downloader.py",
                 ["--game", G, "--list", "ListA", "--dry-run", "--yes",
                  "--order", "manifest"], expect=0)
 names = listed(out)

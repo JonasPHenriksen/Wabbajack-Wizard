@@ -11,6 +11,10 @@ lib-win/
 __pycache__/
 *.pyc
 
+# Your settings. wj_settings.example.json is the documented template; this
+# is your copy of it and stays local.
+wj_settings.json
+
 # ---------------------------------------------------------------------
 # Secrets. Never commit.
 # ---------------------------------------------------------------------
@@ -28,6 +32,9 @@ wj_manifest_cache.json
 .nxm_listener_port
 .nxm_prev_handler
 nxm_captured.txt
+
+# Release builds, made by release.py from what git tracks.
+dist/
 
 # Pre-change copies kept locally for rollback.
 .orig_backup_*/

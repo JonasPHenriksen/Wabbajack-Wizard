@@ -53,9 +53,9 @@ except ImportError:
                      "scripts. It defines ARCHIVE_ROOT and is not optional.\n")
     raise SystemExit(2)
 
-import wabbajack_archive_downloader as WJ
+import wj_downloader as WJ
 import wj_autoupdate as A
-from wabbajack_archive_sorter_v2 import unique_path
+from wj_sorter import unique_path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = CFG.resolved_archive_root()

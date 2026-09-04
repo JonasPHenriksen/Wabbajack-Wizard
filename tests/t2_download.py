@@ -19,7 +19,7 @@ sys.path.insert(0, REPO)
 os.chdir(REPO)
 from harness import check, summary
 import logging
-import wabbajack_archive_downloader as D
+import wj_downloader as D
 D.LOG.setLevel(logging.CRITICAL)
 
 TMP = os.path.join(os.environ["TEMP"], "wj_t2")

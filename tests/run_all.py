@@ -29,6 +29,7 @@ SUITES = [
     ("t12_cleanup.py", "deleting what nothing wants; folders that are not ours"),
     ("t13_delete.py", "stage 5 end to end: what a deletion must never take"),
     ("t14_merge.py", "folding one game folder into another"),
+    ("t15_gui.py", "the desktop window, driven through its own buttons"),
 ]
 
 total_pass = total_fail = 0
@@ -38,8 +39,11 @@ for script, blurb in SUITES:
     print("#" * 72)
     print("#  %s  -  %s" % (script, blurb))
     print("#" * 72)
+    # stdin closed: a suite that reaches an input() prompt by mistake must
+    # fail at once, not wait forever on a stdin the runner inherited.
     proc = subprocess.run([sys.executable, os.path.join(HERE, script)],
-                          capture_output=True, text=True, errors="replace")
+                          capture_output=True, text=True, errors="replace",
+                          stdin=subprocess.DEVNULL)
     out = proc.stdout + proc.stderr
     print(out.rstrip())
     for line in out.split("\n"):

@@ -19,7 +19,7 @@ sys.path.insert(0, REPO)
 os.chdir(REPO)
 from harness import check, summary
 import logging
-import wabbajack_cdn as C
+import wj_cdn as C
 C.LOG.setLevel(logging.CRITICAL)
 
 TMP = os.path.join(os.environ["TEMP"], "wj_t3")
@@ -246,7 +246,7 @@ check("the refusal keeps the detail= contract", r == (False, None), str(r))
 
 # ---------------------------------------------------------------- 3.11
 print("\n 3.11  a CDN archive is verified against the MANIFEST, not just the CDN")
-import wabbajack_archive_downloader as D
+import wj_downloader as D
 D.LOG.setLevel(logging.CRITICAL)
 reset()
 p = clean("arch.bin")

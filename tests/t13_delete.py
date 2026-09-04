@@ -150,7 +150,7 @@ check("A's own archive went to Master too", m.get("only-a.7z") == 10, str(m))
 check("A's folder is gone", not os.path.isdir(os.path.join(box.archives, GAME, "A")))
 
 print("\n      the rebuild then hands B the right build")
-rc, out = box.run("wabbajack_archive_sorter_v2.py",
+rc, out = box.run("wj_sorter.py",
                   ["--game", GAME, "--cleanup-only", "--yes"], expect=0)
 check("cleanup exits 0", rc == 0)
 check("B receives shared.7z at 200 bytes",
@@ -194,7 +194,7 @@ check("the downloader's index files the suffixed copy under the real name",
 hit, why = A.WJ.present_match(idx, {"name": "syn.zip", "size": 200})
 check("  so L's build counts as present (%s)" % why, bool(hit))
 
-rc, out = box.run("wabbajack_archive_sorter_v2.py",
+rc, out = box.run("wj_sorter.py",
                   ["--game", GAME, "--list", "L", "--yes"], expect=0)
 check("staging L exits 0", rc == 0)
 hits = dict(box.where("syn.zip"))
@@ -232,7 +232,7 @@ for nm in ("Shared", CFG.UNMANAGED_FOLDER, "Nolvus"):
     check("'%s' is a reserved name too" % nm, nm.lower() in A.WJ.reserved_list_names())
 
 print("\n      the downloader refuses to download INTO a pool")
-rc, out = box.run("wabbajack_archive_downloader.py",
+rc, out = box.run("wj_downloader.py",
                   ["--game", GAME, "--list", "Master", "--dry-run", "--yes"],
                   expect=2)
 check("--list Master exits 2", rc == 2)
@@ -340,13 +340,13 @@ box.manifest("Empty", GAME, [])
 box.manifest("OtherEmpty", "Morrowind", [])
 box.pool_file(GAME, "Fine", "f.7z", 1)
 before = box.files()
-rc, out = box.run("wabbajack_archive_sorter_v2.py",
+rc, out = box.run("wj_sorter.py",
                   ["--game", GAME, "--cleanup-only", "--yes"], expect=2)
 check("exit 2 with an empty in-scope manifest", rc == 2)
 check("  naming it", "Empty" in out and "no archives" in out, out.strip()[-200:])
 check("  and moving nothing", box.files() == before)
 os.remove(os.path.join(box.manifests, "Empty.wabbajack"))
-rc, out = box.run("wabbajack_archive_sorter_v2.py",
+rc, out = box.run("wj_sorter.py",
                   ["--game", GAME, "--cleanup-only", "--yes"], expect=0)
 check("an empty list for ANOTHER game does not block this one", rc == 0)
 
@@ -386,7 +386,7 @@ box.manifest("SE", "SkyrimSpecialEdition", [("se.7z", 10, "nexus")])
 box.manifest("LE", "Skyrim", [("le.7z", 20, "nexus")])
 box.pool_file("Skyrim", "SE", "se.7z", 10)
 box.pool_file("Skyrim", "LE", "le.7z", 20)
-rc, out = box.run("wabbajack_archive_sorter_v2.py",
+rc, out = box.run("wj_sorter.py",
                   ["--game", "SkyrimSpecialEdition", "--cleanup-only", "--yes"],
                   expect=0)
 check("cleanup for SE leaves the LE list's archive in ITS folder",

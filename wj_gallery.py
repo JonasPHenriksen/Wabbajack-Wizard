@@ -67,7 +67,7 @@ INDEX_TTL = 6 * 3600
 REPORT_TTL = 14 * 86400
 
 HTTP_TIMEOUT = 60
-USER_AGENT = "WJAutoUpdate/1.0"
+USER_AGENT = CFG.USER_AGENT if CFG is not None else "WabbajackWizard"
 WORKERS = 8
 # =======================================================================
 

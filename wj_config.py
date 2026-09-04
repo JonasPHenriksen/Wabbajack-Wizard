@@ -4,8 +4,8 @@ Shared layout configuration
 ===========================
 The one place the archive layout is defined.
 
-wabbajack_archive_downloader.py decides where an archive is WRITTEN, and
-wabbajack_archive_sorter_v2.py decides where it is MOVED TO. When each carried
+wj_downloader.py decides where an archive is WRITTEN, and
+wj_sorter.py decides where it is MOVED TO. When each carried
 its own copy of these settings, editing one and forgetting the other meant the
 two worked on different directory trees while both reported success - the sort
 of fault that is cheap to prevent and miserable to diagnose. A start-up check
@@ -15,10 +15,23 @@ source rather than to each other.
 Edit this file, not the scripts.
 """
 
+import copy
+import json
 import os
 import re
 
+__version__ = "1.0.0"
+APP_NAME = "WabbajackWizard"
+USER_AGENT = f"{APP_NAME}/{__version__}"
+
 # ============================ CONFIGURATION ============================
+# Everything in this block is a DEFAULT. Your own values go in
+# wj_settings.json beside this file, which the GUI's Settings tab writes and
+# a code update never touches. A dict setting (GAME_FOLDERS, GAME_DISPLAY)
+# is merged over its default; every other setting replaces its default.
+# wj_settings.example.json shows every key with its default value.
+SETTINGS_FILE = "wj_settings.json"
+
 # Where every game's archive pools live.
 #
 # A relative path is resolved against THIS FILE's folder, never the working
@@ -37,22 +50,20 @@ ARCHIVE_ROOT = "../Mod Archive"
 #   folder_key() below.
 #
 #   Enderal is a total conversion running on Skyrim's engine, and its lists
-#   are mostly Skyrim mods: of the two Enderal SE lists held here, three
-#   quarters of the Nexus files come from the Skyrim SE Nexus, and its own
-#   pool held 332 archives (31 GB) that the Skyrim pool already had.
-#   wj_merge_pool.py folds an existing folder into the shared one.
+#   are mostly Skyrim mods: of two Enderal SE lists measured, three quarters
+#   of the Nexus files came from the Skyrim SE Nexus. wj_merge_pool.py folds
+#   an existing folder into a shared one.
 #
-#   DarkSouls3 points at an existing folder that predates this tooling. Without
-#   the entry a Dark Souls 3 list would create a fresh "DarkSouls3" folder and
-#   orphan the one already on the share. Inert if the GameType turns out to be
-#   spelled differently.
+#   To point a game at a folder whose name is not its GameType - a folder
+#   that predates this tooling, say - add an entry in wj_settings.json:
+#       "GAME_FOLDERS": {"DarkSouls3": "DARK SOULS 3"}
+#   It is merged over this default. Inert if the GameType never appears.
 GAME_FOLDERS = {
     "SkyrimSpecialEdition":  "Skyrim",
     "Skyrim":                "Skyrim",
     "SkyrimVR":              "Skyrim",
     "EnderalSpecialEdition": "Skyrim",
     "Enderal":               "Skyrim",
-    "DarkSouls3":            "DARK SOULS 3",
 }
 
 # Cosmetic only: friendly labels for menus and tables. An unknown game falls
@@ -122,7 +133,191 @@ WABBAJACK_DIR = None
 #   "gui" - open the Wabbajack window and print the two paths to paste.
 #   "off" - do not offer to install at all.
 INSTALL_MODE = "cli"
+
+# ---- What to follow, and how to fetch -----------------------------------
+# Every .wabbajack in the manifest folder is matched against the published
+# feeds on first sight and the match is cached, so adding a list is a matter
+# of dropping the file in. Set False to follow only what TRACK pins.
+AUTO_TRACK = True
+
+# Where the .wabbajack manifests live. Not an absolute path? Then relative to
+# the tools folder. "modlists" is the recommended arrangement; a pattern with
+# "*" follows Wabbajack's own versioned downloaded_mod_lists folder, though a
+# Wabbajack upgrade creates a fresh empty one, which then looks like every
+# manifest went missing. Owning your own folder avoids that.
+MANIFEST_DIR = "modlists"
+
+# Lists to leave alone, by feed key ("LoreRim/LoreRim") or filename stem,
+# case-insensitively. A .wabbajack can be several GB, so every list followed
+# costs real bandwidth.
+EXCLUDE = []
+
+# Pins, as "<repo>/<machineURL>", for a list auto-matching cannot resolve.
+TRACK = []
+
+# Which list a scheduled (non-interactive) run stages at the end: a filename
+# stem, or None for whichever list updated most recently. One list per run,
+# because staging a second undoes the first.
+STAGE_LIST = None
+
+# Nexus archives: "skip" leaves them to Wabbajack, and is the only mode that
+# works unattended. "assist" opens each mod's page in your browser and
+# captures your click - the same one click per file Wabbajack asks of a free
+# account, driven from here so the files land in the pools.
+NEXUS_MODE = "skip"
+
+# Superseded manifests are kept this long for a rollback, then pruned. They
+# are multi-GB each.
+KEEP_BACKUP_DAYS = 14
+
+# Refuse to run without xxhash rather than quietly degrade to size checks.
+# --allow-size-only overrides for one run.
+REQUIRE_HASH = True
+
+# Order archives are fetched in: "smallest" first finishes the most files
+# soonest and loses the least to an interruption; "largest"; or "manifest",
+# the list's own arbitrary order. Unknown sizes always go last.
+DOWNLOAD_ORDER = "smallest"
+
+# Refuse to start a download batch that would leave less than this free.
+FREE_SPACE_MARGIN_GB = 20
+
+# An ntfy topic URL or Discord webhook URL for a scheduled run's report. None
+# disables.
+NOTIFY_URL = None
 # =======================================================================
+
+# The settings above that wj_settings.json may override, in the order the
+# Settings tab shows them.
+USER_SETTINGS = (
+    "ARCHIVE_ROOT", "MANIFEST_DIR", "GAME_FOLDERS", "GAME_DISPLAY",
+    "EXCLUDE_POOL_DIRS", "UNMANAGED_FOLDER", "TRASH_FOLDER", "TRASH_KEEP_DAYS",
+    "WABBAJACK_DIR", "INSTALL_MODE", "AUTO_TRACK", "EXCLUDE", "TRACK",
+    "STAGE_LIST", "NEXUS_MODE", "KEEP_BACKUP_DAYS", "REQUIRE_HASH",
+    "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "NOTIFY_URL",
+)
+_DEFAULTS = {k: copy.deepcopy(globals()[k]) for k in USER_SETTINGS}
+# Anything wrong with wj_settings.json, in words. Never fatal: a bad value
+# is reported and its default used, because refusing to start over a typo in
+# a settings file would leave the tool unusable until the file was fixed by
+# hand, with nothing to say what was wrong.
+SETTINGS_PROBLEMS = []
+
+CHOICES = {
+    "INSTALL_MODE": ("cli", "gui", "off"),
+    "NEXUS_MODE": ("skip", "assist"),
+    "DOWNLOAD_ORDER": ("smallest", "largest", "manifest"),
+}
+
+
+def settings_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), SETTINGS_FILE)
+
+
+def defaults():
+    """The shipped defaults, as a fresh copy."""
+    return copy.deepcopy(_DEFAULTS)
+
+
+def current_settings():
+    """Every user setting as it stands right now."""
+    return {k: copy.deepcopy(globals()[k]) for k in USER_SETTINGS}
+
+
+def apply_settings(values):
+    """Set the module's settings from a dict. Returns a list of problems;
+    a setting with a problem keeps its current value."""
+    problems = []
+    g = globals()
+    for key, value in values.items():
+        if key not in USER_SETTINGS:
+            problems.append(f"{key}: not a setting, ignored")
+            continue
+        default = _DEFAULTS[key]
+        if isinstance(default, dict):
+            if not isinstance(value, dict):
+                problems.append(f"{key}: expected an object, kept the default")
+                continue
+            merged = dict(default)
+            merged.update({str(k): str(v) for k, v in value.items()})
+            g[key] = merged
+        elif isinstance(default, (set, frozenset)):
+            if not isinstance(value, (list, tuple, set)):
+                problems.append(f"{key}: expected a list, kept the default")
+                continue
+            g[key] = {str(v).lower() for v in value}
+        elif isinstance(default, list):
+            if not isinstance(value, list):
+                problems.append(f"{key}: expected a list, kept the default")
+                continue
+            g[key] = [str(v) for v in value]
+        elif isinstance(default, bool):
+            if not isinstance(value, bool):
+                problems.append(f"{key}: expected true or false, kept the default")
+                continue
+            g[key] = value
+        elif isinstance(default, int):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                problems.append(f"{key}: expected a whole number, kept the default")
+                continue
+            g[key] = value
+        else:                                   # a string, or None
+            if value is not None and not isinstance(value, str):
+                problems.append(f"{key}: expected text, kept the default")
+                continue
+            if key in CHOICES and value not in CHOICES[key]:
+                problems.append(f"{key}: must be one of {', '.join(CHOICES[key])}, "
+                                f"kept the default")
+                continue
+            g[key] = value
+    return problems
+
+
+def load_settings(path=None):
+    """Overlay wj_settings.json onto the defaults. Returns (values, problems)."""
+    p = path or settings_path()
+    if not os.path.isfile(p):
+        return {}, []
+    try:
+        with open(p, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        return {}, [f"{os.path.basename(p)} could not be read ({e}); defaults in use"]
+    if not isinstance(data, dict):
+        return {}, [f"{os.path.basename(p)} is not a JSON object; defaults in use"]
+    return data, apply_settings(data)
+
+
+def save_settings(values, path=None):
+    """Write the given settings to wj_settings.json and apply them.
+
+    Only keys that differ from the shipped default are written, so the file
+    stays a short list of your choices rather than a copy of every default,
+    and a later change to a default reaches you unless you overrode it."""
+    p = path or settings_path()
+    out = {}
+    for key in USER_SETTINGS:
+        if key not in values:
+            continue
+        v = values[key]
+        if isinstance(v, (set, frozenset)):
+            v = sorted(v)
+        d = _DEFAULTS[key]
+        if v == (sorted(d) if isinstance(d, (set, frozenset)) else d):
+            continue
+        out[key] = v
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, p)
+    # Reset to defaults first, so a key removed from the file goes back to
+    # its default rather than lingering at the old value.
+    apply_settings(_DEFAULTS)
+    return p, apply_settings(out)
+
+
+_LOADED, SETTINGS_PROBLEMS = load_settings()
 
 
 def looks_absolute(path):

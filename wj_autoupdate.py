@@ -2,7 +2,7 @@
 """
 Wabbajack Modlist Auto-Updater
 ==============================
-Front-end for wabbajack_archive_downloader.py and wabbajack_archive_sorter_v2.py.
+Front-end for wj_downloader.py and wj_sorter.py.
 Runs on Windows against the mapped share. You launch it; it does the rest in
 one pass.
 
@@ -66,84 +66,46 @@ import urllib.request
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 
+try:
+    import wj_config as CFG
+except ImportError:
+    sys.stderr.write("wj_config.py is missing from the folder holding these scripts. "
+                     "It defines the archive layout and every setting, and is not "
+                     "optional." + chr(10))
+    raise SystemExit(2)
+
+
 # ============================ CONFIGURATION ============================
 
 # The two existing scripts. They must sit next to this file, which is also
 # where the .wabbajack manifests live.
-DOWNLOADER_SCRIPT = "wabbajack_archive_downloader.py"
-SORTER_SCRIPT     = "wabbajack_archive_sorter_v2.py"
+DOWNLOADER_SCRIPT = "wj_downloader.py"
+SORTER_SCRIPT     = "wj_sorter.py"
 
 # ARCHIVE_ROOT is NOT configured here. The archive layout - ARCHIVE_ROOT, the
 # game folders, the pool names, the excluded folders - lives in wj_config.py,
 # which the downloader, the sorter and the wizard all import. Edit it there.
 # On Linux use the local mount path, not the //server/share SMB path.
 
-# Which lists to follow.
-#
-# AUTO_TRACK = True is the zero-config default: every .wabbajack in this folder
-# is matched against the published feeds automatically. The resolved mapping is
-# cached in the state file, so the full feed scan only happens when a file turns
-# up that has not been resolved before. Drop a new .wabbajack in the folder and
-# it gets picked up on the next run; no config edit needed.
-AUTO_TRACK = True
+# Every user setting lives in wj_config.py, with its default, and in
+# wj_settings.json beside it with your overrides. They are copied here so the
+# rest of this module, and the wizard, keep reading them as module attributes;
+# reload_settings() refreshes the copies after the GUI saves the file.
+AUTO_TRACK = CFG.AUTO_TRACK
+MANIFEST_DIR = CFG.MANIFEST_DIR
+EXCLUDE = list(CFG.EXCLUDE)
+TRACK = list(CFG.TRACK)
+STAGE_LIST = CFG.STAGE_LIST
+NEXUS_MODE = CFG.NEXUS_MODE
+KEEP_BACKUP_DAYS = CFG.KEEP_BACKUP_DAYS
+REQUIRE_HASH = CFG.REQUIRE_HASH
+DOWNLOAD_ORDER = CFG.DOWNLOAD_ORDER
+FREE_SPACE_MARGIN_GB = CFG.FREE_SPACE_MARGIN_GB
+NOTIFY_URL = CFG.NOTIFY_URL
 
-# Where the .wabbajack manifests live. This is deliberately separate from where
-# the scripts live, so the tooling can sit in its own folder and keep its
-# bookkeeping out of Wabbajack's directories.
-#
-# Anything that is not an absolute path is resolved against THIS SCRIPT's
-# folder, never the working directory, so the whole tree can be copied around
-# or reached through a different drive letter or a UNC path and still work.
-#
-#   None                                 -> the folder this script is in
-#   "modlists"                           -> a subfolder of it       (recommended)
-#   r"..\Wabbajack\*\downloaded_mod_lists" -> sibling of the tools folder, globbed
-#   r"Z:\Wabbajack_Tools\modlists"       -> absolute, if you prefer to pin it
-#
-# A relative folder that lives inside the script's own folder is created if
-# missing. Anything outside it must already exist, so a typo is reported rather
-# than silently turned into an empty directory.
-#
-# The glob form follows Wabbajack's versioned folder. Note that a Wabbajack
-# upgrade creates a fresh, EMPTY downloaded_mod_lists, at which point every
-# manifest looks missing and gets re-downloaded. Owning your own folder avoids
-# that entirely.
-MANIFEST_DIR = "modlists"
-
-# Lists to leave alone, matched against either the feed key or the .wabbajack
-# filename (without extension), case-insensitively. Useful when the folder holds
-# more lists than you actually install: a .wabbajack can be several GB on its
-# own, so every list you follow costs real bandwidth.
-#     EXCLUDE = ["LoreRim/LoreRim", "ForgottenGlory_@@_masterstroke"]
-EXCLUDE = []
-
-# Optional pins, as "<repo>/<machineURL>". Only needed for a list that
-# auto-matching cannot resolve, which it will tell you about. Anything listed
-# here is followed regardless.
-TRACK = []
-
-# Which list the sorter should stage at the end of a run.
-#   None -> stage whichever tracked list was updated most recently this run.
-#   "Name" -> always stage this one (the .wabbajack filename without extension).
-# Only one list can be staged per run: the sorter gathers everything that list
-# needs into its folder, so staging a second list would immediately undo the
-# first. Pick the list you actually install from.
-STAGE_LIST = "SkrubbySkrubInAShrub_@@_NordicSoulsPBR"
-
-# How to handle the Nexus archives.
-#   "skip"   -> do not touch Nexus at all. Wabbajack fetches them itself later.
-#               The simplest option, and the only one for an unattended run.
-#   "assist" -> hand them to your downloader's --nxm-assist mode, which opens
-#               each mod page in turn and captures your click. Needs a browser
-#               and a real console. Still one click per file: this is the same
-#               manual step Wabbajack would ask of you, just driven by your
-#               script instead.
-NEXUS_MODE = "assist"
-
-# The sorter skips "*.part" when indexing (change 1 in its own docstring), so a
-# leftover part file from an interrupted download is left where it is and its
-# resume progress survives. This flag stays only as an escape hatch if you ever
-# swap in an older sorter that lacks that behaviour.
+# The sorter skips "*.part" when indexing, so a leftover part file from an
+# interrupted download is left where it is and its resume progress survives.
+# This flag stays only as an escape hatch for an older sorter.
 SORTER_IGNORES_PART = True
 
 # How long to remember that a local .wabbajack matched no published list before
@@ -152,32 +114,12 @@ SORTER_IGNORES_PART = True
 # a modlist from tracking for good.
 NEGATIVE_MATCH_TTL_DAYS = 14
 
-# Superseded manifests are parked in manifest_backups. They are multi-GB each,
-# so keep them only long enough to be useful for a rollback.
-KEEP_BACKUP_DAYS = 14
-
-# Refuse to run when 'xxhash' is missing, rather than silently falling back to
-# comparing sizes. Same reasoning as the downloader's own REQUIRE_HASH.
-REQUIRE_HASH = True
-
-# Order archives are fetched in; see DOWNLOAD_ORDER in the downloader.
-# None leaves the downloader's own default alone.
-DOWNLOAD_ORDER = None            # None | "smallest" | "largest" | "manifest"
-
-# Refuse to start a download batch that would leave less than this much free.
-FREE_SPACE_MARGIN_GB = 20
-
-# Notification target. ntfy topic URL or a Discord webhook URL. None disables.
-#   NOTIFY_URL = "https://ntfy.sh/some-long-random-topic-name"
-#   NOTIFY_URL = "https://discord.com/api/webhooks/..."
-NOTIFY_URL = None
-
 # Wabbajack's registry of metadata feeds.
 REPOSITORIES_URL = ("https://raw.githubusercontent.com/wabbajack-tools/"
                     "mod-lists/master/repositories.json")
 
 HTTP_TIMEOUT = 30
-USER_AGENT   = "WJAutoUpdate/1.0"
+USER_AGENT   = CFG.USER_AGENT
 STATE_FILE   = "wj_autoupdate_state.json"
 LOCK_FILE    = ".wj_autoupdate.lock"
 # =======================================================================
@@ -194,7 +136,7 @@ BACKUPS = HERE            # where superseded/rejected manifests are parked
 # are served as a definition plus numbered parts, not as a plain file, so a
 # straight GET returns a ~1 KB error page.
 try:
-    import wabbajack_cdn as CDN
+    import wj_cdn as CDN
     _HAVE_CDN = True
 except Exception:
     CDN = None
@@ -228,7 +170,7 @@ def setup_logging(verbose=False):
     except OSError as e:
         LOG.warning("[WARN] Could not open log file: %s", e)
 
-    # wabbajack_cdn logs to its own logger, which has no handler of its own.
+    # wj_cdn logs to its own logger, which has no handler of its own.
     # Without this its messages reach nothing but logging.lastResort on stderr,
     # so the log file records "Manifest download failed" with no cause - the
     # single most useful line (an HTTP 404 on the CDN definition, say) is the
@@ -720,7 +662,7 @@ def safe_filename(title):
 # Manifest download
 # ----------------------------------------------------------------------
 def CDN_LOOKS_NEEDED(url):
-    """Cheap host check used only to give a clear error when wabbajack_cdn.py
+    """Cheap host check used only to give a clear error when wj_cdn.py
     is absent."""
     return isinstance(url, str) and (
         "wabbajack.org" in url or "b-cdn.net" in url)
@@ -784,7 +726,7 @@ def fetch_manifest(entry, filename):
                                     expected_hash=entry["hash"], detail=True)
     else:
         if not _HAVE_CDN and CDN_LOOKS_NEEDED(url):
-            LOG.error("  [ERROR] %s is a Wabbajack CDN URL but wabbajack_cdn.py "
+            LOG.error("  [ERROR] %s is a Wabbajack CDN URL but wj_cdn.py "
                       "is missing from %s. Put it next to this script.",
                       filename, HERE)
             return False
@@ -1071,6 +1013,28 @@ def write_nexus_todo(record, nexus_items):
 # ----------------------------------------------------------------------
 # Driving the two existing scripts
 # ----------------------------------------------------------------------
+def reload_settings():
+    """Re-copy every user setting from wj_config after wj_settings.json changed.
+
+    The GUI's Settings tab saves the file and calls this, so the change takes
+    effect in the running process rather than after a restart. The downloader
+    module reads wj_config directly and needs no copy."""
+    global AUTO_TRACK, MANIFEST_DIR, EXCLUDE, TRACK, STAGE_LIST, NEXUS_MODE
+    global KEEP_BACKUP_DAYS, REQUIRE_HASH, DOWNLOAD_ORDER, FREE_SPACE_MARGIN_GB
+    global NOTIFY_URL
+    AUTO_TRACK = CFG.AUTO_TRACK
+    MANIFEST_DIR = CFG.MANIFEST_DIR
+    EXCLUDE = list(CFG.EXCLUDE)
+    TRACK = list(CFG.TRACK)
+    STAGE_LIST = CFG.STAGE_LIST
+    NEXUS_MODE = CFG.NEXUS_MODE
+    KEEP_BACKUP_DAYS = CFG.KEEP_BACKUP_DAYS
+    REQUIRE_HASH = CFG.REQUIRE_HASH
+    DOWNLOAD_ORDER = CFG.DOWNLOAD_ORDER
+    FREE_SPACE_MARGIN_GB = CFG.FREE_SPACE_MARGIN_GB
+    NOTIFY_URL = CFG.NOTIFY_URL
+
+
 def wabbajack_busy():
     """Is a Wabbajack process running? False when that cannot be checked."""
     try:
@@ -1089,6 +1053,17 @@ def child_flags(args):
     return flags
 
 
+# Set by the GUI: a callable handed each line a child script prints, so its
+# progress shows in the window as it happens. None means the console
+# behaviour below.
+OUTPUT_HOOK = None
+
+
+def set_output_hook(fn):
+    global OUTPUT_HOOK
+    OUTPUT_HOOK = fn
+
+
 def run_script(script, args, label, interactive=False):
     """Run one of the existing scripts.
 
@@ -1097,9 +1072,14 @@ def run_script(script, args, label, interactive=False):
     waits on your clicks. Everything else is captured to a file.
 
     Their stdout carries \\r-based progress bars that would otherwise pile up
-    in the systemd journal as enormous single lines, so it goes to a file
+    in a scheduler's journal as enormous single lines, so it goes to a file
     instead. Both scripts already write their own timestamped logs next to
-    themselves, so nothing is lost; we tail this capture only on failure."""
+    themselves, so nothing is lost; we tail this capture only on failure.
+
+    With OUTPUT_HOOK set, the child's output is streamed line by line to the
+    hook instead, carriage returns included as line breaks, and stdin is
+    closed: the GUI has no console to hand over, and neither child needs one
+    when its flags and the API key file answer every question."""
     cmd = [sys.executable, os.path.join(HERE, script)] + args
     LOG.info("\n$ %s", " ".join(cmd))
     # The child scripts default to scanning their own folder for manifests;
@@ -1107,6 +1087,21 @@ def run_script(script, args, label, interactive=False):
     env = dict(os.environ, PYTHONUNBUFFERED="1", WJ_MANIFEST_DIR=MANIFESTS,
                WJ_LOCK_HELD="1")
     cap = os.path.join(HERE, f"wj_autoupdate_{label}.out")
+    if OUTPUT_HOOK is not None:
+        try:
+            proc = subprocess.Popen(cmd, cwd=HERE, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, errors="replace", bufsize=1)
+        except OSError as e:
+            LOG.error("[ERROR] Could not launch %s: %s", script, e)
+            return 127
+        with proc:
+            for raw in proc.stdout:
+                for piece in raw.replace("\r", "\n").split("\n"):
+                    if piece.strip():
+                        OUTPUT_HOOK(piece)
+        LOG.info("%s exited with %d", label, proc.returncode)
+        return proc.returncode
     try:
         if interactive:
             rc = subprocess.run(cmd, cwd=HERE, env=env, check=False).returncode
@@ -1146,8 +1141,13 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
     if nexus_mode:
         NEXUS_MODE = nexus_mode
 
-    LOG.info("Wabbajack auto-updater  %s",
+    LOG.info("Wabbajack Wizard %s  %s", CFG.__version__,
              datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    LOG.info("Settings:       %s",
+             ("%s (%d override(s))" % (CFG.SETTINGS_FILE, len(CFG._LOADED)))
+             if CFG._LOADED else "defaults (no %s)" % CFG.SETTINGS_FILE)
+    for problem in CFG.SETTINGS_PROBLEMS:
+        LOG.warning("[WARN] %s: %s", CFG.SETTINGS_FILE, problem)
     if not check_script_consistency():
         return 2
     if not resolve_dirs():
@@ -1363,7 +1363,7 @@ def cmd_selftest():
 
     # -- 5. a CDN definition -------------------------------------------
     if not _HAVE_CDN:
-        verdict("wabbajack_cdn.py is present", False, "manifests cannot be fetched")
+        verdict("wj_cdn.py is present", False, "manifests cannot be fetched")
     elif feeds:
         cdn_entry = next((e for e in feeds.values()
                           if e["download"] and CDN.is_cdn_url(e["download"])), None)
@@ -2122,12 +2122,15 @@ def main():
     ap.add_argument("--no-lock", action="store_true",
                     help="Skip the single-instance lock. Use if a stale lock on "
                          "a network share is blocking you.")
+    ap.add_argument("--gui", action="store_true",
+                    help="Open the desktop window. This is what run.bat does "
+                         "with no arguments.")
     ap.add_argument("--wizard", action="store_true",
-                    help="Interactive mode: walk the five stages (browse the "
-                         "gallery, updates, incomplete lists, prepare one for "
-                         "install, disk space) showing status and offering "
-                         "skip / all / some at each. This is what a bare "
-                         "launch does.")
+                    help="Interactive console mode: walk the five stages "
+                         "(browse the gallery, updates, incomplete lists, "
+                         "prepare one for install, disk space) showing status "
+                         "and offering skip / all / some at each. This is what "
+                         "a bare launch of this script does.")
     ap.add_argument("--nexus-mode", choices=("skip", "assist"),
                     help="Override NEXUS_MODE for this run. 'assist' opens each "
                          "Nexus page and waits for your click (needs you at the "
@@ -2153,6 +2156,11 @@ def main():
     actions = (args.check, args.discover, args.only, args.force, args.dry_run,
                args.no_download, args.no_sort, args.rediscover, args.selftest,
                args.gallery, args.sync_reports)
+    if args.gui:
+        import wj_gui
+        return wj_gui.main(nexus_mode=args.nexus_mode,
+                           allow_size_only=args.allow_size_only,
+                           no_lock=args.no_lock, verbose=args.verbose)
     if args.wizard or not any(actions):
         import wj_wizard
         return wj_wizard.run(verbose=args.verbose, nexus_mode=args.nexus_mode,
