@@ -20,7 +20,7 @@ import json
 import os
 import re
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 APP_NAME = "WabbajackWizard"
 USER_AGENT = f"{APP_NAME}/{__version__}"
 
@@ -84,6 +84,21 @@ GAME_DISPLAY = {
     "Cyberpunk2077":         "Cyberpunk 2077",
     "Witcher3":              "The Witcher 3",
     "DarkSouls3":            "Dark Souls III",
+    # The rest of what the gallery publishes. Naming a game here is what folds
+    # the feeds' inconsistent case onto one spelling, so 'starfield' and
+    # 'Starfield' are one game in a menu rather than two.
+    "Starfield":             "Starfield",
+    "Fallout4VR":            "Fallout 4 VR",
+    "OblivionRemastered":    "Oblivion Remastered",
+    "DragonAgeOrigins":      "Dragon Age: Origins",
+    "DragonsDogma":          "Dragon's Dogma",
+    "Dishonored":            "Dishonored",
+    "NoMansSky":             "No Man's Sky",
+    "NierAutomata":          "Nier: Automata",
+    "SevenDaysToDie":        "7 Days to Die",
+    "MountAndBlade2Bannerlord": "Mount & Blade II: Bannerlord",
+    "VampireTheMasqueradeBloodlines": "Vampire: The Masquerade - Bloodlines",
+    "VTMB":                  "Vampire: The Masquerade - Bloodlines",
 }
 
 # Pool sub-folders that sit alongside the per-list folders under each game.

@@ -304,6 +304,141 @@ check("a second job cannot start while one runs",
       (app.run_job("Slow", lambda: time.sleep(0.5)) is True) and (app.run_job("Two", lambda: 1) is False))
 settle()
 
+# ---------------------------------------------------------------- 15.9
+print("\n 15.9  browsing a game you keep no archives for, and giving it a pool")
+
+
+class Ask:
+    """The folder prompt. Answers whatever the test set, and remembers."""
+
+    def __init__(self):
+        self.answer = None
+        self.prompts = []
+
+    def askstring(self, title="", prompt="", **k):
+        self.prompts.append(prompt)
+        return self.answer
+
+
+ASK = Ask()
+GUI.simpledialog = ASK
+
+for key, machine, title, game in (("r/star", "star", "Star List", "starfield"),
+                                  ("r/obl", "obl", "Obl List", "oblivion")):
+    A._FEED_CACHE["all"][key] = dict(feed, key=key, machine=machine, title=title,
+                                     game=game, archives=2, arch_size=500)
+G._write_cache(G.report_rel("r/star"), json.dumps(
+    {"MachineURL": "star", "Name": "Star List", "Version": "1.0", "Status": "Available",
+     "Failures": 0, "Archives": [
+         {"Status": "Valid", "Original": {"Name": "s1.7z", "Size": 100, "Hash": "A=", "Meta": "",
+                                          "State": {"$type": "NexusDownloader, Wabbajack.Lib"}}},
+         {"Status": "Valid", "Original": {"Name": "s2.7z", "Size": 400, "Hash": "B=", "Meta": "",
+                                          "State": {"$type": "NexusDownloader, Wabbajack.Lib"}}}]}).encode())
+
+app.browse_all.set(False)
+app.browse_load()
+settle()
+check("games with no pool are hidden by default",
+      list(app.browse["gameinfo"]) == ["fallout4"], str(list(app.browse["gameinfo"])))
+
+app.browse_all.set(True)
+app.browse_load()
+settle()
+check("ticking 'every game' brings them in",
+      "starfield" in app.browse["gameinfo"] and "oblivion" in app.browse["gameinfo"],
+      str(list(app.browse["gameinfo"])))
+check("  they are marked as having no pool",
+      sum("[no pool]" in v for v in app.browse_game["values"]) == 2,
+      str(app.browse_game["values"]))
+check("  and the game you do keep still comes first",
+      app.browse["games"][0] == "fallout4", str(app.browse["games"]))
+
+app.browse_game.current(app.browse["games"].index("starfield"))
+app.browse_show_game()
+settle()
+r = rows(app.browse_table)
+check("its lists are measured against nothing owned",
+      len(r) == 1 and r[0][5] == "0.0%", str(r))
+check("  and the pane explains what a pool would do",
+      "no pool for this game" in app.browse_text.get("1.0", "end"),
+      app.browse_text.get("1.0", "end")[:160])
+
+ASK.answer = "Starfield"
+DLG.calls.clear()
+app.browse_make_pool()
+settle()
+pool = os.path.join(box.archives, "Starfield")
+check("the pool is laid out on the share", os.path.isdir(pool))
+check("  with the same folders every other game has",
+      sorted(os.listdir(pool)) == ["Master", "Shared", "Trash", "Unmanaged"],
+      str(sorted(os.listdir(pool))))
+check("  the window says where it is", DLG.shown("Starfield"), str(DLG.calls))
+check("  and the game now reads as pooled",
+      (app.browse["gameinfo"].get("starfield") or (None, None))[1] is not None,
+      str(app.browse["gameinfo"].get("starfield")))
+
+DLG.calls.clear()
+before = sorted(os.listdir(box.archives))
+app.browse_game.current(app.browse["games"].index("starfield"))
+app.browse_show_game()
+settle()
+app.browse_make_pool()
+settle()
+check("asking again only says where it already is", DLG.shown("already draws from"),
+      str(DLG.calls))
+check("  and no second folder is made", sorted(os.listdir(box.archives)) == before)
+
+ASK.answer = "Master"
+DLG.calls.clear()
+app.browse_game.current(app.browse["games"].index("oblivion"))
+app.browse_show_game()
+settle()
+app.browse_make_pool()
+settle()
+check("a reserved folder name is refused", DLG.shown("reserved"), str(DLG.calls))
+check("  before anything is created",
+      not os.path.isdir(os.path.join(box.archives, "Master")))
+
+ASK.answer = None
+DLG.calls.clear()
+app.browse_make_pool()
+settle()
+check("cancelling the prompt does nothing at all",
+      not DLG.calls and not os.path.isdir(os.path.join(box.archives, "Oblivion")),
+      str(DLG.calls))
+
+# ---------------------------------------------------------------- 15.10
+print("\n 15.10  a stray that is really a list, and the orphaned sidecars")
+
+box.pool_file(GAME, "Gone_@@_gone", "x.7z", 11)
+with io.open(os.path.join(box.manifests, "Gone_@@_gone.wabbajack.metadata"),
+             "w", encoding="utf-8") as fh:
+    json.dump({"title": "A List That Went Missing", "game": GAME}, fh)
+A._FEED_CACHE["all"]["Gone/gone"] = dict(feed, key="Gone/gone", machine="gone",
+                                         title="A List That Went Missing", repo="Gone")
+A.WJ.set_known_list_dirs(A.WJ.known_list_dirs_from(box.manifests))
+A.WJ.invalidate_existing_cache()
+app.space_measure()
+settle()
+
+stray_rows = rows(app.strays_table)
+row = [r for r in stray_rows if r[1] == "Gone_@@_gone"]
+check("the stray is listed", len(row) == 1, str(stray_rows))
+check("  and its row says where it came from",
+      row and "adopt it" in row[0][4], str(row))
+note = app.stray_note.get()
+check("the pane names the list rather than the folder",
+      "A List That Went Missing" in note, note[:180])
+check("  and says not to park it", "Do not park" in note, note[:180])
+check("the orphaned sidecar is reported at last",
+      "sidecar(s) whose modlist is gone" in note, note[:240])
+
+# The window used to gather this and drop it on the floor.
+check("nothing measured is left unshown",
+      all(k in ("wide",) or app.space.get(k) is not None
+          for k in ("lists", "masters", "strays", "trash", "orphans")),
+      str(sorted(app.space)))
+
 # ---- put everything back ---------------------------------------------------
 root.destroy()
 W.out = REAL_WOUT

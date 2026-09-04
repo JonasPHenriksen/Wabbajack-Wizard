@@ -30,6 +30,7 @@ SUITES = [
     ("t13_delete.py", "stage 5 end to end: what a deletion must never take"),
     ("t14_merge.py", "folding one game folder into another"),
     ("t15_gui.py", "the desktop window, driven through its own buttons"),
+    ("t16_pool.py", "laying out a pool for a game you keep nothing for"),
 ]
 
 total_pass = total_fail = 0

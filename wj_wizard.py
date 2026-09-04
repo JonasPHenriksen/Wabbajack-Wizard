@@ -58,6 +58,8 @@ deletion rather than trusted from the table:
 
 import os
 import csv
+import io
+import json
 import sys
 import time
 import shutil
@@ -428,6 +430,69 @@ def all_stray_folders():
         for name, files, byts in strays_in(gp):
             rows.append((g, name, files, byts))
     return rows
+
+
+def stray_origin(name):
+    """What is known locally about a stray folder that looks like a modlist.
+
+    A folder is a stray when no manifest of the same name is held. Some strays
+    are hand-built and always were; others are a list whose paperwork went
+    missing, and those are not junk at all - their archives are still wanted,
+    and re-adopting the list makes the folder legitimate again. Parking such a
+    folder in Unmanaged buries that, so the stray tables say which it is.
+
+    Wabbajack writes a .metadata sidecar beside every modlist it downloads, so
+    a sidecar with no manifest is the last trace of exactly that. Whether the
+    list is still published is only checked against feeds already loaded this
+    run: stage 5 must not depend on the network, and a cold cache simply
+    leaves that unknown rather than fetching 142 feeds mid-deletion.
+
+    Returns None for a folder with nothing to say about it, else a dict with
+    `sidecar`, `title`, `key` and `published` (True, False or None-unknown)."""
+    side = os.path.join(A.MANIFESTS, name + ".wabbajack.metadata")
+    title = None
+    if os.path.isfile(side):
+        try:
+            with io.open(side, encoding="utf-8") as f:
+                title = (json.load(f) or {}).get("title") or None
+        except (OSError, ValueError):
+            title = None
+    elif "_@@_" not in name:
+        return None
+
+    parts = name.rsplit("_@@_", 1)
+    key = "/".join(parts) if len(parts) == 2 else None
+
+    published = None
+    cached = A._FEED_CACHE.get("all")
+    if cached is not None and key:
+        low = {k.lower() for k in cached}
+        published = key.lower() in low
+        if published and not title:
+            for k, ent in cached.items():
+                if k.lower() == key.lower():
+                    title = ent.get("title")
+                    break
+    if not os.path.isfile(side) and not published:
+        return None
+    return {"sidecar": os.path.isfile(side), "title": title, "key": key,
+            "published": published}
+
+
+def stray_note(origin):
+    """One short phrase for a stray table's last column."""
+    if not origin:
+        return ""
+    if origin["published"]:
+        return "manifest gone, still published - adopt it"
+    if origin["published"] is False:
+        return "manifest gone, no longer published"
+    return "manifest gone, sidecar remains"
+
+
+def strays_with_notes(strays):
+    """The stray rows, each with what is known about where it came from."""
+    return [(g, n, f, b, stray_origin(n)) for g, n, f, b in strays]
 
 
 def park_unmanaged_dir(game_dir, folder):
@@ -834,13 +899,21 @@ def gallery_indexes():
 
 
 def evaluate_rows(rows, pool_dir, indexes, label):
-    """Fill in each row's gap against the pools. Shows progress; it is slow."""
-    key = os.path.normcase(pool_dir)
-    if key not in indexes:
-        out(f"  Indexing {pool_dir} ...")
-        indexes[key] = A.WJ.index_existing(pool_dir)
-        out(f"    {len(indexes[key])} distinct archive name(s) on disk.")
-    existing = indexes[key]
+    """Fill in each row's gap against the pools. Shows progress; it is slow.
+
+    `pool_dir` is None for a game with no pool on the share. Nothing is owned
+    yet, so the gap is measured against an empty index: every row then reads
+    as 0% held, which is the honest answer and is what makes the full download
+    size of an unfamiliar game visible before committing to it."""
+    if pool_dir is None:
+        existing = {}
+    else:
+        key = os.path.normcase(pool_dir)
+        if key not in indexes:
+            out(f"  Indexing {pool_dir} ...")
+            indexes[key] = A.WJ.index_existing(pool_dir)
+            out(f"    {len(indexes[key])} distinct archive name(s) on disk.")
+        existing = indexes[key]
 
     todo = [r for r in rows if "gap" not in r]
     if todo:
@@ -1001,6 +1074,141 @@ def show_gallery_detail(state, row):
     adopt_gallery_list(state, row)
 
 
+def existing_pool_folder(folder):
+    """The folder on the share matching this name case-insensitively, or None.
+
+    The share is the authority on its own spelling. Creating 'Fallout4' beside
+    an existing 'fallout4' would split one game's archives across two pools,
+    and each pool would then read the other's contents as not present."""
+    if CFG is None:
+        return None
+    root = CFG.resolved_archive_root()
+    want = os.path.normcase(folder)
+    try:
+        for n in os.listdir(root):
+            if os.path.normcase(n) == want and os.path.isdir(os.path.join(root, n)):
+                return os.path.join(root, n)
+    except OSError:
+        pass
+    return None
+
+
+def pool_folder_problem(game, folder):
+    """Why this game cannot get this pool folder, or None if it can."""
+    if CFG is None:
+        return "wj_config is not importable, so the pool layout is unknown."
+    if not CFG.valid_game_type(game):
+        return f"{game!r} is not a usable GameType."
+    if not folder or not CFG.valid_game_type(folder):
+        return (f"{folder!r} cannot be a folder name: it must be a plain name "
+                "with no path separator.")
+    if folder.lower() in CFG.reserved_list_names():
+        return (f"{folder!r} is reserved. A game folder by that name would "
+                "collide with a pool folder inside every game.")
+    return None
+
+
+def create_game_pool(game, folder=None):
+    """Lay out the standard pool for a game that has none yet.
+
+    Creates <archive root>/<folder>/ with the same Master, Shared, Unmanaged
+    and Trash the other games have, so the sorter, the downloader and stage 5
+    all recognise it without any further setup.
+
+    `folder` defaults to the folder the config already maps this game onto,
+    which for an unmapped game is the GameType itself. Passing a different
+    folder folds the game into an existing pool the way Skyrim VR folds into
+    Skyrim, and the mapping is written to the settings file so that every
+    later run, and every other tool in the suite, agrees about it.
+
+    Returns (path, created, mapped): whether the tree was made here, and
+    whether a GAME_FOLDERS entry had to be written."""
+    if CFG is None:
+        raise ValueError("wj_config is not importable, so the pool layout is unknown.")
+    folder = folder or CFG.game_folder(game)
+    problem = pool_folder_problem(game, folder)
+    if problem:
+        raise ValueError(problem)
+
+    root = CFG.resolved_archive_root()
+    if not os.path.isdir(root):
+        raise ValueError(f"The archive root is not there: {root}")
+
+    path = existing_pool_folder(folder) or os.path.join(root, folder)
+    created = not os.path.isdir(path)
+
+    made = []
+    for sub in tuple(CFG.POOL_FOLDERS) + (CFG.UNMANAGED_FOLDER, CFG.TRASH_FOLDER):
+        p = os.path.join(path, sub)
+        if not os.path.isdir(p):
+            made.append(sub)
+        os.makedirs(p, exist_ok=True)
+
+    # Only write a mapping when the folder is not simply the game's own name.
+    # Recording the identity mapping would bloat the settings file with a line
+    # that changes nothing.
+    mapped = False
+    if os.path.normcase(folder) != os.path.normcase(str(game)):
+        values = CFG.current_settings()
+        mapping = dict(values.get("GAME_FOLDERS") or {})
+        if mapping.get(game) != folder:
+            mapping[game] = folder
+            values["GAME_FOLDERS"] = mapping
+            CFG.save_settings(values)
+            A.reload_settings()
+            mapped = True
+
+    out(f"  Pool ready: {path}")
+    if made:
+        out(f"    created {', '.join(made)}")
+    else:
+        out("    every folder was already there; nothing changed.")
+    if mapped:
+        out(f"    {CFG.SETTINGS_FILE} now maps {game} onto {folder}, so its lists")
+        out(f"    draw from and protect that one pool.")
+    return path, created, mapped
+
+
+def offer_game_pool(entry):
+    """Console prompt: lay out a pool for a game that has none yet.
+
+    `entry` is the (label, pool_dir, GameType) triple the browse stage keeps
+    per game."""
+    label, pool, game = entry
+    out()
+    if pool:
+        out(f"  {label} already draws from {pool}.")
+        return
+    default = CFG.game_folder(game) if CFG else game
+    unmanaged = CFG.UNMANAGED_FOLDER if CFG else "Unmanaged"
+    trash = CFG.TRASH_FOLDER if CFG else "Trash"
+    out(f"  {label} has no pool. One folder under the archive root, laid out")
+    out(f"  with the same Master, Shared, {unmanaged} and {trash} every other")
+    out("  game here has.")
+    out()
+    out(f"   [enter] call it {default}, and give this game its own pool")
+    out("   or type the name of a pool you already keep, to fold this game into")
+    out("   it the way Skyrim VR draws from Skyrim: one Master between them, and")
+    out("   each list protecting the other's archives.")
+    out("   [b] back")
+    try:
+        raw = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        out()
+        raise Quit()
+    if raw.lower() == "b":
+        return
+    folder = raw or default
+    problem = pool_folder_problem(game, folder)
+    if problem:
+        out(f"  {problem}")
+        return
+    try:
+        create_game_pool(game, folder)
+    except (OSError, ValueError) as e:
+        out(f"  [ERROR] The pool could not be made: {e}")
+
+
 def adopt_gallery_list(state, row):
     """Fetch a new list's manifest and record it as tracked.
 
@@ -1065,16 +1273,41 @@ def stage_browse(state, tracked):
         out("  incomplete. Nothing is concluded from an absence here.")
 
     pooled = G.pooled_games({e.get("game") for e in feeds.values()})
+    show_all = False
     if not pooled:
         out("  None of the published games has a pool folder on the share, so")
-        out("  there is nothing here that could overlap what you own.")
-        return
-    rows = G.build_rows(feeds, summary, featured, disabled, set(tracked),
-                        games=set(pooled))
+        out("  every game below is one you would be starting from scratch.")
+        show_all = True
 
-    out(f"  {len(feeds)} published list(s); {len(rows)} for the "
-        f"{len(pooled)} game(s) you keep pools for.")
-    out(f"  You already track {sum(1 for r in rows if r['have'])} of them.")
+    def build_gallery(every):
+        """Rows for the games in view, and one entry per game among them.
+
+        A game with no pool folder carries None for its directory. That is
+        what tells the rest of this stage to measure it against nothing, and
+        to offer to lay a pool out for it."""
+        rs = G.build_rows(feeds, summary, featured, disabled, set(tracked),
+                          games=None if every else set(pooled))
+        inf = {}
+        for r in rs:
+            gk = r["game_key"]
+            if gk not in inf:
+                inf[gk] = (G.game_label(r["game"]),
+                           (pooled.get(gk) or (None, None))[1], r["game"])
+        return rs, inf
+
+    rows, info = build_gallery(show_all)
+
+    def say_counts(rs, inf, every):
+        retired = sum(1 for r in rs if r["retired"])
+        out(f"  {len(feeds)} published list(s)"
+            + (f", plus {retired} retired one(s) still listed" if retired else "")
+            + ".")
+        out(f"  Showing {len(rs)} across {len(inf)} game(s)"
+            + (", every game the gallery covers" if every
+               else ", the one(s) you keep pools for")
+            + f". You already track {sum(1 for r in rs if r['have'])}.")
+
+    say_counts(rows, info, show_all)
 
     size, files = G.cache_size()
     have_reports = sum(1 for r in rows if G.have_report(r["key"]))
@@ -1096,18 +1329,21 @@ def stage_browse(state, tracked):
 
     indexes = gallery_indexes()
     while True:
-        games = sorted(pooled, key=lambda k: (
-            -sum(1 for r in rows if r["game_key"] == k), k))
+        # Pools you keep first, then games you do not, each by list count.
+        games = sorted(info, key=lambda k: (
+            info[k][1] is None, -sum(1 for r in rows if r["game_key"] == k), k))
         out()
-        gw = fit([pooled[k][0] for k in games], 4) + 2
-        out(f"    {'#':>3}  {'game':<{gw}}{'lists':>7}{'yours':>7}")
+        gw = fit([info[k][0] for k in games], 4) + 2
+        out(f"    {'#':>3}  {'game':<{gw}}{'lists':>7}{'yours':>7}  pool")
         for i, k in enumerate(games, 1):
             grp = [r for r in rows if r["game_key"] == k]
-            out(f"    {i:>3}  {pooled[k][0]:<{gw}}{len(grp):>7}"
-                f"{sum(1 for r in grp if r['have']):>7}")
+            out(f"    {i:>3}  {info[k][0]:<{gw}}{len(grp):>7}"
+                f"{sum(1 for r in grp if r['have']):>7}"
+                f"  {os.path.basename(info[k][1]) if info[k][1] else '-'}")
         out()
-        out("   [1-%d] browse a game   [s] skip this stage   [q] quit"
-            % len(games))
+        out("   [1-%d] browse a game   [a] %s   [p N] set up a pool for game N"
+            % (len(games), "only my games" if show_all else "show every game"))
+        out("   [s] skip this stage   [q] quit")
         try:
             raw = input("> ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -1118,12 +1354,27 @@ def stage_browse(state, tracked):
         if raw in ("s", "skip", ""):
             out("  Skipped.")
             return
+        if raw == "a":
+            show_all = not show_all
+            rows, info = build_gallery(show_all)
+            out()
+            say_counts(rows, info, show_all)
+            continue
+        if raw.startswith("p"):
+            arg = raw[1:].strip()
+            if not (arg.isdigit() and 1 <= int(arg) <= len(games)):
+                out(f"  Use 'p N', where N is between 1 and {len(games)}.")
+                continue
+            offer_game_pool(info[games[int(arg) - 1]])
+            pooled = G.pooled_games({e.get("game") for e in feeds.values()})
+            rows, info = build_gallery(show_all)
+            continue
         if not (raw.isdigit() and 1 <= int(raw) <= len(games)):
-            out(f"  Enter a number between 1 and {len(games)}, or s/q.")
+            out(f"  Enter a number between 1 and {len(games)}, a/p N, or s/q.")
             continue
 
         gk = games[int(raw) - 1]
-        label, pool = pooled[gk]
+        label, pool, _game = info[gk]
         grp = [r for r in rows if r["game_key"] == gk]
         evaluate_rows(grp, pool, indexes, label)
         grp.sort(key=gap_sort_key)
@@ -2284,12 +2535,32 @@ def stage_space(state, records):
         out(f"      that judges by demand, so move them into '{CFG.UNMANAGED_FOLDER if CFG else 'Unmanaged'}'")
         out("      and both tools will leave them alone for good.")
         out()
-        gw = fit([g for g, _n, _f, _b in strays], 4) + 2
-        out(f"    {'#':>3}  {'game folder':<{gw}}{'folder':<38}{'files':>7}{'size':>11}")
-        for i, (game, name, files, byts) in enumerate(strays, 1):
+        noted = strays_with_notes(strays)
+        gw = fit([g for g, _n, _f, _b, _o in noted], 4) + 2
+        out(f"    {'#':>3}  {'game folder':<{gw}}{'folder':<38}{'files':>7}{'size':>11}"
+            f"  where it came from")
+        for i, (game, name, files, byts, origin) in enumerate(noted, 1):
             out(f"    {i:>3}  {game:<{gw}}{name[:38]:<38}"
-                f"{files:>7}{human(byts):>11}")
+                f"{files:>7}{human(byts):>11}  {stray_note(origin)}")
         out()
+
+        # A stray that is a published list with its manifest missing is the one
+        # case where parking is the wrong answer: adopting puts the folder back
+        # in service, and its archives back under protection, at no cost.
+        adoptable = [(n, o) for _g, n, _f, _b, o in noted if o and o["published"]]
+        if adoptable:
+            out("      Some of these are lists the gallery still publishes, whose")
+            out("      manifest is simply missing here. Parking one hides archives")
+            out("      you already own from the list that wants them. Adopt it in")
+            out("      stage 1 instead, and the folder is legitimate again:")
+            for n, o in adoptable:
+                out(f"        {o['title'] or n}   ({n})")
+            out()
+        elif any(o and o["sidecar"] for _g, _n, _f, _b, o in noted):
+            out("      A 'manifest gone' folder was downloaded by Wabbajack once.")
+            out("      Run stage 1 first if you want to know whether its list is")
+            out("      still published, and could just be adopted back.")
+            out()
         out("      Nothing is deleted here - the folder is moved intact.")
         picks = choose(len(strays), "folders")
         if picks is None:

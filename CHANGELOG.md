@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.1.0 — 2026-09-04
+
+### Added
+
+- Browse the whole gallery, not only the games you keep archives for. **Every
+  game** in the window, `a` in the console. A game with no pool is measured
+  against an empty index, so its lists read as 0% held and the "to fetch"
+  column is the full download.
+- **Set up a pool** (`p N` in the console) lays out a new game's
+  folder with the same `Master`, `Shared`, `Unmanaged` and `Trash` every other
+  game has. Running it twice completes an existing folder rather than making a
+  second one, and a folder already on the share is matched case-insensitively.
+- The same prompt folds a game into a pool you already keep, the way Skyrim VR
+  draws from Skyrim, and writes the `GAME_FOLDERS` entry to `wj_settings.json`
+  so every tool in the suite agrees. Folder names that would collide with a
+  pool folder, or carry a path separator, are refused before anything is made.
+- Strays now say where they came from. A folder with a `.metadata` sidecar but
+  no manifest is a list whose paperwork went missing, not a hand-built install,
+  and when the gallery still publishes it both stage 5b and the Space tab say
+  **adopt it** instead of offering to park it. Parking one would hide archives
+  you own from the list that wants them. The published check reads only feeds
+  already loaded that run, so stage 5 still never touches the network.
+
+### Fixed
+
+- The Space tab gathered the orphaned-sidecar report and never displayed it,
+  so in the window a stray folder had no explanation. It is shown now.
+- A dozen games showed their raw feed token as a name, so the browse menu read
+  `starfield` and `vtmb`. Every game the gallery publishes is now named.
+- The browse summary read "220 published; 225 shown", which cannot both be
+  true at a glance. The count was right, 220 live plus 5 retired lists still
+  listed, and the line now says so.
+
+Tests: 773 checks across 16 sandbox suites, up from 698 across 15.
+
 ## 1.0.0 — 2026-09-04
 
 First release.

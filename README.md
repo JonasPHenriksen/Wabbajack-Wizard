@@ -65,7 +65,11 @@ console uses. Stages are independent: skipping one does not affect the others.
 1. **Browse** — every modlist published for a game you keep archives for, and
    how much of each one is already in your pools, sorted most-complete first.
    Picking one shows the gap in full and offers to fetch its manifest and start
-   tracking it (see below).
+   tracking it (see below). Tick **every game** (`a` in the console) to include
+   games you keep no archives for at all: their lists measure against nothing,
+   so the "to fetch" column is the whole download, which is the number worth
+   seeing before taking a new game on. **Set up a pool** (`p N` in the console)
+   then lays one out — see below.
 2. **Updates** — which tracked modlists have a newer published version, and
    which are already current. Fetches the manifests you pick.
 3. **Incomplete** — which modlists are missing archives, and how many of those
@@ -101,10 +105,45 @@ The answer is rarely small. Measured against this share's Skyrim pool:
 | NGVO | 1573 | 87.7% | 25.8 GB of 122.1 GB |
 | WakingDreams/TwistedSkyrim | 6031 | 39.4% | 367 GB of 539 GB |
 
-Only games with a pool folder under the archive root are shown, since nothing
-else can overlap what you own. The whole sweep is 224 reports, about 45 MB, and
-takes roughly nine seconds; it is cached under `.gallery-cache/` and served from
-there afterwards, including when GitHub is unreachable.
+Only games with a pool folder under the archive root are shown by default, since
+nothing else can overlap what you own. The whole sweep is 224 reports, about
+45 MB, and takes roughly nine seconds; it is cached under `.gallery-cache/` and
+served from there afterwards, including when GitHub is unreachable.
+
+### Taking on a game you keep nothing for
+
+**Every game** in the window, `a` in the console, drops that filter and shows
+the whole gallery. A game with no pool is measured against an empty index, so
+every list reads as 0% held and the "to fetch" column is the entire download.
+That is the honest number, and it is the one worth seeing before deciding.
+
+**Set up a pool** (`p N` in the console) then creates one folder under the
+archive root holding the same `Master`, `Shared`, `Unmanaged` and `Trash`
+every other game has. It is safe to run twice: an existing folder is
+completed rather than duplicated, and a folder already on the share is matched
+case-insensitively, so `Fallout4` is never created beside `fallout4`.
+
+The prompt asks for the folder name. Leaving it as the game's own name gives
+that game its own pool. Typing the name of a pool you already keep folds the
+game into it instead, the way Skyrim VR draws from Skyrim: one `Master` between
+them, and each game's lists then protect the other's archives from stage 5. That
+writes a `GAME_FOLDERS` entry to `wj_settings.json`, so every later run and
+every other tool in the suite agrees about it. Two cases on the current gallery
+are worth folding rather than separating:
+
+| game | fold into | why |
+| --- | --- | --- |
+| `Fallout4VR` | `Fallout4` | VR lists are built almost entirely from Fallout 4 archives, exactly as Skyrim VR is from Skyrim SE |
+| `Fallout3` | `FalloutNewVegas` | Tale of Two Wastelands lists are New Vegas lists that pull Fallout 3 files |
+
+A folder name that would collide with a pool folder (`Master`, `Shared`,
+`Unmanaged`, `Trash`, `Nolvus`) is refused, as is one carrying a path
+separator, which would put a game's pools outside the archive root.
+
+None of this is required before tracking a list. Adopting a list for a new game
+works with no pool at all, and the first sort creates the folders it needs. The
+button exists so the layout is there, and named the way you meant, before any
+archive lands in it.
 
 ### "Unavailable" does not mean uninstallable
 
@@ -239,6 +278,21 @@ hold, and offers to move it there **intact** — nothing is deleted. Both tools
 then ignore it completely: never indexed, never moved, never deleted, and a
 modlist may not claim the name. Stage 5 reports the store's size, because it is
 usually not small: **79.7 GB** across four folders on this share.
+
+Parking is not always the right answer, so each stray says where it came from.
+Wabbajack writes a `.metadata` sidecar beside every modlist it downloads, so a
+stray with a sidecar but no manifest is not a hand-built install: it is a list
+whose paperwork went missing. If the gallery still publishes it, stage 5b and
+the Space tab say **adopt it** rather than offering to park it, because parking
+would hide archives you already own from the list that wants them. Adopting
+fetches the manifest and the folder is legitimate again. Whether a list is
+still published is only read from feeds already loaded in that run: stage 5
+never reaches for the network mid-deletion, so a cold cache reports the
+sidecar and leaves the rest unknown rather than guessing.
+
+Sidecars whose modlist is gone entirely, with no folder left either, are listed
+too. They are tiny and are left alone, because an orphan is usually the last
+trace of a list that went missing and is worth seeing.
 
 Strays are sized with `tree_size()`, not `dir_size()`. Pool folders are flat, so
 not descending is both right and faster there; a stray folder is whatever
@@ -483,7 +537,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-698 checks across fifteen suites. None of them touch the live archive pools:
+773 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -506,7 +560,8 @@ exactly the failure they want to check.
 | `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, and the refusal to delete on an incomplete picture |
 | `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row record, the un-staging warning, hash-proven duplicates, the trash and its purge, stale CSVs, waiting for Wabbajack |
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
-| `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file |
+| `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one |
+| `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the

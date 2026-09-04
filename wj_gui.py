@@ -28,7 +28,7 @@ import sys
 import threading
 import traceback
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 import wj_autoupdate as A
 import wj_wizard as W
@@ -144,7 +144,7 @@ class App:
         self.loaded = set()
         # per-tab data
         self.browse = {"rows": [], "pooled": {}, "indexes": {}, "games": [],
-                       "grp": [], "detail": None}
+                       "gameinfo": {}, "grp": [], "detail": None}
         self.update_rows = []
         self.status_rows = []
         self.space = {"lists": [], "masters": [], "strays": [], "trash": [],
@@ -385,17 +385,23 @@ class App:
         f.rowconfigure(3, weight=1)
         ttk.Label(f, text="Every modlist published for a game you keep archives for, and how "
                           "much of each is already in your pools. Read from Wabbajack's own "
-                          "validation reports, before any .wabbajack is downloaded.",
+                          "validation reports, before any .wabbajack is downloaded. Tick "
+                          "'every game' to look at games you have no pool for yet.",
                   wraplength=1000).grid(row=0, column=0, sticky="w", pady=(0, 6))
         bar = ttk.Frame(f)
         bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(bar, text="Game:").pack(side="left")
-        self.browse_game = ttk.Combobox(bar, state="readonly", width=40)
+        self.browse_game = ttk.Combobox(bar, state="readonly", width=36)
         self.browse_game.pack(side="left", padx=(4, 8))
         self.browse_game.bind("<<ComboboxSelected>>", lambda _e: self.browse_show_game())
+        self.browse_all = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="every game", variable=self.browse_all,
+                        command=self.browse_load).pack(side="left", padx=(0, 8))
         self.action(bar, "Reload gallery", self.browse_load).pack(side="left")
         self.action(bar, "Fetch missing reports", lambda: self.browse_sync(False)).pack(side="left", padx=4)
         self.action(bar, "Refresh every report", lambda: self.browse_sync(True)).pack(side="left")
+        self.browse_pool_btn = self.action(bar, "Set up a pool", self.browse_make_pool)
+        self.browse_pool_btn.pack(side="left", padx=4)
         self.browse_summary = tk.StringVar(value="Not loaded yet.")
         ttk.Label(bar, textvariable=self.browse_summary).pack(side="right")
 
@@ -418,6 +424,9 @@ class App:
         self.browse_track.grid(row=0, column=1, sticky="n", padx=(8, 0))
 
     def browse_load(self):
+        # Read on this thread: the worker must not touch a tk variable.
+        show_all = bool(self.browse_all.get())
+
         def job():
             try:
                 summary = G.load_summary()
@@ -430,9 +439,9 @@ class App:
                 return {"error": "No feed could be read, so there is no gallery to show."}
             pooled = G.pooled_games({e.get("game") for e in feeds.values()})
             rows = G.build_rows(feeds, summary, featured, disabled, set(self.tracked),
-                                games=set(pooled))
+                                games=None if show_all else set(pooled))
             have_reports = sum(1 for r in rows if G.have_report(r["key"]))
-            return {"rows": rows, "pooled": pooled, "complete": complete,
+            return {"rows": rows, "pooled": pooled, "complete": complete, "all": show_all,
                     "feeds": len(feeds), "have_reports": have_reports}
 
         def done(res):
@@ -440,15 +449,33 @@ class App:
                 self.browse_summary.set(res["error"])
                 return
             self.browse.update({"rows": res["rows"], "pooled": res["pooled"], "indexes": {}})
-            games = sorted(res["pooled"], key=lambda k: (
-                -sum(1 for r in res["rows"] if r["game_key"] == k), k))
+
+            # One entry per game present in the rows, whether or not it has a
+            # pool. The GameType is carried alongside the label because that,
+            # not the lowercased key, is what a new pool has to be named for.
+            info = {}
+            for r in res["rows"]:
+                gk = r["game_key"]
+                if gk in info:
+                    continue
+                pool = (res["pooled"].get(gk) or (None, None))[1]
+                info[gk] = (G.game_label(r["game"]), pool, r["game"])
+            self.browse["gameinfo"] = info
+            counts = {k: sum(1 for r in res["rows"] if r["game_key"] == k) for k in info}
+            # Pools you already keep first, then the rest, each by list count.
+            games = sorted(info, key=lambda k: (info[k][1] is None, -counts[k], k))
             self.browse["games"] = games
-            labels = [f"{res['pooled'][k][0]}  ({sum(1 for r in res['rows'] if r['game_key'] == k)} lists)"
-                      for k in games]
+            labels = [f"{info[k][0]}  ({counts[k]} lists)"
+                      + ("" if info[k][1] else "   [no pool]") for k in games]
             self.browse_game["values"] = labels
+            unpooled = sum(1 for k in info if info[k][1] is None)
+            retired = sum(1 for r in res["rows"] if r["retired"])
             self.browse_summary.set(
-                f"{res['feeds']} published; {len(res['rows'])} for your {len(res['pooled'])} game(s); "
-                f"you track {sum(1 for r in res['rows'] if r['have'])}; "
+                f"{res['feeds']} published"
+                + (f" plus {retired} retired" if retired else "")
+                + f"; {len(res['rows'])} shown across {len(info)} game(s)"
+                + (f", {unpooled} with no pool" if unpooled else "")
+                + f"; you track {sum(1 for r in res['rows'] if r['have'])}; "
                 f"reports cached for {res['have_reports']} of {len(res['rows'])}"
                 + ("" if res["complete"] else "   [some feeds did not respond]"))
             if labels:
@@ -469,7 +496,7 @@ class App:
         if i < 0 or i >= len(self.browse["games"]):
             return
         gk = self.browse["games"][i]
-        label, pool = self.browse["pooled"][gk]
+        label, pool, _game = self.browse["gameinfo"][gk]
         grp = [r for r in self.browse["rows"] if r["game_key"] == gk]
 
         def job():
@@ -490,10 +517,64 @@ class App:
                     tail = (r["archives"] or 0, "-", "-", human(r["arch_size"] or 0))
                 out_rows.append(("[x]" if r["have"] else "", mark, r["title"], r["version"]) + tail)
             fill(self.browse_table.tree, out_rows)
-            self._set_text(self.browse_text, "Select a list for its details."
+            note = ""
+            if pool is None:
+                note = ("\n\nYou have no pool for this game, so every list reads as 0% held "
+                        "and the 'to fetch' column is the whole download. 'Set up a pool for "
+                        "this game' lays out the same Master, Shared, Unmanaged and Trash the "
+                        "other games have; tracking a list without one still works, the pool "
+                        "is simply made on the first sort.")
+            self._set_text(self.browse_text, "Select a list for its details." + note
                            + ("\n\n!  flagged Unavailable by Wabbajack     >  retired from the gallery"
                               if any(GUI_MARK(r) for r in rows) else ""))
         self.run_job(f"Measuring {label}", job, done)
+
+    def browse_make_pool(self):
+        i = self.browse_game.current()
+        if i < 0 or i >= len(self.browse["games"]):
+            return
+        gk = self.browse["games"][i]
+        label, pool, game = self.browse["gameinfo"][gk]
+        if pool:
+            messagebox.showinfo("Pool already there",
+                                f"{label} already draws from:\n\n{pool}",
+                                parent=self.root)
+            return
+
+        existing = sorted({v[1] for v in self.browse["gameinfo"].values() if v[1]})
+        prompt = (f"Folder name for {label}, under\n{CFG.resolved_archive_root()}\n\n"
+                  "Leave it as it is to give this game its own pool. Type the name of a "
+                  "pool you already keep to fold it in instead, the way Skyrim VR draws "
+                  "from Skyrim: the two then share one Master and protect each other's "
+                  "archives.")
+        if existing:
+            prompt += "\n\nPools you already keep: " + ", ".join(
+                os.path.basename(p) for p in existing)
+        folder = simpledialog.askstring("Set up a pool", prompt,
+                                        initialvalue=CFG.game_folder(game),
+                                        parent=self.root)
+        if folder is None:
+            return
+        folder = folder.strip()
+        problem = W.pool_folder_problem(game, folder)
+        if problem:
+            messagebox.showerror("Cannot use that name", problem, parent=self.root)
+            return
+
+        def done(res):
+            path, created, mapped = res
+            messagebox.showinfo(
+                "Pool ready",
+                f"{label} now draws from:\n\n{path}\n\n"
+                + ("Created just now." if created
+                   else "That folder was already there, and now has the full layout.")
+                + (f"\n\n{CFG.SETTINGS_FILE} maps {game} onto {folder}, so its lists "
+                   f"share that pool." if mapped else ""),
+                parent=self.root)
+            self.reload_records()
+            self.browse_load()
+        self.run_job(f"Setting up a pool for {label}",
+                     lambda: W.create_game_pool(game, folder), done)
 
     def browse_detail(self):
         sel = selected_indices(self.browse_table.tree)
@@ -921,10 +1002,14 @@ class App:
         self.trash_note = tk.StringVar(value="")
         ttk.Label(bar3, textvariable=self.trash_note).pack(side="right")
         self.action(bar3, "Empty the trash now", self.space_empty_trash).pack(side="right", padx=(0, 8))
-        cols = [("game", "game folder", 200, "w"), ("folder", "folder", 360, "w"),
-                ("files", "files", 80, "e"), ("size", "size", 100, "e")]
+        cols = [("game", "game folder", 150, "w"), ("folder", "folder", 300, "w"),
+                ("files", "files", 70, "e"), ("size", "size", 90, "e"),
+                ("note", "where it came from", 250, "w")]
         self.strays_table = make_table(f, cols, height=4)
         self.strays_table.grid(row=8, column=0, sticky="nsew")
+        self.stray_note = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.stray_note, wraplength=1000,
+                  foreground="#8a4b00").grid(row=9, column=0, sticky="w", pady=(4, 0))
 
     def space_measure(self):
         def job():
@@ -957,7 +1042,33 @@ class App:
         except OSError:
             self.space_free.set("")
         self._fill_masters()
-        fill(self.strays_table.tree, [(g, n, files, human(b)) for g, n, files, b in self.space["strays"]])
+        noted = W.strays_with_notes(self.space["strays"])
+        fill(self.strays_table.tree,
+             [(g, n, files, human(b), W.stray_note(o)) for g, n, files, b, o in noted])
+
+        # A stray that is a list the gallery still publishes should be adopted,
+        # not parked: parking hides archives you own from the list wanting them.
+        adoptable = [(n, o) for _g, n, _f, _b, o in noted if o and o["published"]]
+        stale = [n for _g, n, _f, _b, o in noted
+                 if o and o["sidecar"] and not o["published"]]
+        bits = []
+        if adoptable:
+            bits.append("Do not park " + ", ".join(o["title"] or n for n, o in adoptable)
+                        + ": the gallery still publishes it and only the manifest is "
+                          "missing here. Adopt it in Browse and the folder is legitimate "
+                          "again, with its archives back under protection.")
+        elif stale:
+            bits.append("Wabbajack downloaded " + ", ".join(stale) + " once, and only "
+                        "the .metadata sidecar is left. Load Browse to see whether the "
+                        "list is still published and could be adopted back.")
+        orphans = self.space.get("orphans") or []
+        if orphans:
+            bits.append(f"{len(orphans)} .metadata sidecar(s) whose modlist is gone: "
+                        + ", ".join(o[:-len('.wabbajack.metadata')] for o in orphans[:4])
+                        + (f" and {len(orphans) - 4} more" if len(orphans) > 4 else "")
+                        + ". Tiny, and left alone: an orphan is usually the last trace "
+                          "of a list that went missing.")
+        self.stray_note.set("  ".join(bits))
         trash = self.space["trash"]
         if trash:
             total = sum(b for _g, _f, b, _o in trash)

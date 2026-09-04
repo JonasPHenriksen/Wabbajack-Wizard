@@ -406,5 +406,63 @@ check("an empty store is not reported as costing anything",
       "Oblivion" not in [g for g, _b, _f in W.unmanaged_report()],
       str(W.unmanaged_report()))
 
+# ---------------------------------------------------------------------------
+# A stray that is a modlist whose paperwork went missing. Parking one of these
+# hides archives you own from a list that still wants them, so the stray
+# tables have to tell the two kinds apart.
+# ---------------------------------------------------------------------------
+print("\n 12.x  a stray that is a list with its manifest missing")
+
+SAVED_FEEDS = A._FEED_CACHE.get("all")
+
+
+def sidecar(name, title):
+    p = os.path.join(box.manifests, name + ".wabbajack.metadata")
+    with io.open(p, "w", encoding="utf-8") as f:
+        json.dump({"title": title, "game": "Fallout4"}, f)
+    return p
+
+
+A._FEED_CACHE["all"] = None
+check("a hand-built folder has nothing to explain",
+      W.stray_origin("TTW") is None, str(W.stray_origin("TTW")))
+check("  so its note is empty", W.stray_note(W.stray_origin("TTW")) == "")
+
+sidecar("Gone_@@_gone", "A List That Went Missing")
+o = W.stray_origin("Gone_@@_gone")
+check("a sidecar with no manifest is recognised", bool(o) and o["sidecar"], str(o))
+check("  the list is named from the sidecar",
+      o and o["title"] == "A List That Went Missing", str(o))
+check("  the folder name resolves back to the feed key",
+      o and o["key"] == "Gone/gone", str(o))
+check("  and with no feeds loaded, published is unknown, not False",
+      o and o["published"] is None, str(o))
+check("  the note says only what is known",
+      W.stray_note(o) == "manifest gone, sidecar remains", W.stray_note(o))
+
+A._FEED_CACHE["all"] = {"Gone/gone": {"title": "Back In The Gallery", "repo": "Gone"}}
+o = W.stray_origin("Gone_@@_gone")
+check("with feeds loaded, a still-published list is spotted",
+      o and o["published"] is True, str(o))
+check("  and the note says to adopt rather than park",
+      "adopt it" in W.stray_note(o), W.stray_note(o))
+
+A._FEED_CACHE["all"] = {"Other/other": {"title": "Something Else", "repo": "Other"}}
+o = W.stray_origin("Gone_@@_gone")
+check("a list the gallery no longer carries is said to be gone",
+      o and o["published"] is False, str(o))
+check("  without suggesting an adoption that cannot happen",
+      "adopt" not in W.stray_note(o), W.stray_note(o))
+
+o = W.stray_origin("Never_@@_seen")
+check("a manifest-shaped folder that was never ours is not invented",
+      o is None, str(o))
+
+rows = W.strays_with_notes([("Fallout4", "Gone_@@_gone", 3, 30),
+                            ("Fallout4", "TTW", 1, 10)])
+check("the table rows carry the note alongside the size",
+      len(rows) == 2 and rows[0][4] and rows[1][4] is None, str(rows))
+
+A._FEED_CACHE["all"] = SAVED_FEEDS
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())
