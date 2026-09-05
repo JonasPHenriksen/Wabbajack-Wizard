@@ -126,6 +126,26 @@ def human(n):
     return W.human(n)
 
 
+# What each tab's contents are built from. A tab is rebuilt when something it
+# reads has moved on since it was last filled, and left alone otherwise.
+#
+#   records  the manifests held, and which published list each one is
+#   pools    the archives on the share
+#   settings the configuration
+#
+# Tracking the two separately is what keeps the refresh cheap: fetching a
+# manifest changes `records` but not `pools`, so Updates rebuilds while the
+# expensive pool index behind Browse and Space is kept.
+TAB_DEPENDS = {
+    "Browse": ("records", "pools"),
+    "Updates": ("records",),
+    "Incomplete": ("records", "pools"),
+    "Prepare": ("records", "pools"),
+    "Space": ("records", "pools"),
+    "Settings": ("settings",),
+}
+
+
 # ----------------------------------------------------------------------
 # The application
 # ----------------------------------------------------------------------
@@ -141,7 +161,8 @@ class App:
         self.records = {}
         self.failed_rebuilds = {}
         self.assist = (A.NEXUS_MODE == "assist")
-        self.loaded = set()
+        self.versions = {"records": 0, "pools": 0, "settings": 0}
+        self.tab_seen = {}
         # per-tab data
         self.browse = {"rows": [], "pooled": {}, "indexes": {}, "games": [],
                        "gameinfo": {}, "grp": [], "detail": None}
@@ -243,6 +264,18 @@ class App:
         for b in self.action_buttons:
             b.configure(state="disabled" if busy else "normal")
 
+        # Hold the user on this tab until the job finishes. A job changes what
+        # the other tabs are showing, and leaving mid-way used to land you on
+        # a tab rebuilt from data the job had not finished writing.
+        current = self.nb.select()
+        for tab_id in self.nb.tabs():
+            if tab_id == current:
+                continue
+            try:
+                self.nb.tab(tab_id, state="disabled" if busy else "normal")
+            except tk.TclError:
+                pass
+
     def action(self, parent, text, command, **kw):
         b = ttk.Button(parent, text=text, command=command, **kw)
         self.action_buttons.append(b)
@@ -341,13 +374,37 @@ class App:
         except OSError as e:
             messagebox.showerror("Log file", f"Could not open {path}:\n{e}", parent=self.root)
 
+    def data_changed(self, *topics):
+        """Record that an operation moved something on.
+
+        Every handler that changes the share or the manifests says so here,
+        rather than reaching into other tabs' bookkeeping. Deleting a modlist
+        used to clear Incomplete and Prepare and forget Updates, so a list you
+        had just deleted was still offered for updating until the window was
+        reopened. Naming the topic instead of the tabs means a new tab cannot
+        be forgotten by an older handler."""
+        for t in topics:
+            self.versions[t] = self.versions.get(t, 0) + 1
+
+    def tab_is_stale(self, name):
+        """Has anything this tab reads changed since it was last filled?"""
+        seen = self.tab_seen.get(name)
+        if seen is None:
+            return True
+        return any(seen.get(t) != self.versions.get(t)
+                   for t in TAB_DEPENDS.get(name, ()))
+
+    def tab_filled(self, *names):
+        """This tab now shows the data as it stands."""
+        for name in names:
+            self.tab_seen[name] = dict(self.versions)
+
     def _tab_changed(self):
         name = self.nb.tab(self.nb.select(), "text")
-        if name in self.loaded or self.busy or not self.records and name != "Settings":
-            if name not in self.loaded and not self.busy and name in ("Updates", "Incomplete", "Prepare", "Space"):
-                pass
+        if self.busy or (not self.records and name != "Settings"):
             return
-        self.loaded.add(name)
+        if not self.tab_is_stale(name):
+            return
         {"Browse": self.browse_load, "Updates": self.updates_check,
          "Incomplete": self.status_refresh, "Prepare": self.status_refresh,
          "Space": self.space_measure, "Settings": self.settings_fill}.get(name, lambda: None)()
@@ -368,7 +425,6 @@ class App:
         for p in CFG.SETTINGS_PROBLEMS:
             W.out(f"[WARN] {CFG.SETTINGS_FILE}: {p}")
         self.settings_fill()
-        self.loaded.add("Settings")
         self._tab_changed()
 
     def reload_records(self):
@@ -448,7 +504,15 @@ class App:
             if "error" in res:
                 self.browse_summary.set(res["error"])
                 return
-            self.browse.update({"rows": res["rows"], "pooled": res["pooled"], "indexes": {}})
+            self.tab_filled("Browse")
+            # The pool index is the expensive part, 28 seconds for Skyrim.
+            # Keep it when only the manifests moved on: the archives on disk
+            # are what it describes, and those have not changed.
+            keep = (self.browse.get("index_pools") == self.versions["pools"]
+                    and self.browse.get("indexes"))
+            self.browse.update({"rows": res["rows"], "pooled": res["pooled"],
+                                "indexes": self.browse["indexes"] if keep else {},
+                                "index_pools": self.versions["pools"]})
 
             # One entry per game present in the rows, whether or not it has a
             # pool. The GameType is carried alongside the label because that,
@@ -572,6 +636,7 @@ class App:
                    f"share that pool." if mapped else ""),
                 parent=self.root)
             self.reload_records()
+            self.data_changed("pools")
             self.browse_load()
         self.run_job(f"Setting up a pool for {label}",
                      lambda: W.create_game_pool(game, folder), done)
@@ -641,9 +706,7 @@ class App:
             if ok:
                 self.tracked = A.resolve_tracking(self.state)
                 self.reload_records()
-                self.loaded.discard("Updates")
-                self.loaded.discard("Incomplete")
-                self.loaded.discard("Prepare")
+                self.data_changed("records")
                 self.browse_detail()
         self.run_job(f"Downloading {r['title']}", lambda: W.adopt_gallery_list(self.state, r), done)
 
@@ -685,6 +748,7 @@ class App:
             if seen is None:
                 self.updates_summary.set("Could not read the published feeds.")
                 return
+            self.tab_filled("Updates")
             self.update_rows = sorted(seen, key=lambda t: (not t[4], W.stem_of(t[3]).lower()))
             rows = []
             for key, e, p, fn, changed, on_disk in self.update_rows:
@@ -719,8 +783,7 @@ class App:
         def done(n):
             W.out(f"  {n} of {len(want)} manifest(s) updated.")
             self.reload_records()
-            self.loaded.discard("Incomplete")
-            self.loaded.discard("Prepare")
+            self.data_changed("records")
             self.updates_check()
         self.run_job("Fetching manifests", job, done)
 
@@ -745,7 +808,7 @@ class App:
             self.status_rows = rows
             self._fill_incomplete()
             self._fill_prepare()
-            self.loaded.update({"Incomplete", "Prepare"})
+            self.tab_filled("Incomplete", "Prepare")
         self.run_job("Checking what is on disk", self._status_job, done)
 
     def _build_incomplete(self, f):
@@ -804,7 +867,8 @@ class App:
                 W.out(f"[{n}/{len(want)}]  {W.stem_of(fn)}   {st['missing']} archive(s), {human(st['bytes'])}")
                 W.download_list(self.records, fn, st, self.assist)
             return True
-        self.run_job("Downloading", job, lambda _r: self.status_refresh())
+        self.run_job("Downloading", job, lambda _r: (self.data_changed("pools"),
+                                                     self.status_refresh()))
 
     # ==================================================================
     # Prepare
@@ -873,6 +937,7 @@ class App:
             if rc == 0:
                 self.staged_fn = fn
                 self._offer_install(fn)
+            self.data_changed("pools")
             self.status_refresh()
         self.run_job(f"Staging {W.stem_of(fn)}", lambda: W.stage_list(self.state, fn, st), done)
 
@@ -1020,6 +1085,7 @@ class App:
                     "orphans": W.orphan_sidecars()}
 
         def done(res):
+            self.tab_filled("Space")
             self.space.update(res)
             self.space["wide"] = None
             self.rule.set("y")
@@ -1169,8 +1235,7 @@ class App:
             failed, moved, freed = res
             self.failed_rebuilds.update(failed)
             self.reload_records()
-            self.loaded.discard("Incomplete")
-            self.loaded.discard("Prepare")
+            self.data_changed("records", "pools")
             self.space_measure()
         self.run_job("Deleting", lambda: W.delete_modlists(self.state, self.records, chosen), done)
 
@@ -1193,7 +1258,8 @@ class App:
                     W.out(f"    {n} -> {dst}")
             A.WJ.invalidate_existing_cache()
             return True
-        self.run_job("Parking", job, lambda _r: self.space_measure())
+        self.run_job("Parking", job, lambda _r: (self.data_changed("pools"),
+                                                 self.space_measure()))
 
     def space_clear(self):
         mode = self.rule.get()
@@ -1254,6 +1320,7 @@ class App:
 
         def done(grand):
             W.out(f"  {human(grand)} moved to Trash in total.")
+            self.data_changed("pools")
             self.space_measure()
         self.run_job("Clearing Master", lambda: W.clear_masters(self.records, chosen, mode, self.space["wide"]),
                      done)
@@ -1274,6 +1341,7 @@ class App:
             purged, rec = res
             W.out(f"  Purged {len(purged)} file(s), {human(sum(r[2] for r in purged))} freed."
                   + (f" Record: {os.path.basename(rec)}" if rec else ""))
+            self.data_changed("pools")
             self.space_measure()
         self.run_job("Emptying the trash", lambda: A.purge_trash(days=0), done)
 
@@ -1309,6 +1377,7 @@ class App:
                 W.out(f"  {count} leftover(s) deleted, {human(freed)} freed.")
                 for p, err in failures:
                     W.out(f"  [WARN] {p}: {err}")
+                self.data_changed("records", "pools")
                 self.space_measure()
             self.run_job("Deleting leftovers",
                          lambda: W.remove_leftovers(rows, lambda c, p, b: W.out(f"    {p}")),
@@ -1362,6 +1431,7 @@ class App:
             row=row + 1, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def settings_fill(self, values=None):
+        self.tab_filled("Settings")
         values = values or CFG.current_settings()
         for key, var in self.setting_vars.items():
             v = values.get(key)
@@ -1408,6 +1478,9 @@ class App:
         path, more = CFG.save_settings(values)
         A.reload_settings()
         self.assist = (A.NEXUS_MODE == "assist")
+        # A setting can move the archive root or rename a pool folder, so every
+        # other tab is rebuilt from scratch rather than guessing what survived.
+        self.data_changed("settings", "records", "pools")
         self.settings_fill()
         if more:
             messagebox.showwarning("Settings", "Saved, but these kept their defaults:\n\n" + "\n".join(more),

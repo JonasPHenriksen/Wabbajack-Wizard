@@ -147,7 +147,7 @@ check("start-up finished", settle(), "still busy")
 check("the manifests were read", sorted(app.records) == ["Doomed.wabbajack", "Keep.wabbajack"],
       str(sorted(app.records)))
 check("  and the log pane says so", "manifest(s) in" in log_text(), log_text()[-300:])
-check("the first tab loaded itself", "Browse" in app.loaded)
+check("the first tab loaded itself", "Browse" in app.tab_seen)
 check("no dialog was needed to start", not any(k == "show" for k, _t, _x in DLG.calls),
       str(DLG.calls))
 
@@ -463,6 +463,72 @@ app.space_leftovers()
 settle()
 check("a second press says there is nothing to do", DLG.shown("Nothing left over"),
       str(DLG.calls))
+
+# ---------------------------------------------------------------- 15.12
+print("\n 15.12  a tab is rebuilt when what it reads has moved on")
+
+app.tab_filled(*GUI.TAB_DEPENDS)
+check("with nothing changed, no tab needs rebuilding",
+      not any(app.tab_is_stale(n) for n in GUI.TAB_DEPENDS),
+      str([n for n in GUI.TAB_DEPENDS if app.tab_is_stale(n)]))
+
+app.data_changed("records")
+check("a manifest change reaches Updates", app.tab_is_stale("Updates"))
+check("  and Browse, which shows what you already own", app.tab_is_stale("Browse"))
+check("  and Incomplete", app.tab_is_stale("Incomplete"))
+check("  but not Settings", not app.tab_is_stale("Settings"))
+
+app.tab_filled(*GUI.TAB_DEPENDS)
+app.data_changed("pools")
+check("moving archives reaches Space", app.tab_is_stale("Space"))
+check("  and Prepare", app.tab_is_stale("Prepare"))
+check("  but not Updates, which only reads the manifests",
+      not app.tab_is_stale("Updates"))
+
+print("\n      the reported bug: delete a modlist, Updates still offers it")
+box.manifest("Spare", GAME, [("sp.7z", 4, "nexus")])
+box.pool_file(GAME, "Spare", "sp.7z", 4)
+A.WJ.set_known_list_dirs(A.WJ.known_list_dirs_from(box.manifests))
+app.reload_records()
+app.space_measure()
+settle()
+app.tab_filled(*GUI.TAB_DEPENDS)              # every tab is showing the world as it is
+spare = [i for i, x in enumerate(app.space["lists"])
+         if W.stem_of(x["file"]) == "Spare"]
+check("Spare is on the Space tab", len(spare) == 1, str([x["file"] for x in app.space["lists"]]))
+app.lists_table.tree.selection_set(str(spare[0]))
+app.space_delete()
+settle()
+check("the manifest is gone", not os.path.exists(os.path.join(box.manifests, "Spare.wabbajack")))
+check("Updates is now stale, so it cannot still offer it", app.tab_is_stale("Updates"))
+check("  Incomplete and Prepare too",
+      app.tab_is_stale("Incomplete") and app.tab_is_stale("Prepare"))
+check("  while Space, which refreshed itself, is current",
+      not app.tab_is_stale("Space"))
+
+print("\n      the pool index survives a change that cannot have moved it")
+app.browse_load()
+settle()
+kept = app.browse["indexes"]
+app.data_changed("records")
+app.browse_load()
+settle()
+check("a manifest change keeps the pool index", app.browse["indexes"] is kept)
+app.data_changed("pools")
+app.browse_load()
+settle()
+check("  and a change to the archives drops it", app.browse["indexes"] is not kept)
+
+print("\n      a running job holds you on the tab you started it from")
+current = app.nb.select()
+app.run_job("Slow", lambda: time.sleep(0.3))
+others = [app.nb.tab(t, "state") for t in app.nb.tabs() if t != current]
+check("every other tab is locked while it runs", set(others) == {"disabled"}, str(others))
+check("  and the one you are on is not", app.nb.tab(current, "state") == "normal")
+settle()
+check("  all of them unlock when it finishes",
+      {app.nb.tab(t, "state") for t in app.nb.tabs()} == {"normal"},
+      str([app.nb.tab(t, "state") for t in app.nb.tabs()]))
 
 # ---- put everything back ---------------------------------------------------
 root.destroy()

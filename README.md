@@ -84,6 +84,30 @@ console uses. Stages are independent: skipping one does not affect the others.
    leftovers no other step reaches. Every step confirms, and lets you change
    the selection at the confirmation.
 
+### When a tab rebuilds itself
+
+Each tab records what it was built from, and rebuilds when something it reads
+has moved on. Three things are tracked separately: the **manifests** held and
+which published list each one is, the **archives** on the share, and the
+**settings**.
+
+| a tab reads | manifests | archives | settings |
+| --- | :---: | :---: | :---: |
+| Browse | ● | ● | |
+| Updates | ● | | |
+| Incomplete, Prepare | ● | ● | |
+| Space | ● | ● | |
+| Settings | | | ● |
+
+Every operation says which of the three it moved, so a new tab cannot be
+forgotten by an older handler. Tracking them apart is what keeps the refresh
+cheap: fetching a manifest changes what Updates and Browse show, but not the
+archives on disk, so Browse keeps its pool index rather than paying the
+28-second Skyrim scan again.
+
+While a job runs, the other tabs are locked. Leaving mid-way landed you on a
+tab rebuilt from data the job had not finished writing.
+
 ## Stage 1: what you already own of what you do not have
 
 Wabbajack's gallery is not an API — it is a set of JSON files in the
@@ -564,7 +588,7 @@ recognised (if unfetchable) source rather than "unknown".
 .venv-win\Scripts\python.exe tests\run_all.py
 ```
 
-792 checks across sixteen suites. None of them touch the live archive pools:
+810 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

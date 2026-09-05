@@ -22,7 +22,6 @@
   **adopt it** instead of offering to park it. Parking one would hide archives
   you own from the list that wants them. The published check reads only feeds
   already loaded that run, so stage 5 still never touches the network.
-
 - A leftovers sweep, `5e` in the console and **Remove leftovers** in the Space
   tab. Every other step judges archives, so nothing ever reached the debris
   beside them: operating-system metadata, the `._name` files a Mac writes on a
@@ -35,6 +34,15 @@
 
 ### Fixed
 
+- Switching tabs could show stale data. Deleting a modlist cleared Incomplete
+  and Prepare but forgot Updates, so a list you had just deleted was still
+  offered for updating until the window was reopened. Each tab now records
+  what it was built from - the manifests, the archives on disk, the settings -
+  and rebuilds only when something it actually reads has moved on. Fetching a
+  manifest no longer throws away the pool index behind Browse, which is the
+  expensive part.
+- A job now holds you on the tab you started it from. Leaving mid-way landed
+  you on a tab rebuilt from data the job had not finished writing.
 - The Space tab gathered the orphaned-sidecar report and never displayed it,
   so in the window a stray folder had no explanation. It is shown now.
 - A dozen games showed their raw feed token as a name, so the browse menu read
@@ -43,7 +51,7 @@
   true at a glance. The count was right, 220 live plus 5 retired lists still
   listed, and the line now says so.
 
-Tests: 792 checks across 16 sandbox suites, up from 698 across 15.
+Tests: 810 checks across 16 sandbox suites, up from 698 across 15.
 
 ## 1.0.0 — 2026-09-04
 
