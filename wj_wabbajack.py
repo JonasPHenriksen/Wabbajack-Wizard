@@ -28,17 +28,32 @@ import csv
 import io
 import os
 import re
+import shutil
 import subprocess
+
+import wj_paths
 
 try:
     import wj_config as CFG
 except ImportError:                     # pragma: no cover - see wj_config.py
     CFG = None
+try:
+    import wj_gallery as G
+except ImportError:                     # pragma: no cover
+    G = None
 
 # The processes that may be reading a downloads folder or an install: the
 # GUI, and the CLI this tooling itself drives. Moving archives under a running
 # install breaks it, so the wizard waits for these to be gone first.
 WABBAJACK_PROCESSES = ("wabbajack.exe", "wabbajack-cli.exe")
+
+# Where Wabbajack publishes itself. The release tag is the bare version,
+# "4.2.3.0", the same string its install uses as the versioned folder name,
+# so the two compare directly.
+RELEASES_API = "https://api.github.com/repos/wabbajack-tools/wabbajack/releases/latest"
+RELEASES_URL = "https://github.com/wabbajack-tools/wabbajack/releases"
+RELEASE_TTL = 6 * 3600
+RELEASE_CACHE = "wabbajack/latest_release.json"
 
 
 def parse_tasklist(text):
@@ -99,20 +114,28 @@ WABBAJACK_GAME_NAMES = {
 }
 
 
+# Where a Wabbajack install is kept when it lives with this tooling: a folder
+# of this name inside the tools folder. Gitignored; Wabbajack's launcher puts
+# each version it downloads in a subfolder of it.
+WABBAJACK_SUBDIR = "Wabbajack"
+
+
 def find_wabbajack(hint=None):
     """Locate a Wabbajack install. Returns a dict, or None.
 
     Looks where this tooling is most likely to find one: an explicit setting,
-    then a sibling of the tools folder (the usual arrangement on this share),
-    then the ordinary per-user install location. The CLI lives in a
-    version-numbered subfolder, so the newest one is taken."""
+    then inside the tools folder itself (so the whole arrangement moves as
+    one), then a sibling of it, then the ordinary per-user install location.
+    The CLI lives in a version-numbered subfolder, so the newest one is
+    taken."""
     roots = []
     if hint:
         roots.append(hint)
     if CFG is not None and getattr(CFG, "WABBAJACK_DIR", None):
         roots.append(CFG.WABBAJACK_DIR)
-    here = os.path.dirname(os.path.abspath(__file__))
-    roots.append(os.path.normpath(os.path.join(here, "..", "Wabbajack")))
+    here = wj_paths.app_dir(__file__)
+    roots.append(os.path.join(here, WABBAJACK_SUBDIR))
+    roots.append(os.path.normpath(os.path.join(here, "..", WABBAJACK_SUBDIR)))
     local = os.environ.get("LOCALAPPDATA")
     if local:
         roots.append(os.path.join(local, "Wabbajack"))
@@ -145,6 +168,112 @@ def find_wabbajack(hint=None):
 def version_key(name):
     """Sort 4.10 after 4.9 rather than before it."""
     return [int(n) for n in re.findall(r"\d+", name)] or [-1]
+
+
+_VERSION_DIR = re.compile(r"^\d+(\.\d+)+$")
+
+
+def is_version_dir(root, name):
+    """Is `name` under `root` a Wabbajack version folder: named like one, and
+    holding the program or its CLI? Wabbajack's launcher keeps every version
+    it has ever downloaded in such a folder and runs the newest."""
+    path = os.path.join(root, name)
+    return bool(_VERSION_DIR.match(name)) and os.path.isdir(path) and (
+        os.path.isfile(os.path.join(path, "Wabbajack.exe"))
+        or os.path.isfile(os.path.join(path, "cli", "wabbajack-cli.exe")))
+
+
+def prune_old_versions(wj, running=None):
+    """Remove the version folders an update has superseded. Returns their
+    names.
+
+    Wabbajack's launcher downloads each new version into its own folder and
+    leaves the old ones where they were, at some 700 MB each. Only folders
+    that are version-named and hold the program go, only ones older than the
+    newest, and never while a Wabbajack process is running: the launcher
+    itself is one, and while it runs the newest folder may still be arriving.
+    The newest folder has to be whole - program and CLI both - before anything
+    older is judged superseded by it."""
+    if not wj or not wj.get("version") or not wj.get("dir"):
+        return []
+    root, newest = wj["dir"], wj["version"]
+    if not (os.path.isfile(os.path.join(root, newest, "Wabbajack.exe"))
+            and os.path.isfile(os.path.join(root, newest, "cli", "wabbajack-cli.exe"))):
+        return []
+    if running is None:
+        running = running_processes()
+    if running:
+        return []
+    removed = []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return []
+    for name in sorted(names):
+        if name == newest or not is_version_dir(root, name):
+            continue
+        if version_key(name) >= version_key(newest):
+            continue
+        try:
+            shutil.rmtree(os.path.join(root, name))
+        except OSError:
+            continue
+        removed.append(name)
+    return removed
+
+
+def latest_release(force=False):
+    """The newest Wabbajack release as {"version", "url", "published"}, or
+    None when it cannot be learnt.
+
+    Read from GitHub's release API and kept in the gallery cache beside the
+    validation reports for six hours, so a session asks once and the answer
+    survives the network being down. Unauthenticated, which allows sixty
+    requests an hour; this makes at most one."""
+    if G is None:
+        return None
+    try:
+        data = G.fetch_json(RELEASE_CACHE, ttl=RELEASE_TTL, force=force, url=RELEASES_API)
+    except Exception:              # the network, or JSON that is not a release
+        return None
+    if not isinstance(data, dict):
+        return None
+    tag = str(data.get("tag_name") or "").strip().lstrip("vV")
+    if not tag:
+        return None
+    return {"version": tag, "url": str(data.get("html_url") or RELEASES_URL),
+            "published": str(data.get("published_at") or "")}
+
+
+def update_status(wj, latest=None):
+    """How the installed Wabbajack stands against the newest release.
+
+    `wj` is find_wabbajack()'s answer. Returns installed (the versioned
+    folder's name, or None), latest (or None when it could not be learnt),
+    outdated (True, False, or None for cannot tell), url, and text - one line
+    that says it. Never raises. A lookup that fails is 'cannot tell', which
+    neither stops an install nor blesses one: the check exists so that a
+    modlist built for a newer Wabbajack is not installed on an older one by
+    surprise, and a check that cannot run must say so rather than guess."""
+    installed = (wj or {}).get("version")
+    # No point asking GitHub about a version that is not there to compare.
+    rel = latest if latest is not None else (latest_release() if installed else None)
+    newest = rel.get("version") if rel else None
+    url = (rel or {}).get("url") or RELEASES_URL
+    outdated = (version_key(installed) < version_key(newest)) if installed and newest else None
+    if not wj:
+        text = "Wabbajack was not found"
+    elif not installed:
+        text = "Wabbajack is installed, but no versioned folder with a CLI was found in it"
+    elif outdated is None:
+        text = f"Wabbajack {installed} installed; the newest release could not be looked up"
+    elif outdated:
+        text = (f"Wabbajack {installed} installed; {newest} is the newest release, "
+                f"so an update is available")
+    else:
+        text = f"Wabbajack {installed} installed, the newest release"
+    return {"installed": installed, "latest": newest, "outdated": outdated, "url": url,
+            "text": text}
 
 
 _GAMES_CACHE = {}

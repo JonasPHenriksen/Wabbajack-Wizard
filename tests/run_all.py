@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 r"""Run every sandbox suite and report a combined total.
 
-    ..\.venv-win\Scripts\python.exe tests\run_all.py
+    .python\python.exe tests\run_all.py
+
+(or .venv-win\Scripts\python.exe where a machine-wide Python made that
+environment). Each suite runs the scripts with the same interpreter that runs
+it - see harness.PY.
 
 Nothing here touches the live archive pools. ARCHIVE_ROOT is "../Mod Archive"
 resolved against the SCRIPT folder, so each suite copies the scripts into a

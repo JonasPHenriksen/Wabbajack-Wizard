@@ -2,8 +2,9 @@
 REM ---------------------------------------------------------------------
 REM  Wabbajack Wizard - launch from the mapped share
 REM
-REM  Prefers the isolated environment made by setup_env.bat, then a
-REM  lib-win folder, then whatever Python is on PATH.
+REM  Prefers the interpreter kept inside this folder (.python\), then the
+REM  environment made by setup_env.bat, then a lib-win folder, then
+REM  whatever Python is on PATH.
 REM
 REM  With no arguments this opens the desktop window (no console). Any
 REM  argument runs the console side instead, and passes straight through:
@@ -23,9 +24,19 @@ REM ---------------------------------------------------------------------
 REM pushd copes with UNC paths (\\server\share\...) that plain cd cannot.
 pushd "%~dp0"
 
+if exist ".python\python.exe" goto useproject
 if exist ".venv-win\Scripts\python.exe" goto usevenv
 if exist "lib-win" goto uselib
 goto usesystem
+
+:useproject
+REM An interpreter unpacked inside the project, with xxhash installed into it
+REM by setup_env.bat. Nothing on the machine, and nothing that breaks when
+REM the folder moves: every path here is relative to this file.
+set PY=.python\python.exe
+set PYW=.python\pythonw.exe
+set WHERE=.python (inside this folder)
+goto launch
 
 :usevenv
 set PY=.venv-win\Scripts\python.exe
@@ -76,8 +87,9 @@ goto end
 :nopython
 echo.
 echo Python was not found on PATH.
-echo Install it from https://www.python.org/downloads/ and tick
-echo "Add python.exe to PATH", then run setup_env.bat once.
+echo Either unpack a python-build-standalone release into .python\ here
+echo (see README.md), or install Python from https://www.python.org/downloads/
+echo with "Add python.exe to PATH" ticked; then run setup_env.bat once.
 echo.
 set RC=2
 

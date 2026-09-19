@@ -66,6 +66,8 @@ import urllib.request
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 
+import wj_paths
+
 try:
     import wj_config as CFG
 except ImportError:
@@ -125,7 +127,7 @@ LOCK_FILE    = ".wj_autoupdate.lock"
 # =======================================================================
 
 NEWLINE = chr(10)
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = wj_paths.app_dir(__file__)
 LOG = logging.getLogger("wj_autoupdate")
 
 # Filled in by resolve_dirs() during startup.
@@ -293,15 +295,34 @@ def resolve_dirs():
 # downloader guards its Windows-only imports and only runs main() under
 # __main__, so importing it is side-effect free.
 # ----------------------------------------------------------------------
-def load_downloader_module():
-    path = os.path.join(HERE, DOWNLOADER_SCRIPT)
+def sibling_module(script, alias):
+    """Load one of our own scripts as a module object.
+
+    From source it is read from the .py file next to us, deliberately as a
+    fresh module under its own name: the point is to see what that file says
+    right now, on this disk, rather than what an earlier import cached.
+
+    Frozen there is no .py file to read and no local edit to catch - the code
+    is sealed in the bundle - so the module is imported the ordinary way.
+    Raises FileNotFoundError if the script is missing; the callers each have
+    their own thing to say about that."""
+    if wj_paths.frozen():
+        return importlib.import_module(os.path.splitext(script)[0])
+    path = os.path.join(HERE, script)
     if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    spec = importlib.util.spec_from_file_location(alias, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_downloader_module():
+    try:
+        mod = sibling_module(DOWNLOADER_SCRIPT, "wj_dl")
+    except FileNotFoundError:
         LOG.error("[TERMINATED] %s not found next to this script.", DOWNLOADER_SCRIPT)
         sys.exit(1)
-    spec = importlib.util.spec_from_file_location("wj_dl", path)
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
     except Exception as e:
         LOG.error("[TERMINATED] Could not import %s: %s", DOWNLOADER_SCRIPT, e)
         sys.exit(1)
@@ -325,20 +346,22 @@ def check_script_consistency():
     expensive: the downloader decides where an archive is WRITTEN and the
     sorter decides where it is MOVED TO, so a local override re-added to one of
     them sends every run across two different directory trees while both report
-    success."""
-    cfg = os.path.join(HERE, "wj_config.py")
-    if not os.path.isfile(cfg):
+    success.
+
+    Frozen there is nothing left to catch - one bundle holds one copy of each
+    module, so the two cannot disagree - and the check costs a comparison of
+    values already in memory. It is left in rather than made conditional: one
+    code path, and it stays honest if the build ever gains a second source of
+    settings."""
+    if not wj_paths.frozen() and not os.path.isfile(os.path.join(HERE, "wj_config.py")):
         LOG.error("[TERMINATED] wj_config.py is missing from %s. It defines the "
                   "archive layout and is not optional.", HERE)
         return False
-    path = os.path.join(HERE, SORTER_SCRIPT)
-    if not os.path.isfile(path):
+    try:
+        mod = sibling_module(SORTER_SCRIPT, "wj_sort_cfg")
+    except FileNotFoundError:
         LOG.error("[TERMINATED] %s not found next to this script.", SORTER_SCRIPT)
         return False
-    spec = importlib.util.spec_from_file_location("wj_sort_cfg", path)
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
     except Exception as e:
         LOG.error("[TERMINATED] Could not read the sorter's configuration: %s", e)
         return False
@@ -1080,7 +1103,7 @@ def run_script(script, args, label, interactive=False):
     hook instead, carriage returns included as line breaks, and stdin is
     closed: the GUI has no console to hand over, and neither child needs one
     when its flags and the API key file answer every question."""
-    cmd = [sys.executable, os.path.join(HERE, script)] + args
+    cmd = wj_paths.stage_argv(script, HERE) + args
     LOG.info("\n$ %s", " ".join(cmd))
     # The child scripts default to scanning their own folder for manifests;
     # this tells them to look where we actually keep them.
@@ -1088,10 +1111,16 @@ def run_script(script, args, label, interactive=False):
                WJ_LOCK_HELD="1")
     cap = os.path.join(HERE, f"wj_autoupdate_{label}.out")
     if OUTPUT_HOOK is not None:
+        # The window has no console to give away, and frozen the child is the
+        # console binary, which Windows would otherwise hand a console window
+        # of its own - one flashing up per stage. Everything it says is on the
+        # pipe we are about to read, so it needs no window to say it in.
+        quiet = ({"creationflags": subprocess.CREATE_NO_WINDOW}
+                 if hasattr(subprocess, "CREATE_NO_WINDOW") else {})
         try:
             proc = subprocess.Popen(cmd, cwd=HERE, env=env, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, errors="replace", bufsize=1)
+                                    text=True, errors="replace", bufsize=1, **quiet)
         except OSError as e:
             LOG.error("[ERROR] Could not launch %s: %s", script, e)
             return 127
@@ -1212,9 +1241,14 @@ def cmd_gallery(sync=False, force=False):
     pooled = GAL.pooled_games({e.get("game") for e in feeds.values()})
     rows = GAL.build_rows(feeds, summary, featured, disabled, set(tracked),
                           games=set(pooled))
+    # A hidden list is left out of everything below, its report sweep
+    # included: not fetching what will never be looked at is the point.
+    hidden = [r for r in rows if r["hidden"]]
+    rows = [r for r in rows if not r["hidden"]]
 
-    LOG.info("%d published list(s); %d for the %d game(s) with a pool folder.",
-             len(feeds), len(rows), len(pooled))
+    LOG.info("%d published list(s); %d for the %d game(s) with a pool folder%s.",
+             len(feeds), len(rows), len(pooled),
+             (" (%d hidden, left out)" % len(hidden)) if hidden else "")
     LOG.info("Tracked here: %d. Featured: %d. Unavailable: %d. Retired: %d.",
              sum(1 for r in rows if r["have"]),
              sum(1 for r in rows if r["featured"]),

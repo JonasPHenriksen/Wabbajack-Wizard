@@ -1,0 +1,17 @@
+# Building the Windows binaries. Not needed to RUN this tool - only to make
+# the zip for people who have no Python. See build.py.
+#
+# With the interpreter kept inside the project:
+#     .python\python.exe -m pip install -r requirements-build.txt
+#     .python\python.exe build.py
+#
+# With a machine-wide Python, in an environment of its own:
+#     python -m venv .venv-build
+#     .venv-build\Scripts\python -m pip install -r requirements-build.txt
+#     python build.py
+
+pyinstaller>=6.16
+
+# The bundle must carry the same hashing the scripts use, so it has to be
+# installed here too - PyInstaller can only package what it can import.
+xxhash>=3.0

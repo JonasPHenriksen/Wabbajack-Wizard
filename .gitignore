@@ -5,11 +5,25 @@
 modlists/
 manifest_backups/
 
-# Local Python environment: platform-specific, rebuilt by setup_env.bat.
+# Local Python. .python/ is an interpreter kept inside the project (a
+# python-build-standalone unpack) for machines with no Python installed;
+# setup_env.bat installs the requirements straight into it, so no venv is
+# needed and the folder can move. .venv-win/ is the arrangement for a
+# machine-wide Python instead. .mingit/ is the same idea as .python/ for git:
+# a MinGit unpack, with the portable Git Credential Manager inside it, and
+# git.bat in the project root in front of it. Nothing is installed machine-wide.
+.python/
+.mingit/
+git.bat
 .venv-win/
 lib-win/
 __pycache__/
 *.pyc
+
+# The environment that builds the binaries, and PyInstaller's scratch space.
+# Both are made from requirements-build.txt and WabbajackWizard.spec.
+.venv-build/
+build/
 
 # Your settings. wj_settings.example.json is the documented template; this
 # is your copy of it and stays local.
@@ -25,6 +39,7 @@ nexus_api_key.txt
 # ---------------------------------------------------------------------
 wj_autoupdate_state.json
 wj_manifest_cache.json
+wj_overview.json
 *.log
 *.out
 *.csv
@@ -35,6 +50,17 @@ nxm_captured.txt
 
 # Release builds, made by release.py from what git tracks.
 dist/
+
+# A build unzipped or copied here to run beside the data, which is where it
+# has to sit: everything it reads is in the folder it starts from.
+WabbajackWizard.exe
+WabbajackWizard-console.exe
+_internal/
+
+# Wabbajack itself, kept inside the project so the whole arrangement moves as
+# one. Its launcher downloads each version into a subfolder; the wizard
+# removes the superseded ones.
+Wabbajack/
 
 # Pre-change copies kept locally for rollback.
 .orig_backup_*/

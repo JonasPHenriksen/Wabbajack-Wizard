@@ -149,9 +149,12 @@ W.out = lambda msg="": buf.write(str(msg) + "\n")
 # (set in 9.3) do not include it. Stubbed, so this does not depend on which
 # games THIS machine has, nor run the real list-games probe, which scans
 # every store and can take minutes.
-real_find = WB.find_wabbajack
+real_find, real_latest = WB.find_wabbajack, WB.latest_release
 WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None,
                                        "cli": "stub", "version": "9.9"}
+# The release lookup is stubbed too: a test must not ask GitHub, nor write
+# into the real gallery cache beside the scripts.
+WB.latest_release = lambda force=False: None
 st = {"game": "SkyrimSpecialEdition", "missing": 5, "bytes": 1234,
       "present": 10, "nexus": 5, "direct": 0, "stale": 0, "gamefile": 0,
       "other": 0, "nexus_bytes": 1234, "direct_bytes": 0}
@@ -159,7 +162,7 @@ try:
     res = W.offer_install({}, "Some_@@_list.wabbajack", st)
 finally:
     W.out = real_out
-    WB.find_wabbajack = real_find
+    WB.find_wabbajack, WB.latest_release = real_find, real_latest
 text = buf.getvalue()
 check("it does not claim to have installed anything", res is False)
 check("it shows the two paths it would have used",
@@ -181,6 +184,98 @@ finally:
     W.CFG.INSTALL_MODE = saved_mode
 check("returns False and prints nothing",
       res is False and buf2.getvalue() == "", repr(buf2.getvalue()[:80]))
+
+# ---------------------------------------------------------------- 9.7
+print("\n 9.7  is the installed Wabbajack the newest release?")
+newest = {"version": "4.2.3.0", "url": "https://x/rel", "published": "2026-09-09"}
+old = {"dir": "d", "exe": r"d\Wabbajack.exe", "cli": r"d\4.2.2.1\cli\wabbajack-cli.exe",
+       "version": "4.2.2.1"}
+s = WB.update_status(old, latest=newest)
+check("an older install is outdated",
+      s["outdated"] is True and s["installed"] == "4.2.2.1" and s["latest"] == "4.2.3.0", str(s))
+check("  and the sentence says so, with where to get the new one",
+      "update is available" in s["text"] and s["url"] == "https://x/rel", str(s))
+s = WB.update_status(dict(old, version="4.2.3.0"), latest=newest)
+check("the same version is current", s["outdated"] is False and "newest release" in s["text"], str(s))
+s = WB.update_status(dict(old, version="4.10.0.0"), latest={"version": "4.9.9.9", "url": "u"})
+check("4.10 is newer than 4.9, not older", s["outdated"] is False, str(s))
+s = WB.update_status(old, latest={})
+check("a lookup that failed is 'cannot tell', never 'current'",
+      s["outdated"] is None and "could not be looked up" in s["text"], str(s))
+s = WB.update_status(None, latest=newest)
+check("no Wabbajack at all says so", s["outdated"] is None and "not found" in s["text"], str(s))
+s = WB.update_status(dict(old, version=None), latest=newest)
+check("an install with no versioned folder cannot be compared",
+      s["outdated"] is None and "versioned folder" in s["text"], str(s))
+
+print("\n      the version folders an update superseded are removed, carefully")
+inst = os.path.join(BOX, "wj-install")
+shutil.rmtree(inst, ignore_errors=True)
+for ver, whole in (("4.2.2.1", True), ("4.2.3.0", True), ("4.1.0.0", True), ("4.9.0.0", False)):
+    os.makedirs(os.path.join(inst, ver, "cli"))
+    if whole:
+        io.open(os.path.join(inst, ver, "Wabbajack.exe"), "wb").write(b"x")
+    io.open(os.path.join(inst, ver, "cli", "wabbajack-cli.exe"), "wb").write(b"x")
+os.makedirs(os.path.join(inst, "downloads"))                    # not a version folder
+os.makedirs(os.path.join(inst, "3.0.0.0"))                       # version-named, but empty
+io.open(os.path.join(inst, "Wabbajack.exe"), "wb").write(b"launcher")
+wj = WB.find_wabbajack(hint=inst)
+check("the newest whole version is the one found", wj["version"] == "4.9.0.0", str(wj))
+check("  but a newest that is not whole (no Wabbajack.exe) prunes nothing",
+      WB.prune_old_versions(wj, running=[]) == [] and os.path.isdir(os.path.join(inst, "4.1.0.0")))
+shutil.rmtree(os.path.join(inst, "4.9.0.0"))
+wj = WB.find_wabbajack(hint=inst)
+check("with 4.2.3.0 the newest, nothing goes while Wabbajack runs",
+      WB.prune_old_versions(wj, running=[(1, "Wabbajack.exe")]) == []
+      and os.path.isdir(os.path.join(inst, "4.2.2.1")))
+gone = WB.prune_old_versions(wj, running=[])
+check("  and with it closed, the two older versions go",
+      gone == ["4.1.0.0", "4.2.2.1"], str(gone))
+left = sorted(os.listdir(inst))
+check("  the newest, the launcher, a non-version folder and an empty version-named one stay",
+      left == ["3.0.0.0", "4.2.3.0", "Wabbajack.exe", "downloads"], str(left))
+check("  a second pass has nothing to do", WB.prune_old_versions(wj, running=[]) == [])
+check("no install at all is no error", WB.prune_old_versions(None) == [])
+
+print("\n      the release is read through the gallery cache, from GitHub's API")
+import wj_gallery as G
+real_fetch = G.fetch_json
+calls = []
+
+
+def fake_fetch(rel, ttl=None, force=False, lenient=False, url=None):
+    calls.append((rel, url))
+    return {"tag_name": "v4.2.3.0", "html_url": "https://x/tag",
+            "published_at": "2026-09-09T17:35:14Z"}
+
+
+G.fetch_json = fake_fetch
+try:
+    r = WB.latest_release()
+finally:
+    G.fetch_json = real_fetch
+check("it asks for the release API, caching it under its own name",
+      calls and calls[0] == (WB.RELEASE_CACHE, WB.RELEASES_API), str(calls))
+check("  a leading v is dropped so the tag compares with the install's folder",
+      r["version"] == "4.2.3.0" and r["url"] == "https://x/tag", str(r))
+
+
+def down(*a, **k):
+    raise G.GalleryError("network down")
+
+
+G.fetch_json = down
+try:
+    r = WB.latest_release()
+finally:
+    G.fetch_json = real_fetch
+check("with the network down it is None rather than an error", r is None, str(r))
+G.fetch_json = lambda *a, **k: ["not", "a", "release"]
+try:
+    r = WB.latest_release()
+finally:
+    G.fetch_json = real_fetch
+check("  as it is for an answer in the wrong shape", r is None, str(r))
 
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

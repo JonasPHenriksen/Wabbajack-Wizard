@@ -49,6 +49,8 @@ import argparse
 from datetime import datetime
 from collections import defaultdict
 
+import wj_paths
+
 # ============================ CONFIGURATION ============================
 # ---------------------------------------------------------------------
 # Layout settings come from wj_config.py, which both this script and
@@ -992,7 +994,7 @@ def main():
                         help="Verbose (debug-level) console output.")
     args = parser.parse_args()
 
-    current_dir = os.path.dirname(os.path.abspath(__file__))
+    current_dir = wj_paths.app_dir(__file__)
     log_path = setup_logging(current_dir, verbose=args.verbose)
 
     # Nothing below may run concurrently with a download into the same pools.
@@ -1120,6 +1122,9 @@ def main():
 
     protected = {f.lower() for f in wj_files}
     protected.add(os.path.basename(__file__).lower())
+    # Frozen, __file__ names a file inside the bundle that nobody can see;
+    # the two exes beside the pools are what actually needs shielding.
+    protected |= wj_paths.own_names()
     # Also shield the companion scripts and their bookkeeping files, in case the
     # script folder and a pool folder are ever the same directory. Cheap
     # insurance: none of these are ever legitimate archive names.

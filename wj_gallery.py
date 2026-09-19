@@ -42,12 +42,14 @@ import time
 import urllib.error
 import urllib.request
 
+import wj_paths
+
 try:
     import wj_config as CFG
 except ImportError:
     CFG = None
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = wj_paths.app_dir(__file__)
 
 # ============================ CONFIGURATION ============================
 RAW_BASE = ("https://raw.githubusercontent.com/wabbajack-tools/"
@@ -137,10 +139,11 @@ def cache_size():
 # ----------------------------------------------------------------------
 # HTTP
 # ----------------------------------------------------------------------
-def http_bytes(rel):
-    """GET one gallery file. Asks for gzip: the big reports compress 5x."""
+def http_bytes(rel, url=None):
+    """GET one gallery file, or any URL named outright. Asks for gzip: the
+    big reports compress 5x."""
     req = urllib.request.Request(
-        RAW_BASE + rel,
+        url or (RAW_BASE + rel),
         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"})
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
         raw = r.read()
@@ -162,11 +165,13 @@ def lenient_json(text):
         return json.loads(re.sub(r",(\s*[}\]])", r"\1", text))
 
 
-def fetch_json(rel, ttl=INDEX_TTL, force=False, lenient=False):
+def fetch_json(rel, ttl=INDEX_TTL, force=False, lenient=False, url=None):
     """A gallery file as Python, from the cache when it is fresh enough.
 
     Falls back to a stale cached copy if the network is down, because a
-    slightly old gallery is far more useful than no gallery."""
+    slightly old gallery is far more useful than no gallery. `url` names a
+    file outside the gallery repository - Wabbajack's own release feed - which
+    is then kept in this cache under `rel` like everything else."""
     age = cache_age(rel)
     if not force and age is not None and age < ttl:
         raw = _read_cache(rel)
@@ -174,7 +179,7 @@ def fetch_json(rel, ttl=INDEX_TTL, force=False, lenient=False):
             return (lenient_json(raw.decode("utf-8-sig")) if lenient
                     else json.loads(raw.decode("utf-8-sig")))
     try:
-        raw = http_bytes(rel)
+        raw = http_bytes(rel) if url is None else http_bytes(rel, url)
     except Exception as e:
         stale = _read_cache(rel)
         if stale is not None:
@@ -275,6 +280,25 @@ def game_label(token):
     if CFG is not None and hasattr(CFG, "game_label"):
         return CFG.game_label(g)
     return g or "?"
+
+
+# ----------------------------------------------------------------------
+# Lists the user has hidden
+# ----------------------------------------------------------------------
+def hidden_keys():
+    """Lowercased feed keys named in HIDDEN: lists kept out of the gallery.
+
+    Compared case-insensitively like EXCLUDE, because the keys are typed by
+    hand in the settings file as often as written by the Hide button."""
+    if CFG is None:
+        return set()
+    return {str(k).strip().lower() for k in (getattr(CFG, "HIDDEN", None) or ())
+            if str(k).strip()}
+
+
+def is_hidden(key):
+    """Is this feed key one the user has hidden?"""
+    return str(key or "").strip().lower() in hidden_keys()
 
 
 def pool_dir(token):
@@ -569,7 +593,15 @@ def build_rows(feeds, summary, featured, disabled, have_keys, games=None):
 
     `feeds` is wj_autoupdate.load_feeds()'s dict, so version/size/archive
     count come from the same normalised entries the updater uses. `games`, if
-    given, restricts the result to those game keys."""
+    given, restricts the result to those game keys.
+
+    Every row carries `hidden`: named in HIDDEN and not tracked. The rows are
+    all returned, hidden ones included, so a caller decides what to do with
+    them - the browse stage shows them in a view of their own, the protection
+    rule leaves them out. A tracked list is never hidden whatever HIDDEN
+    says, because its own manifest is what protects its archives and a flag
+    that could quietly cancel that would be worse than none."""
+    hid = hidden_keys()
     rows = []
     for key, ent in feeds.items():
         gk = game_key(ent.get("game"))
@@ -586,6 +618,7 @@ def build_rows(feeds, summary, featured, disabled, have_keys, games=None):
             "arch_size": ent.get("arch_size"),
             "download": ent.get("download"),
             "have": key in have_keys,
+            "hidden": key.lower() in hid and key not in have_keys,
             "featured": key in featured,
             "retired": False,
             "force_down": bool(ent.get("force_down")),
@@ -620,6 +653,7 @@ def build_rows(feeds, summary, featured, disabled, have_keys, games=None):
             "arch_size": dm.get("SizeOfArchives"),
             "download": links.get("download"),
             "have": key in have_keys,
+            "hidden": key.lower() in hid and key not in have_keys,
             "featured": False,
             "retired": True,
             "force_down": False,

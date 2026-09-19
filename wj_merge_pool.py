@@ -56,8 +56,9 @@ except ImportError:
 import wj_downloader as WJ
 import wj_autoupdate as A
 from wj_sorter import unique_path
+import wj_paths
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = wj_paths.app_dir(__file__)
 ROOT = CFG.resolved_archive_root()
 POOLS = {p.lower() for p in CFG.POOL_FOLDERS}
 RESUME_SUFFIXES = (".part", ".parts.json")

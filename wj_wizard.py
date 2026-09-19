@@ -549,6 +549,16 @@ def gallery_protection(pools, progress=True):
         return None, ("some author feeds did not respond, so the list of "
                       "published modlists is short"), []
 
+    # A hidden list is not a published list as far as this rule is
+    # concerned: the user has said it is never going to be installed from
+    # here, so it protects nothing and a missing report for it blocks
+    # nothing. Named in the note, because it changes what is deleted.
+    hidden = sorted(k for k, e in feeds.items()
+                    if G.pool_key(e.get("game")) in pools and G.is_hidden(k))
+    if hidden:
+        drop = set(hidden)
+        feeds = {k: e for k, e in feeds.items() if k not in drop}
+
     keys = [k for k, e in feeds.items() if G.pool_key(e.get("game")) in pools]
     missing = [k for k in keys if k in summary and not G.have_report(k)]
     if missing:
@@ -574,6 +584,9 @@ def gallery_protection(pools, progress=True):
         note += (f"; {len(pulled)} pulled by their authors and publishing no "
                  f"archive list ({', '.join(pulled[:3])}"
                  f"{' ...' if len(pulled) > 3 else ''})")
+    if hidden:
+        note += (f"; {len(hidden)} hidden list(s) ignored ({', '.join(hidden[:3])}"
+                 f"{' ...' if len(hidden) > 3 else ''})")
     return want, note, pulled
 
 
@@ -1056,22 +1069,79 @@ def show_gallery_detail(state, row):
     ent = row.get("entry")
     out()
     if row["have"]:
-        out("  You already track this list. Stage 2 handles its updates.")
+        out("  You already track this list. Stage 2 handles its updates, and a")
+        out("  tracked list cannot be hidden.")
         ask("   [b] back", ("b",))
         return
     if not ent or not ent.get("download"):
         out("  Its feed carries no download link, so there is nothing to fetch.")
-        ask("   [b] back", ("b",))
-        return
-
-    out(f"  The .wabbajack itself is {human(ent.get('size') or 0)}. That is the")
-    out("  manifest alone; the archives listed above are a separate job that")
-    out("  stage 3 does.")
-    a = ask("   [d] download the .wabbajack and start tracking it   [b] back",
-            ("d", "b"))
+        a = ask("   [h] hide this list from the gallery   [b] back", ("h", "b"))
+    else:
+        out(f"  The .wabbajack itself is {human(ent.get('size') or 0)}. That is the")
+        out("  manifest alone; the archives listed above are a separate job that")
+        out("  stage 3 does.")
+        a = ask("   [d] download the .wabbajack and start tracking it   "
+                "[h] hide this list   [b] back", ("d", "h", "b"))
     if a == "b":
         return
+    if a == "h":
+        set_list_hidden(row["key"], True)
+        row["hidden"] = True
+        out(f"  {row['title']} is hidden: out of every stage, its report never")
+        out("  fetched, and its archives unprotected when Master is cleared.")
+        out("  [h] in the games menu lists hidden lists and brings one back.")
+        return
     adopt_gallery_list(state, row)
+
+
+def set_list_hidden(key, hidden):
+    """Flag one published list as hidden, or clear the flag, and save it.
+
+    Goes through the same save the Settings tab uses, so HIDDEN in
+    wj_settings.json is the one record and the console and the window agree
+    from their next read. Returns the new HIDDEN list."""
+    if CFG is None:
+        return []
+    low = str(key).strip().lower()
+    kept = [k for k in CFG.HIDDEN if str(k).strip().lower() != low]
+    if hidden:
+        kept.append(str(key))
+    values = CFG.current_settings()
+    values["HIDDEN"] = kept
+    CFG.save_settings(values)
+    A.reload_settings()
+    return kept
+
+
+def show_hidden_lists(hidden):
+    """The lists hidden from the gallery, with the offer to unhide one.
+
+    Shown with the feeds' own figures only: a hidden list is never measured
+    against the pools, that being most of what hiding it saves."""
+    hidden.sort(key=lambda r: (G.game_label(r["game"]).lower(), r["title"].lower()))
+    while hidden:
+        out()
+        rule("-")
+        out(f"  HIDDEN   {len(hidden)} list(s) kept out of every stage")
+        rule("-")
+        nw = fit([r["title"] for r in hidden], 7) + 2
+        gw = fit([G.game_label(r["game"]) for r in hidden], 4) + 2
+        out(f"     {'#':>3} {'modlist':<{nw}}{'game':<{gw}}{'version':<10}"
+            f"{'arch':>6}{'total':>11}")
+        for i, r in enumerate(hidden, 1):
+            out(f"     {i:>3} {r['title'][:nw - 2]:<{nw}}"
+                f"{G.game_label(r['game'])[:gw - 2]:<{gw}}{r['version'][:9]:<10}"
+                f"{r['archives'] or 0:>6}{human(r['arch_size'] or 0):>11}")
+        out()
+        out("  A number unhides that list.")
+        pick = ask_row(len(hidden), ["[b] back"])
+        if pick == "b":
+            return
+        r = hidden.pop(pick)
+        set_list_hidden(r["key"], False)
+        r["hidden"] = False
+        out(f"  {r['title']} is back in the gallery.")
+    out("  Nothing is hidden now.")
 
 
 def existing_pool_folder(folder):
@@ -1280,24 +1350,30 @@ def stage_browse(state, tracked):
         show_all = True
 
     def build_gallery(every):
-        """Rows for the games in view, and one entry per game among them.
+        """Rows for the games in view, one entry per game among them, and
+        the hidden rows kept apart.
 
         A game with no pool folder carries None for its directory. That is
         what tells the rest of this stage to measure it against nothing, and
-        to offer to lay a pool out for it."""
-        rs = G.build_rows(feeds, summary, featured, disabled, set(tracked),
-                          games=None if every else set(pooled))
+        to offer to lay a pool out for it. The hidden rows are gathered from
+        every game whatever the filter: they are shown only in their own
+        view, and that view is where a flag is taken off again."""
+        every_row = G.build_rows(feeds, summary, featured, disabled,
+                                 set(tracked))
+        hid = [r for r in every_row if r["hidden"]]
+        rs = [r for r in every_row
+              if not r["hidden"] and (every or r["game_key"] in pooled)]
         inf = {}
         for r in rs:
             gk = r["game_key"]
             if gk not in inf:
                 inf[gk] = (G.game_label(r["game"]),
                            (pooled.get(gk) or (None, None))[1], r["game"])
-        return rs, inf
+        return rs, inf, hid
 
-    rows, info = build_gallery(show_all)
+    rows, info, hidden = build_gallery(show_all)
 
-    def say_counts(rs, inf, every):
+    def say_counts(rs, inf, every, hid):
         retired = sum(1 for r in rs if r["retired"])
         out(f"  {len(feeds)} published list(s)"
             + (f", plus {retired} retired one(s) still listed" if retired else "")
@@ -1305,9 +1381,10 @@ def stage_browse(state, tracked):
         out(f"  Showing {len(rs)} across {len(inf)} game(s)"
             + (", every game the gallery covers" if every
                else ", the one(s) you keep pools for")
-            + f". You already track {sum(1 for r in rs if r['have'])}.")
+            + f". You already track {sum(1 for r in rs if r['have'])}."
+            + (f" {len(hid)} hidden." if hid else ""))
 
-    say_counts(rows, info, show_all)
+    say_counts(rows, info, show_all, hidden)
 
     size, files = G.cache_size()
     have_reports = sum(1 for r in rows if G.have_report(r["key"]))
@@ -1343,6 +1420,8 @@ def stage_browse(state, tracked):
         out()
         out("   [1-%d] browse a game   [a] %s   [p N] set up a pool for game N"
             % (len(games), "only my games" if show_all else "show every game"))
+        if hidden:
+            out(f"   [h] the {len(hidden)} hidden list(s), and unhide")
         out("   [s] skip this stage   [q] quit")
         try:
             raw = input("> ").strip().lower()
@@ -1356,9 +1435,16 @@ def stage_browse(state, tracked):
             return
         if raw == "a":
             show_all = not show_all
-            rows, info = build_gallery(show_all)
+            rows, info, hidden = build_gallery(show_all)
             out()
-            say_counts(rows, info, show_all)
+            say_counts(rows, info, show_all, hidden)
+            continue
+        if raw == "h":
+            if not hidden:
+                out("  Nothing is hidden.")
+                continue
+            show_hidden_lists(hidden)
+            rows, info, hidden = build_gallery(show_all)
             continue
         if raw.startswith("p"):
             arg = raw[1:].strip()
@@ -1367,7 +1453,7 @@ def stage_browse(state, tracked):
                 continue
             offer_game_pool(info[games[int(arg) - 1]])
             pooled = G.pooled_games({e.get("game") for e in feeds.values()})
-            rows, info = build_gallery(show_all)
+            rows, info, hidden = build_gallery(show_all)
             continue
         if not (raw.isdigit() and 1 <= int(raw) <= len(games)):
             out(f"  Enter a number between 1 and {len(games)}, a/p N, or s/q.")
@@ -1391,6 +1477,14 @@ def stage_browse(state, tracked):
                 shown = min(len(grp), shown + PAGE)
                 continue
             show_gallery_detail(state, grp[pick])
+            if grp[pick].get("hidden"):
+                # Hidden from the detail screen: out of this table, out of
+                # the games menu's counts, into the hidden view.
+                hidden.append(grp.pop(pick))
+                rows = [r for r in rows if not r.get("hidden")]
+                if not grp:
+                    break
+                shown = min(shown, len(grp))
 
 
 def sync_gallery_reports(keys, force=False):
@@ -1789,13 +1883,21 @@ def offer_install(state, filename, st):
     rule()
     out("  Hand it to Wabbajack?")
     if not wj:
-        out("  Wabbajack was not found. Set WABBAJACK_DIR in wj_config.py if it")
-        out("  is installed somewhere other than beside this folder.")
+        out("  Wabbajack was not found. Set WABBAJACK_DIR in wj_settings.json if")
+        out("  it is installed somewhere other than in or beside this folder.")
         return False
+    for name in WB.prune_old_versions(wj):
+        out(f"    Removed Wabbajack {name}, superseded by {wj['version']}.")
 
     downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
     manifest = os.path.join(A.MANIFESTS, filename)
+    update = WB.update_status(wj)
     out(f"    Wabbajack   {wj['dir']}" + (f"  ({wj['version']})" if wj["version"] else ""))
+    out(f"                {update['text']}")
+    if update["outdated"]:
+        out(f"                {update['url']}")
+        out("                Run Wabbajack.exe once to let it update itself; the old")
+        out("                version's folder is removed from here the next time it is checked.")
     out(f"    Modlist     {manifest}")
     out(f"    Downloads   {downloads}")
 
@@ -1814,6 +1916,13 @@ def offer_install(state, filename, st):
         out()
         out("  Not offering to install: the check above has to pass first.")
         return False
+    if update["outdated"]:
+        out()
+        out("  Wabbajack is out of date. A modlist built for a newer Wabbajack can")
+        out("  fail to install on an older one.")
+        if ask("   [c] carry on with this version   [s] skip", ("c", "s")) == "s":
+            out("  Skipped. Nothing installed.")
+            return False
 
     if mode == "gui":
         if not wj["exe"]:
@@ -2371,8 +2480,14 @@ JUNK_NAMES = (".ds_store", "thumbs.db", "desktop.ini")
 # sweep - Python rebuilds it on the very next import, so offering to delete it
 # would put a prompt in front of you on every single run and reclaim nothing
 # that stays reclaimed.
-LEFTOVER_SKIP_DIRS = (".git", ".venv-win", ".venv", "dist", "node_modules",
-                      ".gallery-cache", "manifest_backups", "__pycache__")
+# Folders under the tools folder the sweep does not enter: version control,
+# the caches and records other steps own, and the three that are programs
+# kept inside the project rather than installed on the machine - Python,
+# git, and Wabbajack itself, each thousands of files nothing here should
+# judge.
+LEFTOVER_SKIP_DIRS = (".git", ".venv-win", ".venv-build", ".venv", "dist", "build",
+                      "node_modules", ".gallery-cache", "manifest_backups", "__pycache__",
+                      ".python", ".mingit", "_internal", "wabbajack")
 
 
 def _is_junk_file(name):
@@ -2766,9 +2881,11 @@ def clear_master_step(records, masters, failed_rebuilds):
     out("      [y] only the modlists you have")
     out("          Frees the most. An archive a published list wants is deleted")
     out("          and re-downloaded if you ever install that list.")
-    out("      [a] any known modlist, yours or published")
+    out("      [a] any known modlist, yours or published (hidden lists excluded)")
     out("          Deletes only what nothing anywhere wants - dead weight from")
-    out("          superseded builds and lists that no longer exist.")
+    out("          superseded builds and lists that no longer exist. A list you")
+    out("          have hidden counts for nothing here: its archives go unless")
+    out("          another list wants them.")
     mode = ask("      Which?", ("y", "a"))
 
     wide_want, pulled = None, []
@@ -2848,7 +2965,8 @@ def clear_master_step(records, masters, failed_rebuilds):
             lines.append("that differs is kept.")
         lines.append("")
         if mode == "a":
-            lines.append("Protected by: your modlists AND every published list.")
+            lines.append("Protected by: your modlists AND every published list, "
+                         "hidden lists excluded.")
             if pulled:
                 lines.append("")
                 lines.append(f"{len(pulled)} published list(s) have been pulled "

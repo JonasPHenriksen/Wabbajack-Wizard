@@ -344,6 +344,23 @@ check("  but no repository, because there is no feed behind it",
       byk["retired/oldie"]["entry"]["repo"] == "")
 check("a list with no summary row reads as 0 failures, not as broken",
       not G.unavailable(byk["retired/oldie"]))
+check("nothing is hidden unless HIDDEN says so",
+      not any(r["hidden"] for r in rows), str([r["key"] for r in rows if r["hidden"]]))
+
+CFG.HIDDEN = ["R1/ALPHA", " r1/beta ", "retired/oldie"]
+rows = G.build_rows(feeds, summary_rows, featured, disabled,
+                    have_keys={"r1/beta"}, games={"fallout4"})
+byk = {r["key"]: r for r in rows}
+check("a hidden key marks its row, whatever its case or spacing",
+      byk["r1/alpha"]["hidden"] is True, str(byk["r1/alpha"]["hidden"]))
+check("  a retired row can be hidden too", byk["retired/oldie"]["hidden"] is True)
+check("  but a tracked list is never hidden, whatever HIDDEN says",
+      byk["r1/beta"]["hidden"] is False)
+check("  and the rows are all still returned, for the caller to split",
+      set(byk) == {"r1/alpha", "r1/beta", "r3/revived", "retired/oldie"}, str(sorted(byk)))
+check("is_hidden answers the same way", G.is_hidden("r1/Alpha") and not G.is_hidden("r3/revived"))
+CFG.HIDDEN = []
+check("  and clearing HIDDEN clears it", not G.is_hidden("r1/alpha"))
 
 # ---------------------------------------------------------------- 11.10
 print("\n 11.10  syncing reports counts honestly and survives a bad one")

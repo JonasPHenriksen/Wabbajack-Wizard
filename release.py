@@ -75,13 +75,21 @@ def main():
         return 2
 
     notes = entry + "\n### Install\n\n" + "\n".join([
+        f"**WabbajackWizard-v{version}-win64.zip** - no Python needed. Unzip it",
+        "anywhere and run `WabbajackWizard.exe` for the window, or",
+        "`WabbajackWizard-console.exe --wizard` for the console. Windows warns about",
+        "an unsigned download the first time: More info, then Run anyway.",
+        "",
+        f"**WabbajackWizard-v{version}.zip** - the source, for Python 3.8 or newer:",
+        "",
         "1. Unzip anywhere; a mapped network share is fine.",
         "2. Run `setup_env.bat` once. It creates `.venv-win` and installs xxhash.",
         "3. Optional: copy `wj_settings.example.json` to `wj_settings.json` and change",
         "   what differs, or use the window's Settings tab.",
         "4. Run `run.bat` for the window, or `run.bat --wizard` for the console.",
         "",
-        "Requires Python 3.8 or newer on Windows.",
+        "Either way, everything the tool writes lands in the folder you started it",
+        "from, so one can replace the other in place.",
     ]) + "\n"
     notes_path = os.path.join(dist, name + ".md")
     io.open(notes_path, "w", encoding="utf-8", newline="").write(notes)

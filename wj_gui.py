@@ -7,6 +7,12 @@ functions - wj_wizard.py's stage helpers, and through them wj_autoupdate.py -
 so the two front ends cannot drift apart. This module only decides what to
 show and what to ask.
 
+It opens on a Start tab: an overview built from what this session and the
+last one measured, kept in wj_overview.json beside the scripts. Opening the
+window therefore costs nothing but reading the manifests; the gallery, the
+feeds and the pools are read when their tab is opened, and what they find is
+remembered for the next start.
+
 Why Tkinter: it ships with the interpreter run.bat already uses, so the window
 costs no new dependency and the tool keeps to its one third-party package.
 
@@ -24,10 +30,12 @@ import json
 import logging
 import os
 import queue
+import shutil
 import sys
 import threading
 import traceback
 import tkinter as tk
+from datetime import datetime, timezone
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
 import wj_autoupdate as A
@@ -39,6 +47,38 @@ import wj_config as CFG
 APP_TITLE = f"Wabbajack Wizard {CFG.__version__}"
 POLL_MS = 100
 LOG_LINES = 4000
+
+# What the Start tab shows is kept here between sessions: the last answer
+# each tab produced, with when it was produced. Regenerated as tabs are used;
+# losing it costs one measurement per tab, nothing else.
+OVERVIEW_FILE = "wj_overview.json"
+
+# The Game menu's entry for the lists the user has hidden. Not a game key any
+# feed could produce.
+HIDDEN_GAME = "__hidden__"
+
+# The window's two looks. Light is the platform theme as Tk ships it. Dark
+# is the 'clam' theme with these colours: it is the one ttk theme that draws
+# every part of every widget itself, so the colours reach the notebook tabs,
+# the table headings and the scrollbars, where 'vista' hands those parts to
+# Windows and Windows paints them light whatever it is told.
+DARK = {
+    "bg": "#1f1f1f",         # the window and its frames
+    "panel": "#2b2b2b",      # unselected tabs, headings, buttons
+    "field": "#151515",      # tables, text panes, entries
+    "fg": "#e4e4e4",
+    "muted": "#9a9a9a",      # hints and disabled text
+    "border": "#3d3d3d",
+    "select": "#2d5b8c",     # selected rows and tabs
+    "accent": "#4a90d9",     # the progress bar
+    "warn": "#e2a45c",       # the stray-folder note
+    "insert": "#ffffff",
+}
+LIGHT = {
+    "bg": "#f0f0f0", "panel": "#e1e1e1", "field": "#ffffff", "fg": "#000000",
+    "muted": "#666666", "border": "#a0a0a0", "select": "#0078d7", "accent": "#06b025",
+    "warn": "#8a4b00", "insert": "#000000",
+}
 
 
 # ----------------------------------------------------------------------
@@ -126,17 +166,77 @@ def human(n):
     return W.human(n)
 
 
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def when_text(iso):
+    """A stamp the way people say it: 'today 10:32', 'yesterday 18:05', or
+    the date. Empty for no stamp; the raw text for one that will not parse."""
+    if not iso:
+        return ""
+    try:
+        t = datetime.fromisoformat(str(iso)).astimezone()
+    except (TypeError, ValueError):
+        return str(iso)
+    days = (datetime.now().astimezone().date() - t.date()).days
+    clock = t.strftime("%H:%M")
+    if days == 0:
+        return f"today {clock}"
+    if days == 1:
+        return f"yesterday {clock}"
+    return t.strftime("%Y-%m-%d %H:%M")
+
+
+def disk_free(path):
+    """Free bytes on the volume holding `path`, or None if it cannot be asked."""
+    try:
+        return shutil.disk_usage(path).free
+    except (OSError, ValueError):
+        return None
+
+
+def overview_path():
+    return os.path.join(A.HERE, OVERVIEW_FILE)
+
+
+def load_overview():
+    """The last session's measurements, or {} on a first start or a bad file."""
+    try:
+        with open(overview_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_overview(data):
+    """Written whole, through a temp file, so a crash mid-write leaves the
+    old copy rather than half of a new one. A share that refuses the write
+    only means the next start is not prefilled."""
+    p = overview_path()
+    tmp = p + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
 # What each tab's contents are built from. A tab is rebuilt when something it
 # reads has moved on since it was last filled, and left alone otherwise.
 #
 #   records  the manifests held, and which published list each one is
 #   pools    the archives on the share
 #   settings the configuration
+#   overview a measurement another tab made, which the Start tab reports
 #
-# Tracking the two separately is what keeps the refresh cheap: fetching a
+# Tracking them separately is what keeps the refresh cheap: fetching a
 # manifest changes `records` but not `pools`, so Updates rebuilds while the
 # expensive pool index behind Browse and Space is kept.
 TAB_DEPENDS = {
+    "Start": ("records", "pools", "settings", "overview"),
     "Browse": ("records", "pools"),
     "Updates": ("records",),
     "Incomplete": ("records", "pools"),
@@ -161,20 +261,29 @@ class App:
         self.records = {}
         self.failed_rebuilds = {}
         self.assist = (A.NEXUS_MODE == "assist")
-        self.versions = {"records": 0, "pools": 0, "settings": 0}
+        self.versions = {"records": 0, "pools": 0, "settings": 0, "overview": 0}
         self.tab_seen = {}
         # per-tab data
-        self.browse = {"rows": [], "pooled": {}, "indexes": {}, "games": [],
-                       "gameinfo": {}, "grp": [], "detail": None}
+        self.browse = {"rows": [], "hidden": [], "pooled": {}, "indexes": {}, "games": [],
+                       "gameinfo": {}, "grp": [], "detail": None, "view": None,
+                       "all": False, "stats": {}}
         self.update_rows = []
         self.status_rows = []
         self.space = {"lists": [], "masters": [], "strays": [], "trash": [],
                       "wide": None}
         self.staged_fn = None
+        self.overview = load_overview()
+        # The plain Tk widgets a theme has to recolour by hand, and what they
+        # looked like before any theme touched them.
+        self._texts, self._text_defaults, self._combos, self._canvases = [], {}, [], []
+        self._base_theme = ttk.Style(root).theme_use()
+        self._root_bg = root.cget("background")
+        self.theme = None
 
         root.title(APP_TITLE)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build()
+        self.apply_theme(CFG.THEME)
         self._route_output()
         root.after(POLL_MS, self._pump)
         self.run_job("Starting", self._startup, self._after_startup)
@@ -263,6 +372,9 @@ class App:
             self.progress.stop()
         for b in self.action_buttons:
             b.configure(state="disabled" if busy else "normal")
+        if not busy:
+            # Two of those depend on what is selected, not only on idleness.
+            self._browse_buttons()
 
         # Hold the user on this tab until the job finishes. A job changes what
         # the other tabs are showing, and leaving mid-way used to land you on
@@ -323,7 +435,8 @@ class App:
         self.nb = ttk.Notebook(root)
         self.nb.grid(row=0, column=0, sticky="nsew", padx=6, pady=(6, 0))
         self.tabs = {}
-        for name, builder in (("Browse", self._build_browse),
+        for name, builder in (("Start", self._build_start),
+                              ("Browse", self._build_browse),
                               ("Updates", self._build_updates),
                               ("Incomplete", self._build_incomplete),
                               ("Prepare", self._build_prepare),
@@ -344,8 +457,8 @@ class App:
         ttk.Label(head, text="Log").pack(side="left")
         ttk.Button(head, text="Open log file", command=self._open_log_file).pack(side="right")
         ttk.Button(head, text="Clear", command=self._clear_log).pack(side="right", padx=(0, 4))
-        self.log = tk.Text(bottom, height=9, wrap="none", state="disabled",
-                           font=("Consolas", 9))
+        self.log = self._register_text(tk.Text(bottom, height=9, wrap="none", state="disabled",
+                                               font=("Consolas", 9)))
         lsb = ttk.Scrollbar(bottom, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=lsb.set)
         self.log.grid(row=1, column=0, sticky="nsew")
@@ -358,8 +471,11 @@ class App:
         ttk.Label(status, textvariable=self.status, anchor="w").grid(row=0, column=0, sticky="ew")
         self.progress = ttk.Progressbar(status, mode="indeterminate", length=160)
         self.progress.grid(row=0, column=1, padx=(8, 0))
+        self.dark_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(status, text="Dark mode", variable=self.dark_var,
+                        command=self.toggle_theme).grid(row=0, column=2, padx=(12, 0))
         ttk.Label(status, text=f"Manifests: {A.MANIFESTS}   Archives: {A.WJ.ARCHIVE_ROOT}"
-                  f"   Nexus: {A.NEXUS_MODE}", anchor="e").grid(row=1, column=0, columnspan=2,
+                  f"   Nexus: {A.NEXUS_MODE}", anchor="e").grid(row=1, column=0, columnspan=3,
                                                                 sticky="ew")
 
     def _clear_log(self):
@@ -401,11 +517,11 @@ class App:
 
     def _tab_changed(self):
         name = self.nb.tab(self.nb.select(), "text")
-        if self.busy or (not self.records and name != "Settings"):
+        if self.busy or (not self.records and name not in ("Start", "Settings")):
             return
         if not self.tab_is_stale(name):
             return
-        {"Browse": self.browse_load, "Updates": self.updates_check,
+        {"Start": self.start_fill, "Browse": self.browse_load, "Updates": self.updates_check,
          "Incomplete": self.status_refresh, "Prepare": self.status_refresh,
          "Space": self.space_measure, "Settings": self.settings_fill}.get(name, lambda: None)()
 
@@ -424,6 +540,12 @@ class App:
         W.out(f"{n} manifest(s) in {A.MANIFESTS}; following {len(self.tracked)} published list(s).")
         for p in CFG.SETTINGS_PROBLEMS:
             W.out(f"[WARN] {CFG.SETTINGS_FILE}: {p}")
+        # This start becomes the one the next start calls "last session".
+        prev = self.overview.get("session")
+        if prev:
+            self.overview["previous_session"] = prev
+        self.overview["session"] = now_iso()
+        save_overview(self.overview)
         self.settings_fill()
         self._tab_changed()
 
@@ -431,6 +553,391 @@ class App:
         A.WJ.invalidate_existing_cache()
         W.refresh_known_dirs()
         self.records = W.load_records()
+
+    # ==================================================================
+    # Start
+    # ==================================================================
+    def _build_start(self, f):
+        f.columnconfigure(0, weight=1)
+        f.columnconfigure(1, weight=1)
+        ttk.Label(f, text="Where things stand, from this session and the last. Nothing here reads "
+                          "the share or the network until asked: each tab measures when you open "
+                          "it, this page remembers what it found, and the next start shows that "
+                          "again at once.", wraplength=1000).grid(row=0, column=0, columnspan=2,
+                                                                  sticky="w", pady=(0, 6))
+        bar = ttk.Frame(f)
+        bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.action(bar, "Refresh everything", self.start_refresh).pack(side="left")
+        ttk.Label(bar, text="the feeds, then what is on disk, then the pools: the three "
+                            "measurements the tabs make, in one go",
+                  style="Hint.TLabel").pack(side="left", padx=(8, 0))
+        self.start_session = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.start_session).pack(side="right")
+        self.cards = {}
+        for i, (name, title, tab) in enumerate((("records", "Your modlists", "Prepare"),
+                                                ("updates", "Updates", "Updates"),
+                                                ("status", "Incomplete", "Incomplete"),
+                                                ("space", "Disk", "Space"),
+                                                ("gallery", "Gallery", "Browse"),
+                                                ("settings", "Settings", "Settings"))):
+            self.cards[name] = self._card(f, title, 2 + i // 2, i % 2, tab)
+        for r in (2, 3, 4):
+            f.rowconfigure(r, weight=1)
+
+    def _card(self, parent, title, row, col, tab):
+        """One box on the Start tab: a body, a line saying when its facts were
+        measured, and the button to the tab that measures them."""
+        box = ttk.LabelFrame(parent, text=title, padding=8)
+        box.grid(row=row, column=col, sticky="nsew", padx=(0, 8) if col == 0 else (0, 0),
+                 pady=(0, 8))
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        body = tk.StringVar(value="")
+        ttk.Label(box, textvariable=body, justify="left", anchor="nw",
+                  wraplength=520).grid(row=0, column=0, columnspan=2, sticky="nsew")
+        when = tk.StringVar(value="")
+        ttk.Label(box, textvariable=when, style="Hint.TLabel").grid(row=1, column=0, sticky="w",
+                                                                    pady=(6, 0))
+        self.action(box, f"Open {tab}", lambda: self.goto_tab(tab)).grid(row=1, column=1,
+                                                                            sticky="e", pady=(6, 0))
+        return {"body": body, "when": when}
+
+    def goto_tab(self, name):
+        self.nb.select(self.tabs[name])
+
+    def note_overview(self, section, **data):
+        """Remember one tab's answer for the Start tab, this session and the next."""
+        data["when"] = now_iso()
+        self.overview[section] = data
+        save_overview(self.overview)
+        self.data_changed("overview")
+        if self.nb.tab(self.nb.select(), "text") == "Start":
+            self.start_fill()
+
+    def start_fill(self):
+        """Every card from what is known now: the cheap facts live, the
+        expensive ones from whichever session last measured them."""
+        self.tab_filled("Start")
+        ov, c = self.overview, self.cards
+
+        def listed(names, first=6):
+            names = list(names or [])
+            if not names:
+                return ""
+            more = f"\n    and {len(names) - first} more" if len(names) > first else ""
+            return ":\n    " + "\n    ".join(names[:first]) + more
+
+        by_game = {}
+        for rec in self.records.values():
+            g = A.WJ.game_label(rec.get("game")) if rec.get("game") else "game unknown"
+            by_game[g] = by_game.get(g, 0) + 1
+        lines = [f"{len(self.records)} manifest(s) in {A.MANIFESTS}",
+                 f"following {len(self.tracked)} published list(s)"]
+        lines += [f"    {g}: {n}" for g, n in sorted(by_game.items(), key=lambda kv: (-kv[1], kv[0]))]
+        staged = self.state.get("staged") or {}
+        if staged:
+            lines.append("staged for Wabbajack: "
+                         + ", ".join(f"{v} ({k})" for k, v in sorted(staged.items())))
+        c["records"]["body"].set("\n".join(lines))
+        c["records"]["when"].set("as it stands now")
+
+        u = ov.get("updates")
+        if u:
+            c["updates"]["body"].set(
+                f"{u.get('pending', 0)} of {u.get('total', 0)} tracked list(s) have a newer "
+                f"published version" + (listed(u.get("names")) or "."))
+            c["updates"]["when"].set(f"checked {when_text(u.get('when'))}")
+        else:
+            c["updates"]["body"].set("Not checked yet. The Updates tab asks the published feeds, "
+                                     "which takes a few seconds.")
+            c["updates"]["when"].set("")
+
+        s = ov.get("status")
+        if s:
+            c["status"]["body"].set(
+                f"{s.get('incomplete', 0)} incomplete, {human(s.get('bytes'))} still to fetch; "
+                f"{s.get('complete', 0)} complete" + (listed(s.get("names")) or "."))
+            c["status"]["when"].set(f"measured {when_text(s.get('when'))}")
+        else:
+            c["status"]["body"].set("Not measured yet. The Incomplete tab compares every manifest "
+                                    "with what is in the pools.")
+            c["status"]["when"].set("")
+
+        sp = ov.get("space")
+        free = disk_free(A.WJ.ARCHIVE_ROOT)
+        lines = [f"Free on the archive volume: {human(free)}" if free is not None
+                 else f"The archive volume is not reachable: {A.WJ.ARCHIVE_ROOT}"]
+        if sp:
+            lines.append(f"Manifests: {human(sp.get('manifest_bytes'))} for {sp.get('lists', 0)} list(s)")
+            for m in sp.get("masters") or []:
+                lines.append(f"    {m.get('label')}: {human(m.get('bytes'))} in {m.get('files', 0)} "
+                             f"file(s), {human(m.get('free_bytes'))} wanted by none of your lists")
+            tf = sp.get("trash_files", 0)
+            lines.append(f"Trash: {tf} file(s), {human(sp.get('trash_bytes'))}, purged "
+                         f"{W.keep_days()} days after arrival" if tf else "Trash: empty")
+            c["space"]["when"].set(f"measured {when_text(sp.get('when'))}")
+        else:
+            lines.append("Pools not measured yet. The Space tab walks them, which is the slow part.")
+            c["space"]["when"].set("")
+        c["space"]["body"].set("\n".join(lines))
+
+        g = ov.get("gallery")
+        if g:
+            text = (f"{g.get('published', 0)} published list(s)"
+                    + (f", {g['retired']} retired still listed" if g.get("retired") else "")
+                    + f"; {g.get('shown', 0)} shown across {g.get('games', 0)} game(s), "
+                    f"{g.get('tracked', 0)} of them tracked here; reports cached for "
+                    f"{g.get('reports', 0)}"
+                    + (f"; {g['hidden']} hidden" if g.get("hidden") else ""))
+            if not g.get("complete", True):
+                text += "\nSome feeds did not respond last time."
+            c["gallery"]["when"].set(f"loaded {when_text(g.get('when'))}")
+        else:
+            text = ("Not loaded yet. The Browse tab reads the gallery index, cached for six "
+                    "hours, and measures a game's lists against your pools when you pick it.")
+            c["gallery"]["when"].set("")
+        c["gallery"]["body"].set(text)
+
+        current, defaults = CFG.current_settings(), CFG.defaults()
+        overrides = sum(1 for k, v in current.items() if v != defaults.get(k))
+        lines = [f"{CFG.SETTINGS_FILE}: {overrides} setting(s) changed from the defaults"
+                 if overrides else f"{CFG.SETTINGS_FILE}: every setting at its default",
+                 f"Archives: {A.WJ.ARCHIVE_ROOT}", f"Manifests: {A.MANIFESTS}",
+                 f"Nexus: {A.NEXUS_MODE}    Install: {CFG.INSTALL_MODE}    Theme: {CFG.THEME}"]
+        wb = ov.get("wabbajack")
+        lines.append(f"Wabbajack: {wb.get('text')}, checked {when_text(wb.get('when'))}" if wb
+                     else "Wabbajack: checked when a list is staged, or by Refresh everything")
+        lines += [f"[WARN] {p}" for p in CFG.SETTINGS_PROBLEMS]
+        c["settings"]["body"].set("\n".join(lines))
+        c["settings"]["when"].set("")
+
+        prev = ov.get("previous_session")
+        self.start_session.set(f"Last session: {when_text(prev)}" if prev else "First session here.")
+
+    def start_refresh(self):
+        """The three measurements the tabs make, one after another, then the
+        Wabbajack check, so a session is brought up to date from here in one
+        press. Each tab is filled on the way, exactly as if it had been
+        opened."""
+        def after_space():
+            self.wabbajack_check(then=self.start_fill)
+
+        def after_status():
+            self.space_measure(then=after_space)
+
+        def after_updates():
+            self.status_refresh(then=after_status)
+        self.updates_check(then=after_updates)
+
+    # ==================================================================
+    # Theme
+    # ==================================================================
+    def _register_text(self, w):
+        """A plain Tk text pane: ttk styles do not reach it, so its colours
+        are set by hand, and what it had first is kept for going back."""
+        self._texts.append(w)
+        self._text_defaults[w] = {k: w.cget(k) for k in (
+            "background", "foreground", "insertbackground", "selectbackground",
+            "selectforeground")}
+        return w
+
+    def _register_combo(self, w):
+        self._combos.append(w)
+        return w
+
+    def _register_canvas(self, w):
+        """A plain Tk canvas used as a scrolling container: it has a background
+        of its own that the theme has to set."""
+        self._canvases.append(w)
+        return w
+
+    def toggle_theme(self):
+        self.set_theme("dark" if self.dark_var.get() else "light")
+
+    def set_theme(self, mode):
+        """Switch the window's look, and remember it in wj_settings.json.
+
+        Saved through the same call the Settings tab uses, from the settings
+        as applied rather than from the form, so an edit typed there and not
+        yet saved is neither saved nor lost."""
+        self.apply_theme(mode)
+        if CFG.THEME != mode:
+            values = CFG.current_settings()
+            values["THEME"] = mode
+            CFG.save_settings(values)
+            A.reload_settings()
+            var = getattr(self, "setting_vars", {}).get("THEME")
+            if var is not None:
+                var.set(mode)
+
+    def apply_theme(self, mode):
+        """Paint the window: 'dark', or 'light' for the platform's own look."""
+        style = ttk.Style(self.root)
+        dark = (mode == "dark")
+        self.theme = "dark" if dark else "light"
+        self.dark_var.set(dark)
+        if dark or self._base_theme == "clam":
+            if "clam" in style.theme_names():
+                style.theme_use("clam")
+            self._paint_clam(style, DARK if dark else LIGHT)
+        else:
+            style.theme_use(self._base_theme)
+            self._paint_native(style)
+        self.titlebar_ok = self._paint_titlebar(dark)
+
+    def _paint_titlebar(self, dark):
+        """Ask Windows for a title bar to match, or for the light one back.
+
+        Tk draws nothing of the title bar; the window manager does. Windows
+        10 (build 17763 on) and 11 take the request through the Desktop
+        Window Manager, and Windows 11 also takes exact colours, so the bar
+        can be the window's own background rather than Windows' idea of
+        dark. Anywhere else this quietly does nothing. Returns True when the
+        request was accepted."""
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            self.root.update_idletasks()
+            # winfo_id() is Tk's own child window; its parent is the frame
+            # Windows draws the caption on.
+            hwnd = ctypes.windll.user32.GetParent(wintypes.HWND(self.root.winfo_id()))
+            if not hwnd:
+                return False
+            dwm = ctypes.windll.dwmapi
+
+            def put(attr, value):
+                v = ctypes.c_uint32(value)
+                return dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), ctypes.c_uint32(attr),
+                                                 ctypes.byref(v), ctypes.sizeof(v)) == 0
+
+            def colorref(hex6):
+                r, g, b = (int(hex6[i:i + 2], 16) for i in (1, 3, 5))
+                return r | (g << 8) | (b << 16)
+
+            # DWMWA_USE_IMMERSIVE_DARK_MODE: 20 from Windows 10 build 18985,
+            # 19 on the builds before it.
+            ok = put(20, 1 if dark else 0) or put(19, 1 if dark else 0)
+            # Windows 11 only: DWMWA_BORDER_COLOR 34, DWMWA_CAPTION_COLOR 35,
+            # DWMWA_TEXT_COLOR 36; 0xFFFFFFFF is DWMWA_COLOR_DEFAULT. Refused
+            # on Windows 10, which is fine: the dark-mode flag alone already
+            # gave it a dark bar.
+            if dark:
+                put(35, colorref(DARK["bg"]))
+                put(36, colorref(DARK["fg"]))
+                put(34, colorref(DARK["border"]))
+            else:
+                for attr in (35, 36, 34):
+                    put(attr, 0xFFFFFFFF)
+            # DWM repaints the frame on the next activation; ask for it now.
+            # SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED.
+            ctypes.windll.user32.SetWindowPos(wintypes.HWND(hwnd), None, 0, 0, 0, 0,
+                                              0x0001 | 0x0002 | 0x0004 | 0x0020)
+            return bool(ok)
+        except (OSError, AttributeError, ValueError, tk.TclError):
+            return False
+
+    def _paint_native(self, style):
+        self.root.configure(background=self._root_bg)
+        style.configure("Hint.TLabel", foreground=LIGHT["muted"])
+        style.configure("Warn.TLabel", foreground=LIGHT["warn"])
+        for w in self._texts:
+            w.configure(**self._text_defaults[w])
+        for w in self._canvases:
+            w.configure(background=self._root_bg)
+        self._paint_combos(LIGHT)
+
+    def _paint_clam(self, style, p):
+        """Every ttk style the window uses, coloured from palette `p`."""
+        self.root.configure(background=p["bg"])
+        style.configure(".", background=p["bg"], foreground=p["fg"], fieldbackground=p["field"],
+                        bordercolor=p["border"], lightcolor=p["bg"], darkcolor=p["bg"],
+                        troughcolor=p["panel"], selectbackground=p["select"],
+                        selectforeground=p["fg"], insertcolor=p["insert"], focuscolor=p["select"])
+        style.map(".", foreground=[("disabled", p["muted"])])
+        style.configure("TFrame", background=p["bg"])
+        style.configure("TLabel", background=p["bg"], foreground=p["fg"])
+        style.configure("Hint.TLabel", foreground=p["muted"])
+        style.configure("Warn.TLabel", foreground=p["warn"])
+        style.configure("TLabelframe", background=p["bg"], bordercolor=p["border"],
+                        lightcolor=p["bg"], darkcolor=p["bg"])
+        style.configure("TLabelframe.Label", background=p["bg"], foreground=p["fg"])
+        style.configure("TButton", background=p["panel"], foreground=p["fg"],
+                        bordercolor=p["border"], lightcolor=p["panel"], darkcolor=p["panel"],
+                        focuscolor=p["select"])
+        style.map("TButton",
+                  background=[("disabled", p["bg"]), ("pressed", p["select"]),
+                              ("active", p["border"])],
+                  foreground=[("disabled", p["muted"])])
+        for s in ("TCheckbutton", "TRadiobutton"):
+            style.configure(s, background=p["bg"], foreground=p["fg"],
+                            indicatorbackground=p["field"], indicatorforeground=p["fg"],
+                            upperbordercolor=p["border"], lowerbordercolor=p["border"])
+            style.map(s, background=[("active", p["bg"])],
+                      indicatorbackground=[("disabled", p["bg"]), ("pressed", p["panel"])],
+                      foreground=[("disabled", p["muted"])])
+        style.configure("TEntry", fieldbackground=p["field"], foreground=p["fg"],
+                        insertcolor=p["insert"], bordercolor=p["border"],
+                        lightcolor=p["border"], darkcolor=p["border"])
+        style.configure("TCombobox", fieldbackground=p["field"], background=p["panel"],
+                        foreground=p["fg"], arrowcolor=p["fg"], bordercolor=p["border"],
+                        lightcolor=p["border"], darkcolor=p["border"], insertcolor=p["insert"])
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", p["field"]), ("disabled", p["bg"])],
+                  foreground=[("disabled", p["muted"])],
+                  selectbackground=[("readonly", p["field"])],
+                  selectforeground=[("readonly", p["fg"])])
+        style.configure("TNotebook", background=p["bg"], bordercolor=p["border"],
+                        lightcolor=p["bg"], darkcolor=p["bg"])
+        style.configure("TNotebook.Tab", background=p["panel"], foreground=p["fg"],
+                        bordercolor=p["border"], lightcolor=p["panel"], darkcolor=p["panel"],
+                        padding=(10, 4))
+        style.map("TNotebook.Tab",
+                  background=[("selected", p["bg"]), ("active", p["border"])],
+                  lightcolor=[("selected", p["bg"])],
+                  foreground=[("disabled", p["muted"])])
+        style.configure("Treeview", background=p["field"], fieldbackground=p["field"],
+                        foreground=p["fg"], bordercolor=p["border"], lightcolor=p["border"],
+                        darkcolor=p["border"])
+        style.map("Treeview", background=[("selected", p["select"])],
+                  foreground=[("selected", p["fg"])])
+        style.configure("Treeview.Heading", background=p["panel"], foreground=p["fg"],
+                        bordercolor=p["border"], lightcolor=p["panel"], darkcolor=p["panel"],
+                        relief="flat")
+        style.map("Treeview.Heading", background=[("active", p["border"])])
+        style.configure("TScrollbar", background=p["panel"], troughcolor=p["bg"],
+                        bordercolor=p["bg"], arrowcolor=p["fg"], lightcolor=p["panel"],
+                        darkcolor=p["panel"])
+        style.map("TScrollbar", background=[("active", p["border"]), ("disabled", p["bg"])],
+                  arrowcolor=[("disabled", p["muted"])])
+        style.configure("TProgressbar", background=p["accent"], troughcolor=p["panel"],
+                        bordercolor=p["border"], lightcolor=p["accent"], darkcolor=p["accent"])
+        for w in self._texts:
+            w.configure(background=p["field"], foreground=p["fg"], insertbackground=p["insert"],
+                        selectbackground=p["select"], selectforeground=p["fg"])
+        for w in self._canvases:
+            w.configure(background=p["bg"])
+        self._paint_combos(p)
+
+    def _paint_combos(self, p):
+        """The drop-down under a combobox is a plain Tk listbox that ttk makes
+        on first use: set the defaults for the ones still to be made, and
+        recolour the ones already there."""
+        sel_fg = p["fg"] if p is DARK else "#ffffff"
+        for opt, val in (("*TCombobox*Listbox.background", p["field"]),
+                         ("*TCombobox*Listbox.foreground", p["fg"]),
+                         ("*TCombobox*Listbox.selectBackground", p["select"]),
+                         ("*TCombobox*Listbox.selectForeground", sel_fg)):
+            self.root.option_add(opt, val)
+        for cb in self._combos:
+            try:
+                pd = self.root.tk.call("ttk::combobox::PopdownWindow", str(cb))
+                self.root.tk.call(f"{pd}.f.l", "configure", "-background", p["field"],
+                                  "-foreground", p["fg"], "-selectbackground", p["select"],
+                                  "-selectforeground", sel_fg)
+            except tk.TclError:
+                pass
 
     # ==================================================================
     # Browse
@@ -442,12 +949,14 @@ class App:
         ttk.Label(f, text="Every modlist published for a game you keep archives for, and how "
                           "much of each is already in your pools. Read from Wabbajack's own "
                           "validation reports, before any .wabbajack is downloaded. Tick "
-                          "'every game' to look at games you have no pool for yet.",
+                          "'every game' to look at games you have no pool for yet. A list you "
+                          "will never want can be hidden: it then shows only under 'Hidden "
+                          "lists' in the Game menu, and counts for nothing anywhere else.",
                   wraplength=1000).grid(row=0, column=0, sticky="w", pady=(0, 6))
         bar = ttk.Frame(f)
         bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(bar, text="Game:").pack(side="left")
-        self.browse_game = ttk.Combobox(bar, state="readonly", width=36)
+        self.browse_game = self._register_combo(ttk.Combobox(bar, state="readonly", width=36))
         self.browse_game.pack(side="left", padx=(4, 8))
         self.browse_game.bind("<<ComboboxSelected>>", lambda _e: self.browse_show_game())
         self.browse_all = tk.BooleanVar(value=False)
@@ -462,7 +971,8 @@ class App:
         ttk.Label(bar, textvariable=self.browse_summary).pack(side="right")
 
         cols = [("own", "own", 40, "center"), ("mark", "", 30, "center"),
-                ("title", "modlist", 320, "w"), ("version", "version", 110, "w"),
+                ("title", "modlist", 300, "w"), ("game", "game", 160, "w"),
+                ("version", "version", 100, "w"),
                 ("arch", "archives", 80, "e"), ("yours", "yours", 70, "e"),
                 ("fetch", "to fetch", 100, "e"), ("total", "total", 100, "e")]
         self.browse_table = make_table(f, cols, height=12, selectmode="browse")
@@ -473,11 +983,16 @@ class App:
         det.grid(row=3, column=0, sticky="nsew", pady=(6, 0))
         det.columnconfigure(0, weight=1)
         det.rowconfigure(0, weight=1)
-        self.browse_text = tk.Text(det, height=7, wrap="word", state="disabled")
+        self.browse_text = self._register_text(tk.Text(det, height=7, wrap="word",
+                                                       state="disabled"))
         self.browse_text.grid(row=0, column=0, sticky="nsew")
-        self.browse_track = self.action(det, "Download this .wabbajack and track it",
+        side = ttk.Frame(det)
+        side.grid(row=0, column=1, sticky="n", padx=(8, 0))
+        self.browse_track = self.action(side, "Download this .wabbajack and track it",
                                         self.browse_adopt)
-        self.browse_track.grid(row=0, column=1, sticky="n", padx=(8, 0))
+        self.browse_track.pack(fill="x")
+        self.browse_hide = self.action(side, "Hide this list", self.browse_toggle_hidden)
+        self.browse_hide.pack(fill="x", pady=(4, 0))
 
     def browse_load(self):
         # Read on this thread: the worker must not touch a tk variable.
@@ -494,11 +1009,16 @@ class App:
             if not feeds:
                 return {"error": "No feed could be read, so there is no gallery to show."}
             pooled = G.pooled_games({e.get("game") for e in feeds.values()})
-            rows = G.build_rows(feeds, summary, featured, disabled, set(self.tracked),
-                                games=None if show_all else set(pooled))
+            # Every row, then split. The hidden ones are gathered from every
+            # game whatever the filter says, because the view that shows them
+            # is also the place a flag is taken off again.
+            every = G.build_rows(feeds, summary, featured, disabled, set(self.tracked))
+            hidden = [r for r in every if r["hidden"]]
+            rows = [r for r in every
+                    if not r["hidden"] and (show_all or r["game_key"] in pooled)]
             have_reports = sum(1 for r in rows if G.have_report(r["key"]))
-            return {"rows": rows, "pooled": pooled, "complete": complete, "all": show_all,
-                    "feeds": len(feeds), "have_reports": have_reports}
+            return {"rows": rows, "hidden": hidden, "pooled": pooled, "complete": complete,
+                    "all": show_all, "feeds": len(feeds), "have_reports": have_reports}
 
         def done(res):
             if "error" in res:
@@ -510,42 +1030,73 @@ class App:
             # are what it describes, and those have not changed.
             keep = (self.browse.get("index_pools") == self.versions["pools"]
                     and self.browse.get("indexes"))
-            self.browse.update({"rows": res["rows"], "pooled": res["pooled"],
+            self.browse.update({"rows": res["rows"], "hidden": res["hidden"],
+                                "pooled": res["pooled"], "all": res["all"], "detail": None,
+                                "stats": {"feeds": res["feeds"], "complete": res["complete"],
+                                          "have_reports": res["have_reports"]},
                                 "indexes": self.browse["indexes"] if keep else {},
                                 "index_pools": self.versions["pools"]})
-
-            # One entry per game present in the rows, whether or not it has a
-            # pool. The GameType is carried alongside the label because that,
-            # not the lowercased key, is what a new pool has to be named for.
-            info = {}
-            for r in res["rows"]:
-                gk = r["game_key"]
-                if gk in info:
-                    continue
-                pool = (res["pooled"].get(gk) or (None, None))[1]
-                info[gk] = (G.game_label(r["game"]), pool, r["game"])
-            self.browse["gameinfo"] = info
-            counts = {k: sum(1 for r in res["rows"] if r["game_key"] == k) for k in info}
-            # Pools you already keep first, then the rest, each by list count.
-            games = sorted(info, key=lambda k: (info[k][1] is None, -counts[k], k))
-            self.browse["games"] = games
-            labels = [f"{info[k][0]}  ({counts[k]} lists)"
-                      + ("" if info[k][1] else "   [no pool]") for k in games]
-            self.browse_game["values"] = labels
-            unpooled = sum(1 for k in info if info[k][1] is None)
-            retired = sum(1 for r in res["rows"] if r["retired"])
-            self.browse_summary.set(
-                f"{res['feeds']} published"
-                + (f" plus {retired} retired" if retired else "")
-                + f"; {len(res['rows'])} shown across {len(info)} game(s)"
-                + (f", {unpooled} with no pool" if unpooled else "")
-                + f"; you track {sum(1 for r in res['rows'] if r['have'])}; "
-                f"reports cached for {res['have_reports']} of {len(res['rows'])}"
-                + ("" if res["complete"] else "   [some feeds did not respond]"))
-            if labels:
-                self.browse_game.current(0)
+            self._browse_menu()
+            self._browse_summary()
+            if self.browse["games"]:
                 self.browse_show_game()
         self.run_job("Loading the gallery", job, done)
+
+    def _browse_menu(self, keep=None):
+        """The Game menu: one entry per game in the rows, whether or not it
+        has a pool, and one more for the hidden lists when there are any.
+
+        The GameType is carried alongside the label because that, not the
+        lowercased key, is what a new pool has to be named for. `keep` is the
+        game key to leave selected, if it is still there."""
+        rows, pooled = self.browse["rows"], self.browse["pooled"]
+        info = {}
+        for r in rows:
+            gk = r["game_key"]
+            if gk in info:
+                continue
+            pool = (pooled.get(gk) or (None, None))[1]
+            info[gk] = (G.game_label(r["game"]), pool, r["game"])
+        counts = {k: sum(1 for r in rows if r["game_key"] == k) for k in info}
+        # Pools you already keep first, then the rest, each by list count.
+        games = sorted(info, key=lambda k: (info[k][1] is None, -counts[k], k))
+        labels = [f"{info[k][0]}  ({counts[k]} lists)"
+                  + ("" if info[k][1] else "   [no pool]") for k in games]
+        hidden = self.browse["hidden"]
+        if hidden:
+            info[HIDDEN_GAME] = ("Hidden lists", None, None)
+            games.append(HIDDEN_GAME)
+            labels.append(f"Hidden lists  ({len(hidden)})")
+        self.browse["gameinfo"] = info
+        self.browse["games"] = games
+        self.browse_game["values"] = labels
+        if keep in games:
+            self.browse_game.current(games.index(keep))
+        elif games:
+            self.browse_game.current(0)
+
+    def _browse_summary(self):
+        """The line above the table, and the Start tab's gallery card, from
+        what the rows hold right now."""
+        st = self.browse.get("stats") or {}
+        rows, hidden = self.browse["rows"], self.browse["hidden"]
+        games = [k for k in self.browse["gameinfo"] if k != HIDDEN_GAME]
+        unpooled = sum(1 for k in games if self.browse["gameinfo"][k][1] is None)
+        retired = sum(1 for r in rows if r["retired"])
+        tracked = sum(1 for r in rows if r["have"])
+        self.browse_summary.set(
+            f"{st.get('feeds', 0)} published"
+            + (f" plus {retired} retired" if retired else "")
+            + f"; {len(rows)} shown across {len(games)} game(s)"
+            + (f", {unpooled} with no pool" if unpooled else "")
+            + f"; you track {tracked}; "
+            f"reports cached for {st.get('have_reports', 0)} of {len(rows)}"
+            + (f"; {len(hidden)} hidden" if hidden else "")
+            + ("" if st.get("complete", True) else "   [some feeds did not respond]"))
+        self.note_overview("gallery", published=st.get("feeds", 0), retired=retired,
+                           shown=len(rows), games=len(games), tracked=tracked,
+                           reports=st.get("have_reports", 0), hidden=len(hidden),
+                           complete=bool(st.get("complete", True)))
 
     def browse_sync(self, force):
         keys = [r["key"] for r in self.browse["rows"] if not r["retired"]]
@@ -560,6 +1111,10 @@ class App:
         if i < 0 or i >= len(self.browse["games"]):
             return
         gk = self.browse["games"][i]
+        self.browse["detail"] = None
+        if gk == HIDDEN_GAME:
+            self._browse_show_hidden()
+            return
         label, pool, _game = self.browse["gameinfo"][gk]
         grp = [r for r in self.browse["rows"] if r["game_key"] == gk]
 
@@ -570,17 +1125,8 @@ class App:
 
         def done(rows):
             self.browse["grp"] = rows
-            out_rows = []
-            for r in rows:
-                g = r.get("gap")
-                mark = "!" if G.unavailable(r) else (">" if r["retired"] else "")
-                if g and g["total"]:
-                    tail = (g["total"], f"{g['percent']:.1f}%", human(g["missing_bytes"]),
-                            human(g["total_bytes"]))
-                else:
-                    tail = (r["archives"] or 0, "-", "-", human(r["arch_size"] or 0))
-                out_rows.append(("[x]" if r["have"] else "", mark, r["title"], r["version"]) + tail)
-            fill(self.browse_table.tree, out_rows)
+            self.browse["view"] = gk
+            self._browse_fill(rows)
             note = ""
             if pool is None:
                 note = ("\n\nYou have no pool for this game, so every list reads as 0% held "
@@ -591,13 +1137,101 @@ class App:
             self._set_text(self.browse_text, "Select a list for its details." + note
                            + ("\n\n!  flagged Unavailable by Wabbajack     >  retired from the gallery"
                               if any(GUI_MARK(r) for r in rows) else ""))
+            self._browse_buttons()
         self.run_job(f"Measuring {label}", job, done)
+
+    def _browse_fill(self, rows, measured=True):
+        """The table. With `measured` off the feeds' own figures are shown
+        even for a row whose overlap happens to be known, so the Hidden view
+        reads the same whether a list was hidden this session or last."""
+        out_rows = []
+        for r in rows:
+            g = r.get("gap") if measured else None
+            mark = "!" if G.unavailable(r) else (">" if r["retired"] else "")
+            if g and g["total"]:
+                tail = (g["total"], f"{g['percent']:.1f}%", human(g["missing_bytes"]),
+                        human(g["total_bytes"]))
+            else:
+                tail = (r["archives"] or 0, "-", "-", human(r["arch_size"] or 0))
+            out_rows.append(("[x]" if r["have"] else "", mark, r["title"],
+                             G.game_label(r["game"]), r["version"]) + tail)
+        fill(self.browse_table.tree, out_rows)
+
+    def _browse_show_hidden(self):
+        """The hidden lists, every game together, with the feeds' own figures.
+
+        Not measured against the pools: never fetching a hidden list's report
+        or reading it is most of what hiding the list saves."""
+        rows = sorted(self.browse["hidden"],
+                      key=lambda r: (G.game_label(r["game"]).lower(), r["title"].lower()))
+        self.browse["grp"] = rows
+        self.browse["view"] = HIDDEN_GAME
+        self._browse_fill(rows, measured=False)
+        self._set_text(self.browse_text,
+                       "These lists are hidden. They appear in no other view or stage, their "
+                       "validation reports are not fetched, and nothing protects their archives "
+                       "when Master is cleared, whichever rule is chosen. The figures are the "
+                       "feeds' own: a hidden list is never measured against your pools.\n\n"
+                       f"Select one and press 'Unhide this list' to bring it back. HIDDEN in "
+                       f"{CFG.SETTINGS_FILE} holds the flags.")
+        self._browse_buttons()
+
+    def _browse_buttons(self):
+        """The two buttons beside the detail pane, from the selected row."""
+        r = self.browse.get("detail")
+        ent = (r or {}).get("entry")
+        can_track = bool(r and ent and ent.get("download") and not r["have"] and not r["hidden"])
+        can_hide = bool(r and not r["have"])
+        idle = not self.busy
+        self.browse_track.configure(state="normal" if can_track and idle else "disabled")
+        self.browse_hide.configure(text="Unhide this list" if r and r["hidden"] else "Hide this list",
+                                   state="normal" if can_hide and idle else "disabled")
+
+    def browse_toggle_hidden(self):
+        """Hide the selected list, or bring a hidden one back.
+
+        Done in memory as well as in the settings file, so the table does not
+        pay for a reload: the row moves between the visible rows and the
+        hidden ones, the Game menu's counts follow, and a list brought back is
+        the only one measured when its game is next shown."""
+        r = self.browse.get("detail")
+        if not r or r["have"]:
+            return
+        hide = not r["hidden"]
+        W.set_list_hidden(r["key"], hide)
+        r["hidden"] = hide
+        st = self.browse.setdefault("stats", {})
+        has_report = G.have_report(r["key"])
+        if hide:
+            self.browse["rows"] = [x for x in self.browse["rows"] if x is not r]
+            self.browse["hidden"].append(r)
+            if has_report:
+                st["have_reports"] = max(0, st.get("have_reports", 0) - 1)
+            W.out(f"Hidden: {r['title']} ({r['key']}). Shown only under 'Hidden lists' from "
+                  f"now on; HIDDEN in {CFG.SETTINGS_FILE} keeps the flag.")
+        else:
+            self.browse["hidden"] = [x for x in self.browse["hidden"] if x is not r]
+            if self.browse.get("all") or r["game_key"] in self.browse["pooled"]:
+                self.browse["rows"].append(r)
+                if has_report:
+                    st["have_reports"] = st.get("have_reports", 0) + 1
+            W.out(f"Unhidden: {r['title']}.")
+        view = self.browse.get("view")
+        self.browse["detail"] = None
+        self.data_changed("settings")
+        self._browse_menu(keep=view)
+        self._browse_summary()
+        self.browse_show_game()
 
     def browse_make_pool(self):
         i = self.browse_game.current()
         if i < 0 or i >= len(self.browse["games"]):
             return
         gk = self.browse["games"][i]
+        if gk == HIDDEN_GAME:
+            messagebox.showinfo("Hidden lists", "Pick a game to set up a pool for.",
+                                parent=self.root)
+            return
         label, pool, game = self.browse["gameinfo"][gk]
         if pool:
             messagebox.showinfo("Pool already there",
@@ -649,6 +1283,10 @@ class App:
         self.browse["detail"] = r
         g = r.get("gap")
         lines = [f"{r['title']}   v{r['version']}    {r['key']}    {A.WJ.game_label(r['game'])}"]
+        if r["hidden"]:
+            lines.append("HIDDEN from the gallery: shown only here, never measured against your "
+                         "pools, its report never fetched, its archives unprotected when Master "
+                         "is cleared. Unhide it to track it, or to see how much of it you hold.")
         if G.unavailable(r):
             lines.append("UNAVAILABLE in the Wabbajack gallery: " + "; ".join(G.why_unavailable(r)))
             lines.append("That only greys out the Install button on Wabbajack's own tile; the "
@@ -656,7 +1294,10 @@ class App:
         if r["retired"]:
             lines.append("RETIRED from the gallery. Its download still works, but there is no "
                          "feed behind it, so its version can never be tracked.")
-        if g is None:
+        if r["hidden"]:
+            if r["archives"]:
+                lines.append(f"Its feed claims {r['archives']} archive(s), {human(r['arch_size'] or 0)}.")
+        elif g is None:
             st = r.get("report_status")
             if st == "ForcedDown":
                 lines.append("Its report carries no archives: the validator does not walk a list "
@@ -682,15 +1323,15 @@ class App:
                     lines.append(f"    {a['name']}   {human(a['size'] or 0)}")
         ent = r.get("entry")
         if r["have"]:
-            lines.append("You already track this list. The Updates tab handles its versions.")
+            lines.append("You already track this list. The Updates tab handles its versions, and "
+                         "a tracked list cannot be hidden.")
         elif not ent or not ent.get("download"):
             lines.append("Its feed carries no download link, so there is nothing to fetch.")
         else:
             lines.append(f"The .wabbajack itself is {human(ent.get('size') or 0)}; the archives "
                          f"are a separate job for the Incomplete tab.")
         self._set_text(self.browse_text, "\n".join(lines))
-        can = bool(ent and ent.get("download") and not r["have"])
-        self.browse_track.configure(state="normal" if can and not self.busy else "disabled")
+        self._browse_buttons()
 
     def browse_adopt(self):
         r = self.browse.get("detail")
@@ -739,7 +1380,9 @@ class App:
         self.updates_table = make_table(f, cols, height=16)
         self.updates_table.grid(row=2, column=0, sticky="nsew")
 
-    def updates_check(self):
+    def updates_check(self, then=None):
+        """Ask the feeds. `then`, if given, runs on the main thread afterwards,
+        whatever the answer: the Start tab chains the three measurements."""
         def job():
             seen, pending, resume = A.pending_updates(self.state, self.tracked)
             return seen
@@ -747,18 +1390,22 @@ class App:
         def done(seen):
             if seen is None:
                 self.updates_summary.set("Could not read the published feeds.")
-                return
-            self.tab_filled("Updates")
-            self.update_rows = sorted(seen, key=lambda t: (not t[4], W.stem_of(t[3]).lower()))
-            rows = []
-            for key, e, p, fn, changed, on_disk in self.update_rows:
-                rows.append(("UPDATE" if changed else "ok", W.stem_of(fn),
-                             p.get("version") or ("absent" if not on_disk else "unknown"),
-                             e["version"], human(e["size"] or 0)))
-            fill(self.updates_table.tree, rows)
-            n = sum(1 for t in self.update_rows if t[4])
-            self.updates_summary.set(f"{n} of {len(self.update_rows)} tracked list(s) have updates.")
-        self.run_job("Checking the feeds", job, done)
+            else:
+                self.tab_filled("Updates")
+                self.update_rows = sorted(seen, key=lambda t: (not t[4], W.stem_of(t[3]).lower()))
+                rows = []
+                for key, e, p, fn, changed, on_disk in self.update_rows:
+                    rows.append(("UPDATE" if changed else "ok", W.stem_of(fn),
+                                 p.get("version") or ("absent" if not on_disk else "unknown"),
+                                 e["version"], human(e["size"] or 0)))
+                fill(self.updates_table.tree, rows)
+                n = sum(1 for t in self.update_rows if t[4])
+                self.updates_summary.set(f"{n} of {len(self.update_rows)} tracked list(s) have updates.")
+                self.note_overview("updates", total=len(self.update_rows), pending=n,
+                                   names=[W.stem_of(t[3]) for t in self.update_rows if t[4]])
+            if then is not None:
+                then()
+        return self.run_job("Checking the feeds", job, done)
 
     def updates_fetch(self, all_updates=False):
         if all_updates:
@@ -803,13 +1450,19 @@ class App:
             W.out(f"Removed {len(stale)} stale to-do CSV(s) for lists that are complete or gone.")
         return rows
 
-    def status_refresh(self):
+    def status_refresh(self, then=None):
         def done(rows):
             self.status_rows = rows
             self._fill_incomplete()
             self._fill_prepare()
             self.tab_filled("Incomplete", "Prepare")
-        self.run_job("Checking what is on disk", self._status_job, done)
+            missing = sorted(((st["bytes"], W.stem_of(fn)) for fn, st in rows if st["missing"]),
+                             reverse=True)
+            self.note_overview("status", incomplete=len(missing), complete=len(rows) - len(missing),
+                               bytes=sum(b for b, _n in missing), names=[n for _b, n in missing])
+            if then is not None:
+                then()
+        return self.run_job("Checking what is on disk", self._status_job, done)
 
     def _build_incomplete(self, f):
         f.columnconfigure(0, weight=1)
@@ -942,24 +1595,71 @@ class App:
         self.run_job(f"Staging {W.stem_of(fn)}", lambda: W.stage_list(self.state, fn, st), done)
 
     def _offer_install(self, fn):
+        """After staging: find Wabbajack, ask it about the game, and look up
+        whether it is the newest release - a folder listing, a child process
+        and a cached web request, so off the main thread - then fill the
+        panel and remember the verdict for the Start tab."""
         mode = CFG.INSTALL_MODE
-        st = dict(self.status_rows)[fn] if fn in dict(self.status_rows) else None
+        st = dict(self.status_rows).get(fn)
         if mode == "off" or st is None:
             self.install_info.set("Installing is switched off (INSTALL_MODE).")
             return
+        game = st["game"]
+
+        def job():
+            wj = self._find_wabbajack()
+            if not wj:
+                return {"wj": None, "update": WB.update_status(None)}
+            ready, detail = WB.game_ready(wj.get("cli"), game)
+            return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj)}
+
+        self.run_job("Checking Wabbajack", job, lambda res: self._show_install_offer(fn, st, mode, res))
+
+    def _find_wabbajack(self):
+        """Wabbajack, with the version folders an update superseded removed
+        on the way: the launcher leaves them behind, at some 700 MB each.
+        Worker-thread code; it only writes to the log."""
         wj = WB.find_wabbajack()
+        for name in WB.prune_old_versions(wj):
+            W.out(f"  Removed Wabbajack {name}, superseded by {wj['version']}.")
+        return wj
+
+    def wabbajack_check(self, then=None):
+        """Is Wabbajack there, and is it the newest release? Cheap: a folder
+        listing and a release lookup cached for six hours."""
+        def done(update):
+            self._note_wabbajack(update)
+            W.out(f"  {update['text']}." + (f"  {update['url']}" if update["outdated"] else ""))
+            if then is not None:
+                then()
+        return self.run_job("Checking Wabbajack",
+                            lambda: WB.update_status(self._find_wabbajack()), done)
+
+    def _note_wabbajack(self, update):
+        self.note_overview("wabbajack", **{k: update.get(k) for k in
+                                           ("installed", "latest", "outdated", "text", "url")})
+
+    def _show_install_offer(self, fn, st, mode, res):
+        wj, update = res["wj"], res["update"]
+        self._note_wabbajack(update)
         stem = W.stem_of(fn)
         if not wj:
             self.install_info.set("Wabbajack was not found. Set WABBAJACK_DIR in Settings if it is "
                                   "installed somewhere other than beside this folder.")
+            self.install_button.configure(state="disabled")
             return
         downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
         manifest = os.path.join(A.MANIFESTS, fn)
-        ready, detail = WB.game_ready(wj.get("cli"), st["game"])
+        ready, detail = res["ready"], res["detail"]
         mark = {True: "ok", False: "BLOCKED", None: "unknown"}[ready]
         lines = [f"Wabbajack   {wj['dir']}" + (f"  ({wj['version']})" if wj["version"] else ""),
-                 f"Modlist     {manifest}", f"Downloads   {downloads}",
-                 f"Game        {A.WJ.game_label(st['game'])}  [{mark}]   {detail}"]
+                 f"            {update['text']}"
+                 + (f"   {update['url']}" if update["outdated"] else "")]
+        if update["outdated"]:
+            lines.append("            Run Wabbajack.exe once to let it update itself; the old "
+                         "version's folder is removed from here the next time it is checked.")
+        lines += [f"Modlist     {manifest}", f"Downloads   {downloads}",
+                  f"Game        {A.WJ.game_label(st['game'])}  [{mark}]   {detail}"]
         if st["missing"]:
             lines.append(f"Missing     {st['missing']} archive(s) ({human(st['bytes'])}) not downloaded "
                          f"yet; Wabbajack will try to fetch them itself.")
@@ -971,7 +1671,7 @@ class App:
             lines.append("wabbajack-cli.exe was not found; set INSTALL_MODE to 'gui' to open the window.")
         self.install_info.set("\n".join(lines))
         self.install_ctx = {"fn": fn, "st": st, "wj": wj, "manifest": manifest, "downloads": downloads,
-                            "mode": mode, "ready": ready}
+                            "mode": mode, "ready": ready, "update": update}
         remembered = (self.state.get("install") or {}).get(stem)
         if remembered:
             self.install_path.set(remembered)
@@ -981,6 +1681,13 @@ class App:
     def prepare_install(self):
         ctx = getattr(self, "install_ctx", None)
         if not ctx:
+            return
+        upd = ctx.get("update") or {}
+        if upd.get("outdated") and not messagebox.askyesno(
+                "Wabbajack is out of date",
+                f"{upd['text']}.\n\nA modlist built for a newer Wabbajack can fail to install on "
+                f"an older one. The newest release is at\n{upd['url']}\n\n"
+                f"Install with the version you have anyway?", icon="warning", parent=self.root):
             return
         if ctx["mode"] == "gui":
             if WB.launch_gui(ctx["wj"]["exe"]):
@@ -1049,8 +1756,9 @@ class App:
         self.rule = tk.StringVar(value="y")
         ttk.Radiobutton(bar2, text="your modlists only", variable=self.rule, value="y",
                         command=self._fill_masters).pack(side="left", padx=(6, 0))
-        ttk.Radiobutton(bar2, text="any known modlist, yours or published", variable=self.rule,
-                        value="a", command=self.space_wide).pack(side="left", padx=(6, 0))
+        ttk.Radiobutton(bar2, text="any known modlist, yours or published (hidden lists excluded)",
+                        variable=self.rule, value="a", command=self.space_wide).pack(side="left",
+                                                                                     padx=(6, 0))
         self.action(bar2, "Clear Master for selected", self.space_clear).pack(side="left", padx=12)
         self.masters_note = tk.StringVar(value="")
         ttk.Label(bar2, textvariable=self.masters_note).pack(side="right")
@@ -1075,9 +1783,9 @@ class App:
         self.strays_table.grid(row=8, column=0, sticky="nsew")
         self.stray_note = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.stray_note, wraplength=1000,
-                  foreground="#8a4b00").grid(row=9, column=0, sticky="w", pady=(4, 0))
+                  style="Warn.TLabel").grid(row=9, column=0, sticky="w", pady=(4, 0))
 
-    def space_measure(self):
+    def space_measure(self, then=None):
         def job():
             lists, masters = W.gather_space(self.records)
             return {"lists": lists, "masters": masters, "strays": W.all_stray_folders(),
@@ -1090,7 +1798,17 @@ class App:
             self.space["wide"] = None
             self.rule.set("y")
             self._fill_space()
-        self.run_job("Measuring the pools", job, done)
+            trash = res["trash"]
+            self.note_overview("space", lists=len(res["lists"]),
+                               manifest_bytes=sum(x["manifest_bytes"] for x in res["lists"]),
+                               masters=[{"label": m["label"], "files": m["files"], "bytes": m["bytes"],
+                                         "free_bytes": m["free_bytes"], "free_files": m["free_files"]}
+                                        for m in res["masters"]],
+                               trash_files=sum(fl for _g, fl, _b, _o in trash),
+                               trash_bytes=sum(b for _g, _f, b, _o in trash))
+            if then is not None:
+                then()
+        return self.run_job("Measuring the pools", job, done)
 
     def _fill_space(self):
         reserved = A.WJ.reserved_list_names()
@@ -1180,7 +1898,14 @@ class App:
             want, note, pulled = W.gallery_protection(pools)
             if want is None:
                 return {"error": note}
-            return {"want": want, "note": note, "pulled": pulled,
+            # The hidden lists for these pools, by title, for the confirmation:
+            # they are the one thing this rule deliberately leaves unprotected,
+            # so they are named where the deletion is agreed to. The feeds are
+            # this run's snapshot; gallery_protection just read them.
+            feeds, _complete = A.load_feeds()
+            hidden = sorted(str(e.get("title") or k) for k, e in feeds.items()
+                            if G.pool_key(e.get("game")) in pools and G.is_hidden(k))
+            return {"want": want, "note": note, "pulled": pulled, "hidden": hidden,
                     "masters": W.measure_masters(self.records, want)}
 
         def done(res):
@@ -1194,6 +1919,7 @@ class App:
                 return
             self.space["wide"] = res["want"]
             self.space["pulled"] = res["pulled"]
+            self.space["hidden"] = res["hidden"]
             self.space["masters"] = res["masters"]
             W.out(f"  {res['note']}.")
             self._fill_masters()
@@ -1301,7 +2027,12 @@ class App:
                          f"modlist's folder ({human(sum(m['dup_bytes'] for m in chosen))}). Each is "
                          f"hashed against its other copy first; a pair that differs is kept.")
         if mode == "a":
-            lines.append("\nProtected by: your modlists AND every published list.")
+            lines.append("\nProtected by: your modlists AND every published list, hidden lists excluded.")
+            hidden = self.space.get("hidden") or []
+            if hidden:
+                lines.append(f"{len(hidden)} hidden list(s) protect nothing, so their archives go "
+                             f"unless another list wants them: {', '.join(hidden[:6])}"
+                             + (f" and {len(hidden) - 6} more" if len(hidden) > 6 else ""))
             pulled = self.space.get("pulled") or []
             if pulled:
                 lines.append(f"{len(pulled)} published list(s) have been pulled by their authors, so "
@@ -1388,47 +2119,84 @@ class App:
     # Settings
     # ==================================================================
     def _build_settings(self, f):
-        f.columnconfigure(1, weight=1)
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(2, weight=1)
         ttk.Label(f, text=f"Your settings live in {CFG.SETTINGS_FILE} beside the scripts; only what "
                           f"differs from the shipped defaults is written. Paths and the manifest "
                           f"folder take effect after a restart; everything else at once.",
-                  wraplength=1000).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-        self.setting_vars = {}
-        row = 1
-        for key in CFG.USER_SETTINGS:
-            default = CFG._DEFAULTS[key]
-            ttk.Label(f, text=key).grid(row=row, column=0, sticky="nw", padx=(0, 10), pady=2)
-            if isinstance(default, bool):
-                var = tk.BooleanVar()
-                ttk.Checkbutton(f, variable=var).grid(row=row, column=1, sticky="w")
-            elif key in CFG.CHOICES:
-                var = tk.StringVar()
-                ttk.Combobox(f, textvariable=var, values=list(CFG.CHOICES[key]), state="readonly",
-                             width=14).grid(row=row, column=1, sticky="w")
-            elif isinstance(default, dict):
-                var = tk.Text(f, height=3, width=80)
-                var.grid(row=row, column=1, sticky="ew")
-            else:
-                var = tk.StringVar()
-                ttk.Entry(f, textvariable=var).grid(row=row, column=1, sticky="ew")
-            hint = {"GAME_FOLDERS": "JSON object, merged over the defaults",
-                    "GAME_DISPLAY": "JSON object, merged over the defaults",
-                    "EXCLUDE_POOL_DIRS": "comma-separated", "EXCLUDE": "comma-separated",
-                    "TRACK": "comma-separated", "STAGE_LIST": "empty = most recently updated",
-                    "WABBAJACK_DIR": "empty = auto-detect", "NOTIFY_URL": "empty = off",
-                    "ARCHIVE_ROOT": "restart to apply", "MANIFEST_DIR": "restart to apply"}.get(key, "")
-            ttk.Label(f, text=hint, foreground="#666").grid(row=row, column=2, sticky="w", padx=(8, 0))
-            self.setting_vars[key] = var
-            row += 1
+                  wraplength=1000).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        # The buttons sit above the form, not below it: the form is longer
+        # than the tab at the default window size, and a Save button that has
+        # to be scrolled to is a Save button that is not there.
         bar = ttk.Frame(f)
-        bar.grid(row=row, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         ttk.Button(bar, text="Save", command=self.settings_save).pack(side="left")
         ttk.Button(bar, text="Reset to defaults", command=lambda: self.settings_fill(CFG.defaults())).pack(
             side="left", padx=6)
         ttk.Button(bar, text="Open the file", command=self._open_settings_file).pack(side="left")
         self.settings_note = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.settings_note, wraplength=1000).grid(
-            row=row + 1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Label(bar, textvariable=self.settings_note).pack(side="left", padx=(12, 0))
+
+        # The form scrolls. Twenty-odd rows outgrow the tab at the default
+        # window size, more so under the dark theme's taller rows, and a
+        # setting that cannot be reached without enlarging the window is one
+        # that will not be changed. A canvas is the only Tk container that
+        # scrolls; the frame it carries is the form.
+        canvas = self._register_canvas(tk.Canvas(f, highlightthickness=0, borderwidth=0))
+        vsb = ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.grid(row=2, column=0, sticky="nsew")
+        vsb.grid(row=2, column=1, sticky="ns")
+        form = ttk.Frame(canvas)
+        item = canvas.create_window((0, 0), window=form, anchor="nw")
+        form.columnconfigure(1, weight=1)
+
+        def resize(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfigure(item, width=canvas.winfo_width())
+
+        def wheel(e):
+            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        form.bind("<Configure>", resize)
+        canvas.bind("<Configure>", resize)
+        # The wheel scrolls the form while the pointer is over it, and nothing
+        # else the rest of the time: a global binding would scroll this tab
+        # from every other one.
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", wheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+        self.setting_vars = {}
+        row = 0
+        for key in CFG.USER_SETTINGS:
+            default = CFG._DEFAULTS[key]
+            ttk.Label(form, text=key).grid(row=row, column=0, sticky="nw", padx=(0, 10), pady=2)
+            if isinstance(default, bool):
+                var = tk.BooleanVar()
+                ttk.Checkbutton(form, variable=var).grid(row=row, column=1, sticky="w")
+            elif key in CFG.CHOICES:
+                var = tk.StringVar()
+                self._register_combo(ttk.Combobox(form, textvariable=var, values=list(CFG.CHOICES[key]),
+                                                  state="readonly", width=14)).grid(
+                    row=row, column=1, sticky="w")
+            elif isinstance(default, dict):
+                var = self._register_text(tk.Text(form, height=3, width=80))
+                var.grid(row=row, column=1, sticky="ew")
+            else:
+                var = tk.StringVar()
+                ttk.Entry(form, textvariable=var).grid(row=row, column=1, sticky="ew")
+            hint = {"GAME_FOLDERS": "JSON object, merged over the defaults",
+                    "GAME_DISPLAY": "JSON object, merged over the defaults",
+                    "EXCLUDE_POOL_DIRS": "comma-separated", "EXCLUDE": "comma-separated",
+                    "TRACK": "comma-separated",
+                    "HIDDEN": "comma-separated feed keys; the Browse tab's Hide button writes this",
+                    "STAGE_LIST": "empty = most recently updated",
+                    "WABBAJACK_DIR": "empty = auto-detect", "NOTIFY_URL": "empty = off",
+                    "THEME": "the Dark mode switch beside the progress bar writes this",
+                    "ARCHIVE_ROOT": "restart to apply", "MANIFEST_DIR": "restart to apply"}.get(key, "")
+            ttk.Label(form, text=hint, style="Hint.TLabel").grid(row=row, column=2, sticky="w",
+                                                                  padx=(8, 12))
+            self.setting_vars[key] = var
+            row += 1
 
     def settings_fill(self, values=None):
         self.tab_filled("Settings")
@@ -1478,6 +2246,7 @@ class App:
         path, more = CFG.save_settings(values)
         A.reload_settings()
         self.assist = (A.NEXUS_MODE == "assist")
+        self.apply_theme(CFG.THEME)
         # A setting can move the archive root or rename a pool folder, so every
         # other tab is rebuilt from scratch rather than guessing what survived.
         self.data_changed("settings", "records", "pools")
@@ -1541,13 +2310,21 @@ def main(nexus_mode=None, allow_size_only=False, no_lock=False, verbose=False):
     return 0
 
 
-if __name__ == "__main__":
+def cli(argv=None):
+    """The window's flags, parsed in one place.
+
+    Kept out of the __main__ block so a build's launcher can hand the window
+    the same flags the command line would, rather than reproducing them."""
     import argparse
     ap = argparse.ArgumentParser(description="Wabbajack Wizard, the desktop window.")
     ap.add_argument("--nexus-mode", choices=("skip", "assist"))
     ap.add_argument("--allow-size-only", action="store_true")
     ap.add_argument("--no-lock", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
-    a = ap.parse_args()
-    sys.exit(main(nexus_mode=a.nexus_mode, allow_size_only=a.allow_size_only,
-                  no_lock=a.no_lock, verbose=a.verbose))
+    a = ap.parse_args(argv)
+    return main(nexus_mode=a.nexus_mode, allow_size_only=a.allow_size_only,
+                no_lock=a.no_lock, verbose=a.verbose)
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

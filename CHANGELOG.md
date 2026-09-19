@@ -1,9 +1,89 @@
 # Changelog
 
-## 1.1.0 — 2026-09-04
+## 1.2.0 — 2026-09-19
 
 ### Added
 
+- **A Start tab.** The window used to open on Browse and go straight to
+  measuring the first game's lists against its pool - 28 seconds for Skyrim,
+  with every other tab locked until it finished. It now opens on an overview:
+  your modlists, pending updates, incomplete lists, the pools and the trash,
+  the gallery, the settings, each card showing what the last session measured
+  and when. Opening the window reads the manifests and nothing else. Each tab
+  still measures when it is opened, and what it finds is written to
+  `wj_overview.json` beside the scripts, so the next start shows it again at
+  once. **Refresh everything** runs the three measurements in a row and fills
+  those tabs on the way.
+- **Dark mode.** A switch beside the progress bar, remembered as `THEME` in
+  `wj_settings.json` and editable in Settings too. Dark is the `clam` ttk theme
+  under a dark palette, the one theme that draws every part of every widget
+  itself; the platform theme hands tabs, headings and scrollbars to Windows,
+  which paints them light whatever it is told. Light is that platform look,
+  untouched. The title bar follows on Windows 10 and 11, asked of the Desktop
+  Window Manager directly since Tk draws none of it; Windows 11 takes the
+  window's own colours for it.
+- **Hidden lists.** A published list you will never want can be hidden from the
+  Browse tab (**Hide this list**, under the detail pane; `[h]` on a list's
+  detail screen in the console). It then appears nowhere but the **Hidden
+  lists** entry at the end of the Game menu (`[h]` in the console's games menu),
+  where the flag comes off again. Its validation report is left out of every
+  sweep, it is never measured against the pools, and it protects nothing: under
+  the "any known modlist" rule its archives are as reclaimable as if the list
+  did not exist, and a missing report for it no longer blocks that rule. The
+  rule's label in Space says so, and its confirmation names the hidden lists
+  it is leaving unprotected. A list you track cannot be hidden, and a flag on
+  a tracked list is ignored, because its own manifest is what protects its
+  archives. The flags are `HIDDEN` in `wj_settings.json`.
+- The Browse table names each list's game, which the Hidden view needs since
+  it spans every game.
+- **Wabbajack is checked before an install.** Staging a list now also asks
+  whether the Wabbajack it found is the newest release, read from Wabbajack's
+  own release feed and cached for six hours beside the gallery reports. The
+  Prepare panel says which version is installed and which is newest, with the
+  download page when they differ, and starting an install with an older one
+  asks first: a modlist built for a newer Wabbajack can fail on it. The Start
+  tab's Settings card remembers the verdict, and **Refresh everything** runs
+  the check too. A lookup that fails is "cannot tell", which neither blocks an
+  install nor blesses one. The finding, the game preflight and the lookup now
+  run off the window's main thread.
+- **Wabbajack can live inside the folder**, in `Wabbajack\`, which is looked in
+  first and is gitignored, so tools, Python, git and Wabbajack move as one.
+  Wabbajack's launcher leaves every superseded version folder behind at some
+  700 MB each; whenever the wizard next looks at Wabbajack it removes them,
+  only ever version-named folders holding the program, older than a newest
+  that is whole, and never while a Wabbajack process is running.
+- **Nothing installed, nothing absolute.** An interpreter unpacked into
+  `.python\` inside the folder (a python-build-standalone release, tkinter
+  included) is now the whole Python side: `setup_env.bat` installs the
+  requirements straight into it and makes no virtual environment, and
+  `run.bat`, the tests and `build.py` prefer it. A venv records where its
+  Python is, which was the one absolute path in the setup; without one the
+  folder can be moved or copied whole. The machine-wide-Python arrangement
+  with `.venv-win` still works where that is what there is. The README
+  describes the same arrangement for git: MinGit under `.mingit\`, the
+  portable Git Credential Manager inside it, and a `git.bat` in front.
+
+### Fixed
+
+- The Settings form outgrew the tab at the default window size, and its Save
+  button with it. The buttons now sit above the form, and the form scrolls.
+
+Tests: 895 checks across 16 sandbox suites, up from 810.
+
+## 1.1.0 — 2026-09-05
+
+### Added
+
+- **A build for people with no Python.** `WabbajackWizard-v<version>-win64.zip`
+  unzips to two binaries and an `_internal` folder beside them: the window, and
+  its console twin, which differ the way `python.exe` and `pythonw.exe` do.
+  Everything is inside, `xxhash` included, so verification is the real xxHash64
+  and not a fallback to comparing sizes. Nothing is installed and nothing is
+  written outside the folder you unzip it into - settings, `modlists/`, logs and
+  the state file all land beside the exe, exactly where they land beside the
+  scripts, so a build can be dropped into an existing setup and pick up what is
+  already there. `python build.py` makes it; the scripts are unchanged and still
+  run as scripts.
 - Browse the whole gallery, not only the games you keep archives for. **Every
   game** in the window, `a` in the console. A game with no pool is measured
   against an empty index, so its lists read as 0% held and the "to fetch"

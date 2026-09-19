@@ -147,18 +147,34 @@ check("start-up finished", settle(), "still busy")
 check("the manifests were read", sorted(app.records) == ["Doomed.wabbajack", "Keep.wabbajack"],
       str(sorted(app.records)))
 check("  and the log pane says so", "manifest(s) in" in log_text(), log_text()[-300:])
-check("the first tab loaded itself", "Browse" in app.tab_seen)
+check("the window opens on Start, and Browse did not load itself",
+      app.nb.tab(app.nb.select(), "text") == "Start" and "Start" in app.tab_seen
+      and "Browse" not in app.tab_seen, str(sorted(app.tab_seen)))
+check("  the modlists card counts the manifests without asking the share",
+      "2 manifest(s)" in app.cards["records"]["body"].get(), app.cards["records"]["body"].get())
+check("  the expensive cards say they have not measured yet",
+      "Not checked yet" in app.cards["updates"]["body"].get()
+      and "not measured yet" in app.cards["space"]["body"].get(), app.cards["space"]["body"].get())
+check("  and the session was stamped in the sandbox",
+      os.path.isfile(os.path.join(box.tools, GUI.OVERVIEW_FILE))
+      and GUI.load_overview().get("session"), str(GUI.load_overview()))
 check("no dialog was needed to start", not any(k == "show" for k, _t, _x in DLG.calls),
       str(DLG.calls))
 
 # ---------------------------------------------------------------- 15.2
 print("\n 15.2  Browse")
+app.browse_load()
+settle()
 check("the gallery loaded from the cache", len(app.browse["rows"]) == 1, app.browse_summary.get())
 check("  the game list has our pooled game", app.browse_game["values"] and
       "Fallout 4" in app.browse_game["values"][0], str(app.browse_game["values"]))
 check("  and the table shows the list with its overlap",
       len(rows(app.browse_table)) == 1 and rows(app.browse_table)[0][2] == "One List"
-      and rows(app.browse_table)[0][5] == "100.0%", str(rows(app.browse_table)))
+      and rows(app.browse_table)[0][3] == "Fallout 4"
+      and rows(app.browse_table)[0][6] == "100.0%", str(rows(app.browse_table)))
+check("  the Start tab's gallery card now knows the count",
+      (GUI.load_overview().get("gallery") or {}).get("published") == 1,
+      str(GUI.load_overview().get("gallery")))
 app.browse_table.tree.selection_set("0")
 app.browse_detail()
 check("selecting a row fills the detail pane",
@@ -358,7 +374,7 @@ app.browse_show_game()
 settle()
 r = rows(app.browse_table)
 check("its lists are measured against nothing owned",
-      len(r) == 1 and r[0][5] == "0.0%", str(r))
+      len(r) == 1 and r[0][6] == "0.0%", str(r))
 check("  and the pane explains what a pool would do",
       "no pool for this game" in app.browse_text.get("1.0", "end"),
       app.browse_text.get("1.0", "end")[:160])
@@ -529,6 +545,214 @@ settle()
 check("  all of them unlock when it finishes",
       {app.nb.tab(t, "state") for t in app.nb.tabs()} == {"normal"},
       str([app.nb.tab(t, "state") for t in app.nb.tabs()]))
+
+# ---------------------------------------------------------------- 15.13
+print("\n 15.13  hiding a list from the gallery, and bringing it back")
+
+
+def settings_file():
+    return json.load(io.open(CFG.settings_path(), encoding="utf-8"))
+
+
+app.browse_all.set(False)
+app.browse_load()
+settle()
+app.browse_game.current(app.browse["games"].index("fallout4"))
+app.browse_show_game()
+settle()
+idx = [i for i, r in enumerate(app.browse["grp"]) if r["key"] == "r/one"]
+check("One List is in the Fallout 4 view", len(idx) == 1, str([r["key"] for r in app.browse["grp"]]))
+app.browse_table.tree.selection_set(str(idx[0]))
+app.browse_detail()
+check("  and the pane offers to hide it",
+      str(app.browse_hide.cget("state")) == "normal" and app.browse_hide.cget("text") == "Hide this list",
+      str((app.browse_hide.cget("state"), app.browse_hide.cget("text"))))
+n_rows = len(app.browse["rows"])
+app.browse_toggle_hidden()
+settle()
+check("HIDDEN names it", [k.lower() for k in CFG.HIDDEN] == ["r/one"], str(CFG.HIDDEN))
+check("  in the sandbox's settings file", settings_file().get("HIDDEN") == ["r/one"],
+      str(settings_file().get("HIDDEN")))
+check("it left the game's rows, which is what a report sync fetches for",
+      len(app.browse["rows"]) == n_rows - 1 and all(r["key"] != "r/one" for r in app.browse["rows"]),
+      str([r["key"] for r in app.browse["rows"]]))
+check("  the Game menu gained a Hidden entry",
+      any(v.startswith("Hidden lists") for v in app.browse_game["values"]), str(app.browse_game["values"]))
+check("  the summary counts it", "1 hidden" in app.browse_summary.get(), app.browse_summary.get())
+check("  and so does the Start tab's card",
+      (GUI.load_overview().get("gallery") or {}).get("hidden") == 1, str(GUI.load_overview().get("gallery")))
+check("  the Settings tab is due a refresh", app.tab_is_stale("Settings"))
+app.settings_fill()
+check("  and shows the flag", app.setting_vars["HIDDEN"].get() == "r/one", app.setting_vars["HIDDEN"].get())
+
+app.browse_game.current(app.browse["games"].index(GUI.HIDDEN_GAME))
+app.browse_show_game()
+settle()
+r = rows(app.browse_table)
+check("the Hidden view lists it, with the feed's figures and no measurement",
+      len(r) == 1 and r[0][2] == "One List" and r[0][6] == "-", str(r))
+app.browse_table.tree.selection_set("0")
+app.browse_detail()
+check("  tracking is not offered while hidden", str(app.browse_track.cget("state")) == "disabled")
+check("  unhiding is",
+      app.browse_hide.cget("text") == "Unhide this list" and str(app.browse_hide.cget("state")) == "normal")
+check("  and the pane says what hidden means", "HIDDEN" in app.browse_text.get("1.0", "end"))
+DLG.calls.clear()
+app.browse_make_pool()
+check("  a pool cannot be set up for 'Hidden lists'", DLG.shown("Pick a game"), str(DLG.calls))
+app.browse_toggle_hidden()
+settle()
+check("unhiding clears the flag", CFG.HIDDEN == [], str(CFG.HIDDEN))
+check("  and takes it out of the file", "HIDDEN" not in settings_file(), str(sorted(settings_file())))
+check("  the list is back in its game", any(r["key"] == "r/one" for r in app.browse["rows"]))
+check("  the Hidden entry is gone",
+      not any(v.startswith("Hidden lists") for v in app.browse_game["values"]), str(app.browse_game["values"]))
+check("  and the view fell back to a game", app.browse["view"] == "fallout4", str(app.browse["view"]))
+
+print("\n      a tracked list cannot be hidden")
+app.tracked["r/one"] = "One.wabbajack"
+app.browse_load()
+settle()
+app.browse_game.current(app.browse["games"].index("fallout4"))
+app.browse_show_game()
+settle()
+idx = [i for i, r in enumerate(app.browse["grp"]) if r["key"] == "r/one"]
+app.browse_table.tree.selection_set(str(idx[0]))
+app.browse_detail()
+check("the button is disabled for it", str(app.browse_hide.cget("state")) == "disabled")
+app.browse_toggle_hidden()
+check("  and the handler refuses too", CFG.HIDDEN == [], str(CFG.HIDDEN))
+CFG.HIDDEN = ["r/one"]                 # flagged by hand in the file, then tracked
+app.browse_load()
+settle()
+check("a flag on a tracked list is ignored: the list stays in its game",
+      any(r["key"] == "r/one" and not r["hidden"] for r in app.browse["rows"]) and not app.browse["hidden"],
+      str([(r["key"], r["hidden"]) for r in app.browse["rows"]]))
+CFG.HIDDEN = []
+del app.tracked["r/one"]
+
+# ---------------------------------------------------------------- 15.14
+print("\n 15.14  dark mode, remembered in the settings file")
+style = GUI.ttk.Style(root)
+base = style.theme_use()
+app.set_theme("dark")
+check("dark mode is the clam theme", style.theme_use() == "clam", style.theme_use())
+check("  the log pane follows", app.log.cget("background") == GUI.DARK["field"], str(app.log.cget("background")))
+if sys.platform == "win32" and sys.getwindowsversion().build >= 17763:
+    check("  and Windows was asked for a matching title bar", app.titlebar_ok is True,
+          str(app.titlebar_ok))
+check("  the switch shows it", app.dark_var.get() is True)
+check("  and THEME is saved", settings_file().get("THEME") == "dark" and CFG.THEME == "dark",
+      str(settings_file().get("THEME")))
+app.set_theme("light")
+check("light mode is the platform theme again", style.theme_use() == base, style.theme_use())
+check("  with the log pane's own colours",
+      app.log.cget("background") == app._text_defaults[app.log]["background"], str(app.log.cget("background")))
+check("  and THEME, back at its default, is out of the file",
+      CFG.THEME == "light" and "THEME" not in settings_file(), str(sorted(settings_file())))
+app.settings_fill()
+app.setting_vars["THEME"].set("dark")
+app.settings_save()
+check("saving THEME from the Settings tab applies it too",
+      style.theme_use() == "clam" and app.dark_var.get() is True, style.theme_use())
+app.setting_vars["THEME"].set("light")
+app.settings_save()
+check("  and back", style.theme_use() == base and app.dark_var.get() is False, style.theme_use())
+
+# ---------------------------------------------------------------- 15.15
+print("\n 15.15  the Start tab: cheap to open, remembering the expensive answers")
+app.tab_filled(*GUI.TAB_DEPENDS)
+app.start_refresh()
+settle()
+ov = GUI.load_overview()
+check("Refresh everything measured the disk and the pools",
+      "status" in ov and "space" in ov, str(sorted(ov)))
+check("  filling those tabs on the way",
+      not any(app.tab_is_stale(n) for n in ("Incomplete", "Prepare", "Space")),
+      str([n for n in ("Incomplete", "Prepare", "Space") if app.tab_is_stale(n)]))
+check("  and the file is what the window holds", ov == app.overview)
+app.start_fill()
+body = app.cards["status"]["body"].get()
+check("the Incomplete card reads from it", "incomplete" in body and "complete" in body, body)
+check("  saying when", app.cards["status"]["when"].get().startswith("measured today"),
+      app.cards["status"]["when"].get())
+check("  the Disk card names the pool",
+      "Fallout 4" in app.cards["space"]["body"].get() and "Free on the archive volume" in app.cards["space"]["body"].get(),
+      app.cards["space"]["body"].get())
+app.tab_filled(*GUI.TAB_DEPENDS)
+app.data_changed("overview")
+check("a measurement makes Start stale, and nothing else",
+      app.tab_is_stale("Start")
+      and not any(app.tab_is_stale(n) for n in GUI.TAB_DEPENDS if n != "Start"),
+      str([n for n in GUI.TAB_DEPENDS if app.tab_is_stale(n)]))
+
+print("\n      a second window starts from the same file, without measuring")
+root2 = tk.Tk()
+root2.withdraw()
+app2 = GUI.App(root2, None)
+sys.stdout, sys.stderr = REAL_OUT, REAL_ERR
+t0 = time.time()
+while app2.busy and time.time() - t0 < 60:
+    app2._pump()
+    time.sleep(0.05)
+sys.stdout, sys.stderr = REAL_OUT, REAL_ERR
+check("it opens on Start with the last session's figures",
+      "incomplete" in app2.cards["status"]["body"].get() and "Fallout 4" in app2.cards["space"]["body"].get(),
+      app2.cards["status"]["body"].get())
+check("  says when the last session was", app2.start_session.get().startswith("Last session: today"),
+      app2.start_session.get())
+check("  and loaded nothing expensive to do it",
+      "Browse" not in app2.tab_seen and "Space" not in app2.tab_seen, str(sorted(app2.tab_seen)))
+root2.destroy()
+W.out = lambda msg="": app.q.put(("log", str(msg)))
+A.set_output_hook(lambda line: app.q.put(("child", line)))
+
+# ---------------------------------------------------------------- 15.16
+print("\n 15.16  before an install, Wabbajack is checked for being there and current")
+real_find, real_latest = WB.find_wabbajack, WB.latest_release
+WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": r"stub-dir\Wabbajack.exe",
+                                       "cli": None, "version": "4.2.2.1"}
+WB.latest_release = lambda force=False: {"version": "4.2.3.0", "url": "https://x/rel", "published": ""}
+try:
+    app.status_refresh()
+    settle()
+    app._offer_install("Keep.wabbajack")
+    settle()
+    info = app.install_info.get()
+    check("the panel names the installed and the newest version",
+          "4.2.2.1" in info and "4.2.3.0" in info and "update is available" in info, info[:300])
+    check("  with where to get it", "https://x/rel" in info, info[:300])
+    check("  the Start tab remembers the verdict",
+          (GUI.load_overview().get("wabbajack") or {}).get("outdated") is True,
+          str(GUI.load_overview().get("wabbajack")))
+    app.start_fill()
+    check("  and shows it", "update is available" in app.cards["settings"]["body"].get(),
+          app.cards["settings"]["body"].get())
+    DLG.answer = False
+    DLG.calls.clear()
+    app.install_ctx["mode"] = "gui"       # so only the version question stands between the click and Wabbajack
+    app.prepare_install()
+    check("installing asks first when Wabbajack is out of date",
+          any(k == "ask" and "out of date" in t for k, t, _x in DLG.calls), str(DLG.calls))
+    check("  and 'no' starts nothing", "Wabbajack is starting" not in log_text())
+    DLG.answer = True
+    WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None, "cli": None,
+                                           "version": "4.2.3.0"}
+    app._offer_install("Keep.wabbajack")
+    settle()
+    info = app.install_info.get()
+    check("a current install is reported as such",
+          "newest release" in info and "update is available" not in info, info[:200])
+    check("  and installing would not ask about it", not (app.install_ctx.get("update") or {}).get("outdated"))
+    WB.find_wabbajack = lambda hint=None: None
+    app._offer_install("Keep.wabbajack")
+    settle()
+    check("no Wabbajack at all is said plainly, and the button stays off",
+          "not found" in app.install_info.get() and str(app.install_button.cget("state")) == "disabled",
+          app.install_info.get()[:120])
+finally:
+    WB.find_wabbajack, WB.latest_release = real_find, real_latest
+    DLG.answer = True
 
 # ---- put everything back ---------------------------------------------------
 root.destroy()

@@ -1,18 +1,30 @@
 @echo off
 REM ---------------------------------------------------------------------
-REM  Create the isolated Python environment for these scripts.
+REM  Get the Python side of these scripts ready.
 REM
-REM  Makes .venv-win\ in this folder and installs requirements.txt into it.
-REM  Run once. Run it again any time you upgrade Python, or if run.bat
-REM  starts complaining that the environment is broken.
+REM  Two arrangements, decided by what is in this folder:
 REM
-REM  The name has -win on it deliberately: a virtual environment is tied to
-REM  the interpreter that built it. Rebuild it here if Python changes.
+REM    .python\      an interpreter unpacked inside the project (a
+REM                  python-build-standalone release, tkinter included).
+REM                  requirements.txt is installed straight into it, no
+REM                  virtual environment is made, and nothing is written
+REM                  outside this folder - so the folder can be moved or
+REM                  copied and everything still runs. This is the
+REM                  arrangement for a machine with no Python installed.
+REM
+REM    otherwise     a machine-wide Python builds .venv-win\ here, and
+REM                  requirements.txt goes into that. A venv records where
+REM                  its Python is, so it is rebuilt by running this again
+REM                  whenever Python moves or is upgraded.
+REM
+REM  Run once. Safe to run again.
 REM ---------------------------------------------------------------------
 
 pushd "%~dp0"
 echo Folder: %CD%
 echo.
+
+if exist ".python\python.exe" goto inproject
 
 REM --- Find a base interpreter to build the environment from ------------
 set BASEPY=
@@ -35,8 +47,16 @@ if exist ".venv-win\Scripts\python.exe" (
 
 set VPY=.venv-win\Scripts\python.exe
 if not exist "%VPY%" goto venvfail
+goto install
 
+REM --- The in-project interpreter needs no environment around it ---------
+:inproject
+set VPY=.python\python.exe
+echo Interpreter: .python\python.exe, kept inside this folder.
+"%VPY%" -c "import sys; print('  ' + sys.version.split()[0])"
 echo.
+
+:install
 echo Installing packages ...
 "%VPY%" -m pip install --upgrade pip --quiet --disable-pip-version-check
 "%VPY%" -m pip install -r requirements.txt --disable-pip-version-check
@@ -45,18 +65,20 @@ if errorlevel 1 goto pipfail
 REM --- Prove it works ---------------------------------------------------
 echo.
 echo Verifying ...
-"%VPY%" -c "import xxhash, sys; print('  python  ' + sys.version.split()[0]); print('  xxhash  ' + xxhash.VERSION)"
+"%VPY%" -c "import xxhash, tkinter, sys; print('  python  ' + sys.version.split()[0]); print('  xxhash  ' + xxhash.VERSION); print('  tk      ' + str(tkinter.TkVersion))"
 if errorlevel 1 goto pipfail
 
 echo.
-echo Done. run.bat will now use .venv-win automatically.
+echo Done. run.bat will use %VPY% automatically.
 goto end
 
 REM ---------------------------------------------------------------------
 :nopython
 echo Python was not found on PATH.
-echo Install it from https://www.python.org/downloads/ and tick
-echo "Add python.exe to PATH" during setup, then run this again.
+echo Either unpack a python-build-standalone release into .python\ here
+echo (see README.md - nothing gets installed on the machine), or install
+echo Python from https://www.python.org/downloads/ with "Add python.exe to
+echo PATH" ticked, then run this again.
 goto end
 
 :venvfail

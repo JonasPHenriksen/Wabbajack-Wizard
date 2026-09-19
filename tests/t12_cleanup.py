@@ -332,6 +332,20 @@ want, note, unchecked = quiet(W.gallery_protection, {"fallout4"})[0]
 check("with everything present it answers", want == {"g.7z": {7}}, str(want))
 check("  and says how many lists it consulted",
       "1 published list(s) consulted" in (note or ""), str(note))
+
+print("\n      a hidden list protects nothing, and blocks nothing")
+CFG.HIDDEN = ["r/one"]
+want, note, unchecked = quiet(W.gallery_protection, {"fallout4"})[0]
+check("its archives are not in the protected set", want == {}, str(want))
+check("  and the note says it was left out", "1 hidden list(s) ignored (r/one)" in (note or ""), str(note))
+os.remove(G.cache_file(G.report_rel("r/one")))
+want, note, unchecked = quiet(W.gallery_protection, {"fallout4"})[0]
+check("with its report missing the rule still answers, since it is never read",
+      want == {}, str(note))
+CFG.HIDDEN = []
+want, note, unchecked = quiet(W.gallery_protection, {"fallout4"})[0]
+check("  and unhidden, the missing report blocks again", want is None and "sync-reports" in (note or ""),
+      str(note))
 A.reset_feed_cache()
 
 # ---------------------------------------------------------------- 12.7

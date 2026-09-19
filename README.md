@@ -42,11 +42,55 @@ matched to its published list — exactly, with no guessing from titles.
 
 ## Quick start
 
+Two ways in, and neither needs the other.
+
+**If you have no Python.** Download `WabbajackWizard-v<version>-win64.zip`,
+unzip it anywhere, and run it. Python is inside; nothing is installed, and
+nothing is written outside the folder you unzipped.
+
 ```
-setup_env.bat        once, creates .venv-win and installs xxhash
+WabbajackWizard.exe                    opens the window
+WabbajackWizard-console.exe --wizard   the same five stages in the console
+```
+
+The two are one program built twice, the way `python.exe` and `pythonw.exe`
+are: the first has no console, the second does. Every flag below works on the
+console one. Windows will warn about an unsigned download the first time -
+**More info** then **Run anyway** - because the zip is not code-signed.
+
+**If you have Python**, run the scripts directly:
+
+```
+setup_env.bat        once; installs xxhash into .python\ when that is there, else into a new .venv-win
 run.bat              opens the window
 run.bat --wizard     the same five stages in the console
 ```
+
+No Python on the machine, and no wish to install one? Unpack a
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone/releases)
+Windows release (the `install_only` one, which carries tkinter) into `.python\`
+inside this folder, so that `.python\python.exe` exists. `setup_env.bat` then
+installs xxhash straight into it and makes no virtual environment at all, since
+a venv records where its Python is and breaks when the folder moves; `run.bat`,
+the tests and `build.py` all prefer that interpreter. Nothing is installed
+machine-wide, nothing in the folder names an absolute path, and the whole folder
+can be moved or copied as it is. The one path that does reach outside it is
+`ARCHIVE_ROOT`, `../Mod Archive` by default, so a move that separates the tools
+from the archives needs that set in `wj_settings.json`. The same goes for git: a
+[MinGit](https://github.com/git-for-windows/git/releases) zip unpacked into
+`.mingit\`, the portable
+[Git Credential Manager](https://github.com/git-ecosystem/git-credential-manager/releases)
+zip unpacked into its `mingw64\libexec\git-core\` (where MinGit's default
+`credential.helper = manager` finds it), and a `git.bat` in this folder in
+front of it, is a complete git for this checkout, GitHub sign-in included. Its
+settings are `.mingit\etc\gitconfig`, which also has to mark the checkout safe
+because files on a share read as foreign-owned; its token goes to Windows
+Credential Manager, so the folder itself holds no secret. Both folders and the
+wrapper are gitignored.
+
+Either way, everything the tool writes - your settings, `modlists/`, the logs,
+the state file - lands in the folder you started it from, so a build can be
+dropped straight into an existing setup and pick up what is already there.
 
 Settings are optional: copy `wj_settings.example.json` to `wj_settings.json`
 and change what differs, or use the window's Settings tab. Without it the
@@ -62,6 +106,16 @@ every job in the window runs on a worker thread with its output streaming
 into the log pane, and anything destructive asks first in the same words the
 console uses. Stages are independent: skipping one does not affect the others.
 
+The window opens on a **Start** tab: an overview of your modlists, pending
+updates, incomplete lists, the pools and the trash, the gallery and the
+settings, each card showing what the last session measured and when. Opening
+the window reads the manifests and nothing else; a tab measures when you open
+it, and what it finds is written to `wj_overview.json` beside the scripts so the
+next start shows it again at once. **Refresh everything** runs the three
+measurements in a row. **Dark mode**, beside the progress bar, switches the
+window's colours, title bar included on Windows 10 and 11, and is remembered
+as `THEME`.
+
 1. **Browse** — every modlist published for a game you keep archives for, and
    how much of each one is already in your pools, sorted most-complete first.
    Picking one shows the gap in full and offers to fetch its manifest and start
@@ -69,15 +123,18 @@ console uses. Stages are independent: skipping one does not affect the others.
    games you keep no archives for at all: their lists measure against nothing,
    so the "to fetch" column is the whole download, which is the number worth
    seeing before taking a new game on. **Set up a pool** (`p N` in the console)
-   then lays one out — see below.
+   then lays one out — see below. A list you will never want can be **hidden**,
+   after which it shows only under **Hidden lists** in the Game menu — see below.
 2. **Updates** — which tracked modlists have a newer published version, and
    which are already current. Fetches the manifests you pick.
 3. **Incomplete** — which modlists are missing archives, and how many of those
    need a Nexus click. Downloads one list at a time, finishing each before
    offering the next.
 4. **Prepare** — gathers everything one modlist needs into its own folder for
-   Wabbajack, then offers to hand it straight over (see below). One at a time by
-   design: staging a second list pulls the shared archives back out of the first.
+   Wabbajack, then offers to hand it straight over (see below), after checking
+   that Wabbajack is installed, can see the game, and is the newest release. One
+   at a time by design: staging a second list pulls the shared archives back out
+   of the first.
 5. **Space** — what the manifests and the per-game Master pools are costing,
    with the option to delete modlists, park folders that are not ours, clear
    Master under a protection rule you choose, empty the trash, and sweep the
@@ -93,14 +150,16 @@ which published list each one is, the **archives** on the share, and the
 
 | a tab reads | manifests | archives | settings |
 | --- | :---: | :---: | :---: |
+| Start | ● | ● | ● |
 | Browse | ● | ● | |
 | Updates | ● | | |
 | Incomplete, Prepare | ● | ● | |
 | Space | ● | ● | |
 | Settings | | | ● |
 
-Every operation says which of the three it moved, so a new tab cannot be
-forgotten by an older handler. Tracking them apart is what keeps the refresh
+Start also rebuilds whenever another tab finishes a measurement, since that is
+what it reports. Every operation says which of the three it moved, so a new tab
+cannot be forgotten by an older handler. Tracking them apart is what keeps the refresh
 cheap: fetching a manifest changes what Updates and Browse show, but not the
 archives on disk, so Browse keeps its pool index rather than paying the
 28-second Skyrim scan again.
@@ -200,6 +259,23 @@ Five lists carry `Status: ForcedDown` in their report, and those reports have an
 pulled. Their upstream `passed=0 failed=0` means *not checked*, not *none of it
 works*, so they are shown with a `-` for overlap rather than as 0%.
 
+### Hiding a list you will never want
+
+**Hide this list**, under the Browse tab's detail pane (`[h]` on a list's detail
+screen in the console), takes a list out of the gallery. It then appears
+nowhere but the **Hidden lists** entry at the end of the Game menu (`[h]` in the
+console's games menu), which spans every game and is where the flag comes off
+again. Nothing is fetched for a hidden list: its validation report is left out
+of every sweep, and it is never measured against your pools, so the Hidden view
+shows the feeds' own figures. It also protects nothing: under the `[a]` rule in
+Space its archives are as reclaimable as if the list did not exist, and a
+missing report for it does not block that rule.
+
+A list you track cannot be hidden, and a flag on a tracked list is ignored,
+because its own manifest is what protects its archives and a flag that could
+quietly cancel that would be worse than none. The flags are the `HIDDEN` list in
+`wj_settings.json`, editable there and in the Settings tab as well.
+
 ### There is no hidden pool of modlists
 
 The gallery aggregates every repository in `repositories.json`, not just the
@@ -236,7 +312,11 @@ and a short protected set does not mean deleting a bit less, it means deleting
 the wrong thing. So it declines and tells you to fetch the reports. The handful
 of lists whose authors have pulled them publish an empty report permanently, or
 drop out of the validator's summary altogether; those cannot block the feature,
-so they are named in the confirmation instead.
+so they are named in the confirmation instead. Hidden lists are not published
+lists as far as `[a]` is concerned: they protect nothing, a missing report for
+one blocks nothing, and the confirmation names them. An archive only a hidden
+list wants therefore goes; one that another list also wants stays, because
+protection is per archive, not per list.
 
 Name **and** size must match, every file is re-checked at the moment it goes
 rather than trusted from the table, and every file is recorded in
@@ -443,6 +523,7 @@ bad value is reported at start-up and its default used, never fatal.
 | `INSTALL_MODE` | `cli` | how a staged list is handed over: `cli`, `gui`, or `off` |
 | `AUTO_TRACK` | `true` | match every manifest in the folder against the feeds automatically |
 | `EXCLUDE`, `TRACK` | `[]` | lists to leave alone, and pins for lists auto-matching cannot resolve |
+| `HIDDEN` | `[]` | published lists hidden from the gallery, by feed key; the Browse tab's Hide button writes it |
 | `STAGE_LIST` | `null` | which list a scheduled run stages; `--only` overrides it |
 | `NEXUS_MODE` | `skip` | `assist` opens each Nexus page for a click; `skip` leaves them to Wabbajack |
 | `KEEP_BACKUP_DAYS` | 14 | how long superseded manifests are kept |
@@ -450,6 +531,7 @@ bad value is reported at start-up and its default used, never fatal.
 | `DOWNLOAD_ORDER` | `smallest` | `smallest`, `largest`, or `manifest`; see below |
 | `FREE_SPACE_MARGIN_GB` | 20 | refuse a download batch that would leave less than this free |
 | `NOTIFY_URL` | `null` | an ntfy topic or Discord webhook for a scheduled run's report |
+| `THEME` | `light` | the window's colours, `light` or `dark`; the Dark mode switch writes it |
 
 The downloader decides where an archive is written and the sorter decides where
 it is moved to, so both read the layout from the same module, and a start-up
@@ -527,6 +609,30 @@ game is installed; the game is missing; or Wabbajack does not support that game
 at all (Dark Souls 3, for one, is not in its list). A missing CLI reports
 "unknown" rather than guessing either way.
 
+### Is Wabbajack itself current?
+
+The same step asks whether the Wabbajack it found is the newest release, since
+a modlist built for a newer Wabbajack can fail to install on an older one.
+Wabbajack tags its releases with the bare version, `4.2.3.0`, the same string
+its install uses as the versioned folder name, so the two compare directly; the
+release feed is read once and cached for six hours beside the gallery reports.
+The panel says which version is installed and which is newest, with the download
+page when they differ, and starting an install with an older one asks first. A
+lookup that fails is "cannot tell", which neither blocks an install nor blesses
+one. This is the only place the suite uses Wabbajack itself; everywhere else it
+only checks whether a Wabbajack process is running before moving archives.
+
+Wabbajack is looked for in `WABBAJACK_DIR` if set, then in a `Wabbajack\`
+folder inside this one, then beside this one, then in the per-user install
+location. Keeping it inside is the arrangement that moves as one piece, and the
+folder is gitignored. Wabbajack updates itself: run `Wabbajack.exe` and its
+launcher downloads the new version into a subfolder of its own, leaving the old
+one where it was at some 700 MB. Whenever this tooling next looks at Wabbajack
+it removes those superseded version folders, and says so in the log. Only
+folders that are version-named and hold the program go, only ones older than
+the newest, only once the newest is whole, and never while a Wabbajack process
+is running, since the launcher is one and the new version may still be arriving.
+
 It also warns when archives are still outstanding — Wabbajack will try to fetch
 those itself, which on a free account means its own click-per-file flow rather
 than this tooling's.
@@ -572,7 +678,8 @@ recognised (if unfetchable) source rather than "unknown".
 | --- | --- |
 | `wj_config.py` | every setting's default, the archive layout, and the naming rules the rest share: reserved names, the `~N` suffix, which GameTypes share a folder |
 | `wj_settings.json` | your settings; `wj_settings.example.json` documents every key |
-| `wj_wabbajack.py` | finding Wabbajack, the preflight, and the hand-over |
+| `wj_overview.json` | what the Start tab shows: each tab's last answer and when it was measured; rewritten as tabs are used |
+| `wj_wabbajack.py` | finding Wabbajack, whether it is the newest release, the game preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_gallery.py` | the published gallery and its validation reports: what exists, and how much of it you hold |
 | `wj_gui.py` | the desktop window: a tab per stage, a log pane, a Settings tab |
@@ -581,14 +688,18 @@ recognised (if unfetchable) source rather than "unknown".
 | `wj_sorter.py` | moves archives between pools |
 | `wj_cdn.py` | the Wabbajack CDN's multi-part protocol |
 | `wj_merge_pool.py` | folds one game's pool folder into another's, once: renames, hash-proven drops, a record |
+| `wj_paths.py` | which folder is ours, and how a script is launched — the two answers that differ between running from source and running from a build |
+| `wj_launcher.py` | a build's entry point: decides which of the programs above the binary is being asked to be |
+| `build.py`, `WabbajackWizard.spec` | make the Windows binaries; `release.py` makes the source zip |
 
 ## Tests
 
 ```
-.venv-win\Scripts\python.exe tests\run_all.py
+.python\python.exe tests\run_all.py
 ```
 
-810 checks across sixteen suites. None of them touch the live archive pools:
+(or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
+environment instead). 895 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -607,11 +718,11 @@ exactly the failure they want to check.
 | `t8_order` | download order — smallest, largest, manifest — and where unknown sizes land |
 | `t9_wabbajack` | finding the newest CLI, the game preflight, path overlap, the install command |
 | `t10_lookup` | every location an archive may sit in and still count as already downloaded |
-| `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, and Wabbajack's own "Unavailable" rule |
-| `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, and the refusal to delete on an incomplete picture |
+| `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, Wabbajack's own "Unavailable" rule, and the hidden flag never reaching a tracked list |
+| `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, the refusal to delete on an incomplete picture, and a hidden list protecting nothing and blocking nothing |
 | `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row record, the un-staging warning, hash-proven duplicates, the trash and its purge, stale CSVs, waiting for Wabbajack |
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
-| `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one |
+| `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, and the Start tab opening a second window from the first one's file without measuring anything |
 | `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
 
 Seven real bugs were found this way and are covered by regression checks: a
@@ -628,11 +739,36 @@ missing, because the set of legitimate list folders was snapshotted at start-up.
 A CDN archive was also accepted on the CDN's own hash alone; it is now refused
 before download when that differs from the manifest's.
 
+## Building the binaries
+
+```
+python -m venv .venv-build
+.venv-build\Scripts\python -m pip install -r requirements-build.txt
+python build.py
+```
+
+Out comes `dist/WabbajackWizard/` to run from and
+`dist/WabbajackWizard-v<version>-win64.zip` to publish. PyInstaller is kept in
+its own environment on purpose: it is needed to *make* a build and never to
+run one, so it stays out of `requirements.txt` and out of `.venv-win`.
+
+It is a one-folder build, not a one-file build, for two reasons. A run
+launches the downloader and then the sorter as child processes, and a
+one-file build unpacks the whole of Python afresh for each of them. And a
+one-file build puts `__file__` in a temporary folder that disappears, when
+this entire tool is built around living next to your archives. `wj_paths.py`
+is the one place that knows the difference; nothing else has to.
+
+The two binaries find each other by name, so do not rename them.
+
 ## Requirements
 
 Python 3.8+ and `xxhash`. Without `xxhash` only sizes can be compared, so the
 tooling refuses to run rather than quietly weakening verification; pass
 `--allow-size-only` to override.
+
+A build needs none of that - it carries its own Python and its own `xxhash`.
+It is 64-bit Windows only, and wants Windows 10 or newer.
 
 ## Notes for this share
 

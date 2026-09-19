@@ -92,6 +92,8 @@ import urllib.request
 from datetime import datetime
 from collections import defaultdict
 
+import wj_paths
+
 # Wabbajack CDN multi-part support. Files on authored-files.wabbajack.org are
 # served as a definition plus numbered parts; a plain GET on the URL returns a
 # ~1 KB error page, so these must not go through stream_download().
@@ -1072,6 +1074,14 @@ def _python_launcher():
 
 
 def nxm_handler_command():
+    """The command line Windows runs when you click a mod's download link.
+
+    Frozen there is no script to hand an interpreter, so the console binary is
+    told to be the downloader instead. The --nxm flag lands in the same place
+    either way, and so does the URL Windows substitutes for %1."""
+    if wj_paths.frozen():
+        return (f'"{wj_paths.console_exe()}" {wj_paths.STAGE_FLAG}wj_downloader'
+                f' --nxm "%1"')
     exe, script = _python_launcher()
     return f'"{exe}" "{script}" --nxm "%1"'
 
@@ -1849,7 +1859,7 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose console output.")
     args = parser.parse_args()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = wj_paths.app_dir(__file__)
 
     # --- Handler-invocation entry point: forward the URL and exit immediately.
     if args.nxm:

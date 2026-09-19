@@ -13,9 +13,13 @@ import sys
 import zipfile
 
 REAL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PY = os.path.join(REAL, ".venv-win", "Scripts", "python.exe")
+# The interpreter the suites run the scripts with: the one kept inside the
+# project when there is one, else the environment setup_env.bat made.
+PY = os.path.join(REAL, ".python", "python.exe")
+if not os.path.isfile(PY):
+    PY = os.path.join(REAL, ".venv-win", "Scripts", "python.exe")
 SCRIPTS = ("wj_autoupdate.py", "wj_wizard.py", "wj_config.py",
-           "wj_downloader.py",
+           "wj_downloader.py", "wj_paths.py",
            "wj_sorter.py", "wj_cdn.py",
            "wj_wabbajack.py", "wj_gallery.py", "wj_merge_pool.py")
 

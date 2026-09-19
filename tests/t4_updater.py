@@ -172,38 +172,42 @@ check("mismatched GAME_FOLDERS stops the run", rc == 2, "exit %d" % rc)
 check("  and names the setting", "GAME_FOLDERS" in out)
 shutil.copy2(os.path.join(REPO, "wj_sorter.py"), sp)
 
-# xxhash missing -> refuse rather than silently weaken verification
-sysver = None
+# xxhash missing -> refuse rather than silently weaken verification.
+# An interpreter without xxhash: another one on the machine if there is one,
+# else this one started with -S, which leaves site-packages - and so xxhash -
+# off the path. The scripts need nothing else from there, so that is the same
+# machine-without-xxhash the guard exists for, and the check no longer
+# depends on what happens to be installed.
+nohash = None
 for cand in ("py", "python"):
     try:
         r = subprocess.run([cand, "-c", "import xxhash"], capture_output=True,
                            timeout=60)
         if r.returncode != 0:
-            sysver = cand
+            nohash = [cand]
             break
     except Exception:
         continue
-if sysver:
-    proc = subprocess.run([sysver, os.path.join(box.tools, "wj_autoupdate.py"),
-                           "--check", "--nexus-mode", "skip"],
-                          cwd=box.tools, capture_output=True, text=True,
-                          errors="replace", timeout=300,
-                          env=dict(os.environ, WJ_MANIFEST_DIR=box.manifests),
-                          stdin=subprocess.DEVNULL)
-    o = proc.stdout + proc.stderr
-    check("without xxhash the run refuses to start (exit 2)",
-          proc.returncode == 2, "exit %d" % proc.returncode)
-    check("  and explains why", "xxhash" in o)
-    proc = subprocess.run([sysver, os.path.join(box.tools, "wj_autoupdate.py"),
-                           "--check", "--nexus-mode", "skip",
-                           "--allow-size-only"],
-                          cwd=box.tools, capture_output=True, text=True,
-                          errors="replace", timeout=300,
-                          env=dict(os.environ, WJ_MANIFEST_DIR=box.manifests),
-                          stdin=subprocess.DEVNULL)
-    check("  --allow-size-only is a deliberate way past it",
-          proc.returncode != 2, "exit %d" % proc.returncode)
-else:
-    print("      (skipped: no interpreter without xxhash to test with)")
+if nohash is None:
+    nohash = [sys.executable, "-S"]
+proc = subprocess.run(nohash + [os.path.join(box.tools, "wj_autoupdate.py"),
+                                "--check", "--nexus-mode", "skip"],
+                      cwd=box.tools, capture_output=True, text=True,
+                      errors="replace", timeout=300,
+                      env=dict(os.environ, WJ_MANIFEST_DIR=box.manifests),
+                      stdin=subprocess.DEVNULL)
+o = proc.stdout + proc.stderr
+check("without xxhash the run refuses to start (exit 2)",
+      proc.returncode == 2, "exit %d" % proc.returncode)
+check("  and explains why", "xxhash" in o)
+proc = subprocess.run(nohash + [os.path.join(box.tools, "wj_autoupdate.py"),
+                                "--check", "--nexus-mode", "skip",
+                                "--allow-size-only"],
+                      cwd=box.tools, capture_output=True, text=True,
+                      errors="replace", timeout=300,
+                      env=dict(os.environ, WJ_MANIFEST_DIR=box.manifests),
+                      stdin=subprocess.DEVNULL)
+check("  --allow-size-only is a deliberate way past it",
+      proc.returncode != 2, "exit %d" % proc.returncode)
 
 sys.exit(summary())

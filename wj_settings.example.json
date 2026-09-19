@@ -18,11 +18,13 @@
   "AUTO_TRACK": true,
   "EXCLUDE": [],
   "TRACK": [],
+  "HIDDEN": [],
   "STAGE_LIST": null,
   "NEXUS_MODE": "assist",
   "KEEP_BACKUP_DAYS": 14,
   "REQUIRE_HASH": true,
   "DOWNLOAD_ORDER": "smallest",
   "FREE_SPACE_MARGIN_GB": 20,
-  "NOTIFY_URL": null
+  "NOTIFY_URL": null,
+  "THEME": "light"
 }

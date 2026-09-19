@@ -20,7 +20,9 @@ import json
 import os
 import re
 
-__version__ = "1.1.0"
+import wj_paths
+
+__version__ = "1.2.0"
 APP_NAME = "WabbajackWizard"
 USER_AGENT = f"{APP_NAME}/{__version__}"
 
@@ -37,7 +39,7 @@ SETTINGS_FILE = "wj_settings.json"
 # A relative path is resolved against THIS FILE's folder, never the working
 # directory, so the whole tree can be copied around or reached through a
 # different drive letter or a UNC path and still work. With the tools in
-# Z:\Wabbajack_Tools, "../Mod Archive" means Z:\Mod Archive.
+# Z:\WabbajackWizard, "../Mod Archive" means Z:\Mod Archive.
 ARCHIVE_ROOT = "../Mod Archive"
 
 # Maps a GameType onto a pool folder whose name is not the GameType itself.
@@ -170,6 +172,15 @@ EXCLUDE = []
 # Pins, as "<repo>/<machineURL>", for a list auto-matching cannot resolve.
 TRACK = []
 
+# Published lists to keep out of the gallery, as "<repo>/<machineURL>" feed
+# keys (a retired list is "retired/<machineURL>"), case-insensitively. The
+# Browse tab's Hide button writes this. A hidden list is shown nowhere but
+# the Browse tab's own "Hidden lists" view, its validation report is never
+# fetched, and nothing protects its archives when Master is cleared under
+# the "any known modlist" rule. A list you track cannot be hidden: its own
+# manifest is what protects its archives, and the flag is ignored for it.
+HIDDEN = []
+
 # Which list a scheduled (non-interactive) run stages at the end: a filename
 # stem, or None for whichever list updated most recently. One list per run,
 # because staging a second undoes the first.
@@ -200,6 +211,11 @@ FREE_SPACE_MARGIN_GB = 20
 # An ntfy topic URL or Discord webhook URL for a scheduled run's report. None
 # disables.
 NOTIFY_URL = None
+
+# The window's colours. "light" is the platform's own widget look; "dark" is
+# a dark palette. The Dark mode switch in the window's status bar writes
+# this; the console side ignores it.
+THEME = "light"
 # =======================================================================
 
 # The settings above that wj_settings.json may override, in the order the
@@ -207,9 +223,9 @@ NOTIFY_URL = None
 USER_SETTINGS = (
     "ARCHIVE_ROOT", "MANIFEST_DIR", "GAME_FOLDERS", "GAME_DISPLAY",
     "EXCLUDE_POOL_DIRS", "UNMANAGED_FOLDER", "TRASH_FOLDER", "TRASH_KEEP_DAYS",
-    "WABBAJACK_DIR", "INSTALL_MODE", "AUTO_TRACK", "EXCLUDE", "TRACK",
+    "WABBAJACK_DIR", "INSTALL_MODE", "AUTO_TRACK", "EXCLUDE", "TRACK", "HIDDEN",
     "STAGE_LIST", "NEXUS_MODE", "KEEP_BACKUP_DAYS", "REQUIRE_HASH",
-    "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "NOTIFY_URL",
+    "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "NOTIFY_URL", "THEME",
 )
 _DEFAULTS = {k: copy.deepcopy(globals()[k]) for k in USER_SETTINGS}
 # Anything wrong with wj_settings.json, in words. Never fatal: a bad value
@@ -222,11 +238,12 @@ CHOICES = {
     "INSTALL_MODE": ("cli", "gui", "off"),
     "NEXUS_MODE": ("skip", "assist"),
     "DOWNLOAD_ORDER": ("smallest", "largest", "manifest"),
+    "THEME": ("light", "dark"),
 }
 
 
 def settings_path():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), SETTINGS_FILE)
+    return os.path.join(wj_paths.app_dir(__file__), SETTINGS_FILE)
 
 
 def defaults():
@@ -349,8 +366,7 @@ def resolved_archive_root():
     """ARCHIVE_ROOT as an absolute path, anchored to this file's folder."""
     if looks_absolute(ARCHIVE_ROOT):
         return ARCHIVE_ROOT
-    return os.path.normpath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), ARCHIVE_ROOT))
+    return os.path.normpath(os.path.join(wj_paths.app_dir(__file__), ARCHIVE_ROOT))
 
 
 def excluded_dirs():
