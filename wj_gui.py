@@ -944,21 +944,26 @@ class App:
     # ==================================================================
     def _build_browse(self, f):
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(2, weight=3)
-        f.rowconfigure(3, weight=1)
+        f.rowconfigure(3, weight=3)
+        f.rowconfigure(4, weight=1)
         ttk.Label(f, text="Every modlist published for a game you keep archives for, and how "
                           "much of each is already in your pools. Read from Wabbajack's own "
-                          "validation reports, before any .wabbajack is downloaded. Tick "
-                          "'every game' to look at games you have no pool for yet. A list you "
-                          "will never want can be hidden: it then shows only under 'Hidden "
-                          "lists' in the Game menu, and counts for nothing anywhere else.",
+                          "validation reports, before any .wabbajack is downloaded. By default "
+                          "only lists you could finish are shown: every archive already in your "
+                          "pools or still obtainable, or a list you track. Tick 'every game' to "
+                          "look at games you have no pool for yet. A list you will never want "
+                          "can be hidden: it then shows only under 'Hidden lists' in the Game "
+                          "menu, and counts for nothing anywhere else.",
                   wraplength=1000).grid(row=0, column=0, sticky="w", pady=(0, 6))
         bar = ttk.Frame(f)
-        bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        bar.grid(row=1, column=0, sticky="ew", pady=(0, 4))
         ttk.Label(bar, text="Game:").pack(side="left")
         self.browse_game = self._register_combo(ttk.Combobox(bar, state="readonly", width=36))
         self.browse_game.pack(side="left", padx=(4, 8))
         self.browse_game.bind("<<ComboboxSelected>>", lambda _e: self.browse_show_game())
+        self.browse_only = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="only lists that can be completed", variable=self.browse_only,
+                        command=self.browse_refilter).pack(side="left", padx=(0, 8))
         self.browse_all = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="every game", variable=self.browse_all,
                         command=self.browse_load).pack(side="left", padx=(0, 8))
@@ -967,20 +972,23 @@ class App:
         self.action(bar, "Refresh every report", lambda: self.browse_sync(True)).pack(side="left")
         self.browse_pool_btn = self.action(bar, "Set up a pool", self.browse_make_pool)
         self.browse_pool_btn.pack(side="left", padx=4)
+        # On a row of its own: beside the buttons it was cut off at the
+        # window's default width.
         self.browse_summary = tk.StringVar(value="Not loaded yet.")
-        ttk.Label(bar, textvariable=self.browse_summary).pack(side="right")
+        ttk.Label(f, textvariable=self.browse_summary, style="Hint.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(0, 6))
 
-        cols = [("own", "own", 40, "center"), ("mark", "", 30, "center"),
+        cols = [("own", "own", 40, "center"), ("mark", "", 44, "center"),
                 ("title", "modlist", 300, "w"), ("game", "game", 160, "w"),
                 ("version", "version", 100, "w"),
                 ("arch", "archives", 80, "e"), ("yours", "yours", 70, "e"),
                 ("fetch", "to fetch", 100, "e"), ("total", "total", 100, "e")]
         self.browse_table = make_table(f, cols, height=12, selectmode="browse")
-        self.browse_table.grid(row=2, column=0, sticky="nsew")
+        self.browse_table.grid(row=3, column=0, sticky="nsew")
         self.browse_table.tree.bind("<<TreeviewSelect>>", lambda _e: self.browse_detail())
 
         det = ttk.Frame(f)
-        det.grid(row=3, column=0, sticky="nsew", pady=(6, 0))
+        det.grid(row=4, column=0, sticky="nsew", pady=(6, 0))
         det.columnconfigure(0, weight=1)
         det.rowconfigure(0, weight=1)
         self.browse_text = self._register_text(tk.Text(det, height=7, wrap="word",
@@ -1124,21 +1132,62 @@ class App:
             return grp
 
         def done(rows):
-            self.browse["grp"] = rows
+            self.browse["measured"] = rows
             self.browse["view"] = gk
-            self._browse_fill(rows)
-            note = ""
-            if pool is None:
-                note = ("\n\nYou have no pool for this game, so every list reads as 0% held "
-                        "and the 'to fetch' column is the whole download. 'Set up a pool for "
-                        "this game' lays out the same Master, Shared, Unmanaged and Trash the "
-                        "other games have; tracking a list without one still works, the pool "
-                        "is simply made on the first sort.")
-            self._set_text(self.browse_text, "Select a list for its details." + note
-                           + ("\n\n!  flagged Unavailable by Wabbajack     >  retired from the gallery"
-                              if any(GUI_MARK(r) for r in rows) else ""))
-            self._browse_buttons()
+            self._browse_apply_filter()
         self.run_job(f"Measuring {label}", job, done)
+
+    def browse_refilter(self):
+        """The toggle flipped: the current game's table is rebuilt from the
+        rows already measured, so it costs nothing."""
+        if self.busy:
+            return
+        if self.browse.get("view") not in (None, HIDDEN_GAME):
+            self._browse_apply_filter()
+
+    def _browse_apply_filter(self):
+        """The current game's table from its measured rows, under the 'only
+        lists that can be completed' rule when that is ticked."""
+        gk = self.browse.get("view")
+        if gk in (None, HIDDEN_GAME) or gk not in self.browse["gameinfo"]:
+            return
+        label, pool, _game = self.browse["gameinfo"][gk]
+        rows = self.browse.get("measured") or []
+        only = bool(self.browse_only.get())
+        if only:
+            shown, blocked, unknown = G.split_completable(rows)
+        else:
+            shown, blocked, unknown = list(rows), [], []
+        self.browse["grp"] = shown
+        self.browse["detail"] = None
+        self._browse_fill(shown)
+
+        lines = ["Select a list for its details."]
+        if only and (blocked or unknown):
+            bits = []
+            if blocked:
+                bits.append(f"{len(blocked)} that cannot be completed (a dead archive not in your pools)")
+            if unknown:
+                bits.append(f"{len(unknown)} unmeasurable (retired, pulled, or no report cached yet)")
+            lines.append(f"Showing {len(shown)} of {len(rows)} {label} list(s). Hidden: "
+                         + "; ".join(bits) + ". Untick 'only lists that can be completed' to see them.")
+        if pool is None:
+            lines.append("You have no pool for this game, so every list reads as 0% held "
+                         "and the 'to fetch' column is the whole download. 'Set up a pool for "
+                         "this game' lays out the same Master, Shared, Unmanaged and Trash the "
+                         "other games have; tracking a list without one still works, the pool "
+                         "is simply made on the first sort.")
+        legend = []
+        if any(G.unavailable(r) for r in shown):
+            legend.append("!  flagged Unavailable by Wabbajack")
+        if any(r["retired"] for r in shown):
+            legend.append(">  retired from the gallery")
+        if any(G.completable(r) is False for r in shown):
+            legend.append("x  cannot be completed: a dead archive is not in your pools")
+        if legend:
+            lines.append("     ".join(legend))
+        self._set_text(self.browse_text, "\n\n".join(lines))
+        self._browse_buttons()
 
     def _browse_fill(self, rows, measured=True):
         """The table. With `measured` off the feeds' own figures are shown
@@ -1147,7 +1196,8 @@ class App:
         out_rows = []
         for r in rows:
             g = r.get("gap") if measured else None
-            mark = "!" if G.unavailable(r) else (">" if r["retired"] else "")
+            mark = (("!" if G.unavailable(r) else "") + (">" if r["retired"] else "")
+                    + ("x" if measured and G.completable(r) is False else ""))
             if g and g["total"]:
                 tail = (g["total"], f"{g['percent']:.1f}%", human(g["missing_bytes"]),
                         human(g["total_bytes"]))
@@ -1312,6 +1362,9 @@ class App:
                          f"   still to fetch {g['missing']} = {human(g['missing_bytes'])}"
                          f"   list total {human(g['total_bytes'])}"
                          + (f"   from the game {g['gamefile']}" if g["gamefile"] else ""))
+            if g["dead_need"]:
+                lines.append(f"CANNOT BE COMPLETED from here: {len(g['dead_need'])} archive(s) the "
+                             f"validator can no longer download are not in your pools.")
             dead = g["dead_have"] + g["dead_need"]
             if dead:
                 lines.append(f"{len(dead)} archive(s) the validator can no longer download: "
@@ -2267,10 +2320,6 @@ class App:
             os.startfile(path)
         except OSError as e:
             messagebox.showerror("Settings", f"Could not open {path}:\n{e}", parent=self.root)
-
-
-def GUI_MARK(row):
-    return G.unavailable(row) or row["retired"]
 
 
 # ----------------------------------------------------------------------

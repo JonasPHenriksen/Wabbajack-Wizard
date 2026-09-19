@@ -678,6 +678,42 @@ def build_rows(feeds, summary, featured, disabled, have_keys, games=None):
     return rows
 
 
+def completable(row):
+    """Could this list end up installed, from what is held plus what is
+    still obtainable? True, False, or None when that cannot be told.
+
+    Decided from the measured gap, so only after evaluate(): every archive is
+    either already in the pools or one the validator could still download.
+    A dead archive already held costs nothing; a dead archive not held is
+    what stops an install, whoever does the downloading. None for a list
+    with no usable report - retired, pulled, or simply not fetched yet -
+    because "cannot tell" must never read as "cannot install"."""
+    g = row.get("gap")
+    if g is None:
+        return None
+    return not g["dead_need"]
+
+
+def split_completable(rows):
+    """(shown, blocked, unknown) under the 'only lists that can be
+    completed' rule.
+
+    A tracked list is always shown: its archives are already this tooling's
+    business, whatever the validator says about them. `blocked` is what a
+    dead archive not in the pools rules out; `unknown` is what could not be
+    measured, which is a different thing and is reported as such."""
+    shown, blocked, unknown = [], [], []
+    for r in rows:
+        c = completable(r)
+        if r.get("have") or c is True:
+            shown.append(r)
+        elif c is False:
+            blocked.append(r)
+        else:
+            unknown.append(r)
+    return shown, blocked, unknown
+
+
 def unavailable(row):
     """Wabbajack's own 'Unavailable' test, reproduced.
 

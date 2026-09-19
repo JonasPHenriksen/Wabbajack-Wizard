@@ -954,8 +954,12 @@ def gap_sort_key(row):
     return (0, -g["percent"], row["title"].lower())
 
 
-def show_gallery_table(rows, label, shown):
-    """The browse table for one game, most-complete first."""
+def show_gallery_table(rows, label, shown, hidden=None):
+    """The browse table for one game, most-complete first.
+
+    `hidden` is (blocked, unknown): how many lists the 'only lists that can
+    be completed' rule kept out of this table, and why, so the table never
+    reads as the whole gallery when it is not."""
     out()
     rule("-")
     out(f"  {label.upper()}   {len(rows)} list(s), most complete first")
@@ -966,7 +970,10 @@ def show_gallery_table(rows, label, shown):
         f"{'arch':>6}{'yours':>8}{'to fetch':>11}{'total':>11}")
     for i, r in enumerate(rows[:shown], 1):
         g = r.get("gap")
-        mark = "!" if G.unavailable(r) else (">" if r["retired"] else " ")
+        if G.completable(r) is False:
+            mark = "x"
+        else:
+            mark = "!" if G.unavailable(r) else (">" if r["retired"] else " ")
         own = "[x]" if r["have"] else "[ ]"
         if g and g["total"]:
             tail = (f"{g['total']:>6}{g['percent']:>7.1f}%"
@@ -981,12 +988,23 @@ def show_gallery_table(rows, label, shown):
         out(f"         ... {len(rows) - shown} more not shown")
     out()
     bits = []
-    if any(G.unavailable(r) for r in rows[:shown]):
+    if any(G.completable(r) is False for r in rows[:shown]):
+        bits.append("x  cannot be completed: a dead archive is not in your pools")
+    if any(G.unavailable(r) and G.completable(r) is not False for r in rows[:shown]):
         bits.append("!  flagged Unavailable by Wabbajack")
     if any(r["retired"] for r in rows[:shown]):
         bits.append(">  retired from the gallery")
     if any(not r.get("gap") for r in rows[:shown]):
         bits.append("-  not checked upstream, so the overlap is unknown")
+    if hidden and any(hidden):
+        blocked, unknown = hidden
+        kept = []
+        if blocked:
+            kept.append(f"{blocked} that cannot be completed (a dead archive not in "
+                        f"your pools)")
+        if unknown:
+            kept.append(f"{unknown} unmeasurable (retired, pulled, or no report)")
+        bits.append("not shown: " + "; ".join(kept) + ". [c] shows every list.")
     if bits:
         for b in bits:
             out("   " + b)
@@ -1323,7 +1341,9 @@ def stage_browse(state, tracked):
     out("  Every modlist published for a game you keep archives for, and how")
     out("  much of each one is already in your pools. This reads Wabbajack's")
     out("  own validation reports, so the answer arrives before committing to")
-    out("  a multi-gigabyte .wabbajack rather than after.")
+    out("  a multi-gigabyte .wabbajack rather than after. A game's table shows")
+    out("  only the lists you could finish - every archive held or still")
+    out("  obtainable, or a list you track - until [c] says otherwise.")
     out()
 
     try:
@@ -1405,6 +1425,7 @@ def stage_browse(state, tracked):
                                  force=True)
 
     indexes = gallery_indexes()
+    only_completable = True
     while True:
         # Pools you keep first, then games you do not, each by list count.
         games = sorted(info, key=lambda k: (
@@ -1461,14 +1482,24 @@ def stage_browse(state, tracked):
 
         gk = games[int(raw) - 1]
         label, pool, _game = info[gk]
-        grp = [r for r in rows if r["game_key"] == gk]
-        evaluate_rows(grp, pool, indexes, label)
-        grp.sort(key=gap_sort_key)
+        measured = [r for r in rows if r["game_key"] == gk]
+        evaluate_rows(measured, pool, indexes, label)
+        measured.sort(key=gap_sort_key)
 
-        shown = min(PAGE, len(grp))
+        shown = min(PAGE, len(measured))
         while True:
-            show_gallery_table(grp, label, shown)
+            # Only lists that could be finished, unless [c] has said
+            # otherwise: a tracked list, or one whose every archive is held
+            # or still obtainable. The rest are counted under the table.
+            if only_completable:
+                grp, blocked, unknown = G.split_completable(measured)
+                kept_out = (len(blocked), len(unknown))
+            else:
+                grp, kept_out = list(measured), None
+            show_gallery_table(grp, label, shown, hidden=kept_out)
             extra = ["[m] more"] if len(grp) > shown else []
+            extra.append("[c] " + ("show every list" if only_completable
+                                   else "only lists that can be completed"))
             extra.append("[b] back to the games")
             pick = ask_row(len(grp), extra)
             if pick == "b":
@@ -1476,15 +1507,21 @@ def stage_browse(state, tracked):
             if pick == "m":
                 shown = min(len(grp), shown + PAGE)
                 continue
+            if pick == "c":
+                only_completable = not only_completable
+                shown = min(PAGE, len(measured))
+                continue
             show_gallery_detail(state, grp[pick])
             if grp[pick].get("hidden"):
                 # Hidden from the detail screen: out of this table, out of
                 # the games menu's counts, into the hidden view.
-                hidden.append(grp.pop(pick))
+                gone = grp[pick]
+                measured.remove(gone)
+                hidden.append(gone)
                 rows = [r for r in rows if not r.get("hidden")]
-                if not grp:
+                if not measured:
                     break
-                shown = min(shown, len(grp))
+                shown = min(shown, len(measured))
 
 
 def sync_gallery_reports(keys, force=False):

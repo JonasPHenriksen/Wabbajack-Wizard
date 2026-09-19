@@ -362,6 +362,27 @@ check("is_hidden answers the same way", G.is_hidden("r1/Alpha") and not G.is_hid
 CFG.HIDDEN = []
 check("  and clearing HIDDEN clears it", not G.is_hidden("r1/alpha"))
 
+print("\n      could the list be finished, from what is held plus what is obtainable?")
+
+
+def gapped(dead_need, dead_have=(), have=False, gap=True):
+    return {"have": have, "gap": ({"total": 3, "dead_need": list(dead_need),
+                                   "dead_have": list(dead_have)} if gap else None)}
+
+
+check("no dead archives: yes", G.completable(gapped([])) is True)
+check("a dead archive already held: yes, it costs nothing", G.completable(gapped([], ["a"])) is True)
+check("a dead archive not held: no, whoever would be downloading", G.completable(gapped(["a"])) is False)
+check("no usable report: cannot tell, which is not no", G.completable(gapped([], gap=False)) is None)
+check("  and a row not measured yet reads the same", G.completable({"have": False}) is None)
+shown, blocked, unknown = G.split_completable(
+    [gapped([]), gapped(["a"]), gapped([], gap=False), gapped(["a"], have=True)])
+check("the split puts each where it belongs",
+      len(shown) == 2 and len(blocked) == 1 and len(unknown) == 1,
+      str((len(shown), len(blocked), len(unknown))))
+check("  a tracked list is shown whatever the validator says", shown[1]["have"] is True)
+check("  and the blocked one is the dead-and-missing list", blocked[0]["gap"]["dead_need"] == ["a"])
+
 # ---------------------------------------------------------------- 11.10
 print("\n 11.10  syncing reports counts honestly and survives a bad one")
 fresh_box()

@@ -36,6 +36,14 @@
   archives. The flags are `HIDDEN` in `wj_settings.json`.
 - The Browse table names each list's game, which the Hidden view needs since
   it spans every game.
+- **Only lists you could finish**, by default. A game's table shows the lists
+  whose every archive is already in your pools or still obtainable, plus the
+  ones you track; a list with a dead archive you do not hold is kept out, and
+  so are the ones that cannot be measured - retired, pulled, or with no report
+  yet - which are counted separately as unmeasurable. A dead archive you
+  already hold hides nothing. **Only lists that can be completed** in the
+  window, `c` in the console, shows everything, with an `x` on what cannot be
+  finished. Display only: the Space tab's protection is unchanged by it.
 - **Wabbajack is checked before an install.** Staging a list now also asks
   whether the Wabbajack it found is the newest release, read from Wabbajack's
   own release feed and cached for six hours beside the gallery reports. The
@@ -68,7 +76,7 @@
 - The Settings form outgrew the tab at the default window size, and its Save
   button with it. The buttons now sit above the form, and the form scrolls.
 
-Tests: 895 checks across 16 sandbox suites, up from 810.
+Tests: 921 checks across 16 sandbox suites, up from 810.
 
 ## 1.1.0 — 2026-09-05
 

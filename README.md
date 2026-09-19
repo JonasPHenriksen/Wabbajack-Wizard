@@ -118,8 +118,9 @@ as `THEME`.
 
 1. **Browse** — every modlist published for a game you keep archives for, and
    how much of each one is already in your pools, sorted most-complete first.
-   Picking one shows the gap in full and offers to fetch its manifest and start
-   tracking it (see below). Tick **every game** (`a` in the console) to include
+   By default only lists you could finish are shown (see below). Picking one
+   shows the gap in full and offers to fetch its manifest and start tracking it.
+   Tick **every game** (`a` in the console) to include
    games you keep no archives for at all: their lists measure against nothing,
    so the "to fetch" column is the whole download, which is the number worth
    seeing before taking a new game on. **Set up a pool** (`p N` in the console)
@@ -258,6 +259,24 @@ Five lists carry `Status: ForcedDown` in their report, and those reports have an
 **empty** `Archives[]` because the validator does not walk a list its author has
 pulled. Their upstream `passed=0 failed=0` means *not checked*, not *none of it
 works*, so they are shown with a `-` for overlap rather than as 0%.
+
+### Only lists you could finish
+
+A game's table shows, by default, only the lists that could end up installed:
+every archive is either already in your pools or one the validator could still
+download, or the list is one you track. **Only lists that can be completed** in
+the window, `c` in the console, flips that. The rule is about the outcome, not
+the label: a list flagged Unavailable over a dead archive you already hold is
+shown, since nothing blocks its install; a list with a dead archive you do not
+hold is not, since nobody can get it any more. Lists that cannot be measured at
+all — retired, pulled by their author, or with no report cached yet — are kept
+out too, and counted separately under the table as unmeasurable, because
+"cannot tell" is not "cannot install".
+
+Deciding needs the pool index, so it happens when a game is shown, and the Game
+menu keeps counting every list. Toggled off, a list that cannot be completed
+carries an `x`. The toggle is display only: a list kept out of the table is still
+a published list, and still protects its archives in Space.
 
 ### Hiding a list you will never want
 
@@ -699,7 +718,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 895 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 921 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

@@ -81,6 +81,13 @@ A.WJ.ARCHIVE_ROOT = box.archives
 CFG.ARCHIVE_ROOT = box.archives
 G.HERE = box.tools
 CFG.settings_path = lambda: os.path.join(box.tools, "wj_settings.json")
+# The window is built from the shipped defaults, not from whatever the real
+# wj_settings.json says today: a list hidden or a theme chosen in the real
+# window must not change what these checks see. SAVED_SETTINGS goes back at
+# the end.
+CFG.apply_settings(CFG._DEFAULTS)
+CFG.ARCHIVE_ROOT = box.archives
+A.reload_settings()
 box.manifest("Keep", GAME, [("k.7z", 5, "nexus"), ("shared.7z", 20, "nexus"),
                             ("nowhere.7z", 9, "nexus")])      # nobody holds this
 box.manifest("Doomed", GAME, [("d.7z", 50, "nexus"), ("shared.7z", 20, "nexus")])
@@ -753,6 +760,88 @@ try:
 finally:
     WB.find_wabbajack, WB.latest_release = real_find, real_latest
     DLG.answer = True
+
+# ---------------------------------------------------------------- 15.17
+print("\n 15.17  only lists that can be completed, on by default")
+
+
+def rep_for(machine, title, archives, status="Available"):
+    return json.dumps({"MachineURL": machine, "Name": title, "Version": "1.0", "Status": status,
+                       "Failures": sum(1 for a in archives if a[2] != "Valid"),
+                       "Archives": [{"Status": st, "Original": {
+                           "Name": n, "Size": s, "Hash": "A=", "Meta": "",
+                           "State": {"$type": "NexusDownloader, Wabbajack.Lib"}}}
+                                    for n, s, st in archives]}).encode()
+
+
+for key, machine, title in (("r/deadheld", "deadheld", "Dead But Held"),
+                            ("r/deadmissing", "deadmissing", "Dead And Missing"),
+                            ("r/needs", "needs", "Needs A Download"),
+                            ("r/pulledx", "pulledx", "Pulled List")):
+    A._FEED_CACHE["all"][key] = dict(feed, key=key, machine=machine, title=title, game="fallout4")
+A._FEED_CACHE["all"]["r/pulledx"]["force_down"] = True
+G._write_cache(G.report_rel("r/deadheld"), rep_for("deadheld", "Dead But Held",
+                                                   [("k.7z", 5, "Valid"), ("held-dead.7z", 33, "Failed")]))
+G._write_cache(G.report_rel("r/deadmissing"), rep_for("deadmissing", "Dead And Missing",
+                                                      [("k.7z", 5, "Valid"), ("gone-dead.7z", 44, "Failed")]))
+G._write_cache(G.report_rel("r/needs"), rep_for("needs", "Needs A Download",
+                                                [("k.7z", 5, "Valid"), ("need.7z", 9, "Valid")]))
+G._write_cache(G.report_rel("r/pulledx"), rep_for("pulledx", "Pulled List", [], "ForcedDown"))
+box.pool_file(GAME, "Master", "held-dead.7z", 33)
+A.WJ.invalidate_existing_cache()
+app.data_changed("pools")
+app.browse_all.set(False)
+check("the toggle starts on", app.browse_only.get() is True)
+app.browse_load()
+settle()
+app.browse_game.current(app.browse["games"].index("fallout4"))
+app.browse_show_game()
+settle()
+titles = [r[2] for r in rows(app.browse_table)]
+check("a list with nothing dead is shown", "One List" in titles, str(titles))
+check("  so is one still missing an obtainable archive", "Needs A Download" in titles, str(titles))
+check("  and one whose dead archive you already hold", "Dead But Held" in titles, str(titles))
+check("a dead archive you do not hold hides the list", "Dead And Missing" not in titles, str(titles))
+check("  and so does an empty report", "Pulled List" not in titles, str(titles))
+shown_r, blocked_r, unknown_r = G.split_completable(app.browse["measured"])
+check("  blocked is exactly the dead-and-missing list",
+      [r["key"] for r in blocked_r] == ["r/deadmissing"], str([r["key"] for r in blocked_r]))
+check("  unmeasurable are the pulled list and the one with no report",
+      sorted(r["key"] for r in unknown_r) == ["Gone/gone", "r/pulledx"], str([r["key"] for r in unknown_r]))
+note = app.browse_text.get("1.0", "end")
+check("the pane says how many were kept out, and why",
+      f"{len(blocked_r)} that cannot be completed" in note and f"{len(unknown_r)} unmeasurable" in note,
+      note[:300])
+total = sum(1 for r in app.browse["rows"] if r["game_key"] == "fallout4")
+check("  the Game menu still counts every list",
+      any(v.startswith("Fallout 4") and f"({total} lists)" in v for v in app.browse_game["values"]),
+      str(app.browse_game["values"]))
+
+app.browse_only.set(False)
+app.browse_refilter()
+check("flipping the toggle needs no job", not app.busy)
+marks = {r[2]: r[1] for r in rows(app.browse_table)}
+check("toggle off shows them all", "Dead And Missing" in marks and "Pulled List" in marks, str(sorted(marks)))
+check("  with an x on the one that cannot be completed", marks["Dead And Missing"] == "x", str(marks))
+check("  nothing on the one whose dead archive you hold", marks["Dead But Held"] == "", str(marks))
+check("  and Wabbajack's own mark alone on the pulled list", marks["Pulled List"] == "!", str(marks))
+check("  the legend explains the x", "cannot be completed" in app.browse_text.get("1.0", "end"))
+idx = [r[2] for r in rows(app.browse_table)].index("Dead And Missing")
+app.browse_table.tree.selection_set(str(idx))
+app.browse_detail()
+check("  and its details say so outright", "CANNOT BE COMPLETED" in app.browse_text.get("1.0", "end"),
+      app.browse_text.get("1.0", "end")[:300])
+
+app.browse_only.set(True)
+app.tracked["r/deadmissing"] = "Dead.wabbajack"
+app.browse_load()
+settle()
+app.browse_game.current(app.browse["games"].index("fallout4"))
+app.browse_show_game()
+settle()
+check("a tracked list is shown whatever its state",
+      "Dead And Missing" in [r[2] for r in rows(app.browse_table)], str([r[2] for r in rows(app.browse_table)]))
+del app.tracked["r/deadmissing"]
 
 # ---- put everything back ---------------------------------------------------
 root.destroy()
