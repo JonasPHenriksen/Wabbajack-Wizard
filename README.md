@@ -742,15 +742,22 @@ before download when that differs from the manifest's.
 ## Building the binaries
 
 ```
+.python\python.exe -m pip install -r requirements-build.txt
+.python\python.exe build.py
+```
+
+Out comes `dist/WabbajackWizard/` to run from and
+`dist/WabbajackWizard-v<version>-win64.zip` to publish. PyInstaller is needed
+to *make* a build and never to run one, so it stays out of `requirements.txt`;
+with the in-project interpreter it simply goes into that. With a machine-wide
+Python instead, keep it in an environment of its own, which `build.py` also
+looks for:
+
+```
 python -m venv .venv-build
 .venv-build\Scripts\python -m pip install -r requirements-build.txt
 python build.py
 ```
-
-Out comes `dist/WabbajackWizard/` to run from and
-`dist/WabbajackWizard-v<version>-win64.zip` to publish. PyInstaller is kept in
-its own environment on purpose: it is needed to *make* a build and never to
-run one, so it stays out of `requirements.txt` and out of `.venv-win`.
 
 It is a one-folder build, not a one-file build, for two reasons. A run
 launches the downloader and then the sorter as child processes, and a
