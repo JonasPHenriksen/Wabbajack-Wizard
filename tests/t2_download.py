@@ -536,6 +536,17 @@ try:
           "Skip this file" in AW.BANNER_JS and AW.SKIP_URI in AW.BANNER_JS
           and AW.SKIP_URI.startswith(D.NXM_SKIP_PREFIX))
     check("  and the banner text still formats in", "= \"file 3 of 9\";" in (AW.BANNER_JS % '"file 3 of 9"'))
+
+    print("\n      how long a click's key and its minted URL stay good is read off the links")
+    now = 1_700_000_000
+    key_left, url_left = D._link_windows(
+        {"expires": str(now + 300)},
+        f"https://cf-files.nexusmods.com/cdn/1704/x.7z?md5=abc&expires={now + 3600}&user_id=1&rip=2", now)
+    check("five minutes on the key, an hour on the URL", key_left == 300 and url_left == 3600, str((key_left, url_left)))
+    check("  missing or odd timestamps read as unknown, not as an error",
+          D._link_windows({"expires": None}, "https://x/y?expires=soon", now) == (None, None)
+          and D._link_windows({}, None, now) == (None, None) and D._minutes(None) == "unknown"
+          and D._minutes(90) == "1.5 min")
 finally:
     (D.webbrowser, D.register_nxm, D.unregister_nxm, D.resolve_browser_domain,
      D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW) = saved_assist

@@ -1970,6 +1970,29 @@ def download_nexus_premium(items, nexus, dest_dir, results, limit=0,
         download_one(url, a, dest_dir, results)
 
 
+def _link_windows(link, url, now=None):
+    """How much longer the click's key and the minted download URL are good
+    for, in seconds, read from the `expires` timestamps both carry. None where
+    a timestamp is missing or unreadable. This is the slack the click-ahead
+    queue lives on: the URL waits behind at most one download."""
+    now = time.time() if now is None else now
+
+    def window(value):
+        try:
+            return int(value) - now
+        except (TypeError, ValueError):
+            return None
+    try:
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(url or "").query)
+    except ValueError:
+        qs = {}
+    return window(link.get("expires")), window((qs.get("expires") or [None])[0])
+
+
+def _minutes(seconds):
+    return "unknown" if seconds is None else f"{seconds / 60:.1f} min"
+
+
 def _resolve_nxm(link, nexus, by_ids, results, fetched):
     """Turn a captured nxm link into (download_url, archive, ids) through the
     API, or None after saying why not. The resolving is done at once, while
@@ -2010,6 +2033,9 @@ def _resolve_nxm(link, nexus, by_ids, results, fetched):
         return None
     if note:
         LOG.info("  [NOTE] %s: %s", a["name"], note)
+    key_left, url_left = _link_windows(link, url)
+    LOG.debug("  [LINK] the click's key was good for %s more; the download URL is good for %s",
+              _minutes(key_left), _minutes(url_left))
     return url, a, ids
 
 
@@ -2027,10 +2053,13 @@ class _AssistDownloader:
     """Assist mode's downloads on a thread of their own, one at a time, so
     the next Nexus page can open while the current file is still arriving.
 
-    At most one file waits behind the one downloading. That bound is what
-    keeps a minted link from sitting long enough to expire, and it is where
-    the person and the transfer meet: when a large file is downloading, the
-    next page opens as soon as the waiting file starts, not before."""
+    At most one file waits behind the one downloading. That bound keeps a
+    minted link from sitting long enough to expire - measured on 2026-09-20
+    from the timestamps the links carry: the click's key is good for some 48
+    hours, the minted URL for 4 hours, so the bound has slack to spare - and
+    it is where the person and the transfer meet: when a large file is
+    downloading, the next page opens as soon as the waiting file starts, not
+    before, so nobody clicks pages for files that will not start for an hour."""
 
     def __init__(self, dest_dir, results, fetched):
         self.dest_dir, self.results, self.fetched = dest_dir, results, fetched

@@ -69,6 +69,10 @@
   waiting on a transfer and a transfer is never waiting on you. The captured
   link is resolved to a download URL at once and at most one file waits
   behind the one downloading, so a link cannot sit long enough to expire.
+  The log records, for every click, how much longer the key and the minted
+  URL were good for, read off the timestamps both carry, which is the slack
+  that bound lives on: measured at some 48 hours for the key and 4 hours for
+  the URL, against a wait of one download.
 - **A download window of the wizard's own.** Assist mode used to open a
   browser tab per file, several hundred for a large list. The pages now show
   in one window, the way Wabbajack's installer does it: Edge's WebView2
@@ -146,7 +150,7 @@
   when it lists the wanted file, and the manifest's own game is asked why it
   will not serve the mod before any fallback is opened.
 
-Tests: 970 checks across 16 sandbox suites, up from 810.
+Tests: 972 checks across 16 sandbox suites, up from 810.
 
 ## 1.1.0 — 2026-09-05
 
