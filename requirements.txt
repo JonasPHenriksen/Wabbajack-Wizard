@@ -1,7 +1,10 @@
-# The only third-party dependency of these scripts.
-#
-# Without it, wj_downloader.py falls back to comparing file
-# sizes only, so a truncated or wrong-version archive can pass verification.
-# With it you get the same base64 little-endian xxHash64 that Wabbajack itself
-# uses, for both the .wabbajack manifests and every archive downloaded.
+# Without xxhash, wj_downloader.py falls back to comparing file sizes only,
+# so a truncated or wrong-version archive can pass verification. With it you
+# get the same base64 little-endian xxHash64 that Wabbajack itself uses, for
+# both the .wabbajack manifests and every archive downloaded.
 xxhash>=3.0
+
+# The download window assist mode shows Nexus pages in: Edge's WebView2 engine
+# (part of Windows) wrapped for Python. Optional at run time - without it the
+# pages open in your normal browser - but a build must carry it.
+pywebview>=6

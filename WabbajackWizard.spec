@@ -72,10 +72,14 @@ a = Analysis(
     hiddenimports=[
         "wj_autoupdate", "wj_cdn", "wj_config", "wj_downloader", "wj_gallery",
         "wj_gui", "wj_merge_pool", "wj_paths", "wj_sorter", "wj_wabbajack",
-        "wj_wizard",
+        "wj_wizard", "wj_assistwin",
         # Optional at run time, mandatory in a build: without it every
         # download silently falls back to being checked by size alone.
         "xxhash",
+        # The download window: pywebview picks its Windows backend by name at
+        # run time, and pythonnet's bridge is loaded through clr_loader.
+        "webview", "webview.platforms.edgechromium", "webview.platforms.winforms",
+        "clr", "pythonnet", "clr_loader",
     ],
     hookspath=[],
     runtime_hooks=[],

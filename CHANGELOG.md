@@ -69,6 +69,18 @@
   waiting on a transfer and a transfer is never waiting on you. The captured
   link is resolved to a download URL at once and at most one file waits
   behind the one downloading, so a link cannot sit long enough to expire.
+- **A download window of the wizard's own.** Assist mode used to open a
+  browser tab per file, several hundred for a large list. The pages now show
+  in one window, the way Wabbajack's installer does it: Edge's WebView2
+  engine, which Windows ships, through the pywebview library. One page at a
+  time, replaced for each file, a banner across the top saying which file
+  this is and how many are left, and a profile of its own under `.webview\`
+  so the Nexus login is done there once and stays inside the folder. Closing
+  the window ends the run. `ASSIST_WINDOW` turns it off, and the browser is
+  the fallback wherever the engine or the library is missing;
+  `--check-window` says which it would be. The build carries pywebview and
+  pythonnet, and writes a `.exe.config` beside each binary so .NET will load
+  them from a network share.
 - **Wabbajack can live inside the folder**, in `Wabbajack\`, which is looked in
   first and is gitignored, so tools, Python, git and Wabbajack move as one.
   Wabbajack's launcher leaves every superseded version folder behind at some
@@ -108,7 +120,7 @@
   `nxm` class rather than leaving one with no command behind, which made every
   `nxm://` click fail between runs.
 
-Tests: 941 checks across 16 sandbox suites, up from 810.
+Tests: 946 checks across 16 sandbox suites, up from 810.
 
 ## 1.1.0 — 2026-09-05
 

@@ -237,6 +237,15 @@ SMALL_DOWNLOAD_MB = 50
 # themselves stay one at a time.
 ASSIST_CLICK_AHEAD = False
 
+# Where assist mode shows the Nexus pages. True: a window of its own, the
+# way Wabbajack does it - one page at a time in the same window, nothing
+# piling up in your browser, with a banner saying which file this is. It is
+# Edge's WebView2 engine, which Windows 10 and 11 ship; the window keeps its
+# own login to Nexus, stored under .webview beside the scripts, so you sign in
+# there once. False, or the engine or library missing: your normal browser,
+# one tab per file, as before.
+ASSIST_WINDOW = True
+
 # An ntfy topic URL or Discord webhook URL for a scheduled run's report. None
 # disables.
 NOTIFY_URL = None
@@ -255,7 +264,7 @@ USER_SETTINGS = (
     "WABBAJACK_DIR", "INSTALL_MODE", "AUTO_TRACK", "EXCLUDE", "TRACK", "HIDDEN",
     "STAGE_LIST", "NEXUS_MODE", "KEEP_BACKUP_DAYS", "REQUIRE_HASH",
     "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "PARALLEL_SMALL_DOWNLOADS",
-    "SMALL_DOWNLOAD_MB", "ASSIST_CLICK_AHEAD", "NOTIFY_URL", "THEME",
+    "SMALL_DOWNLOAD_MB", "ASSIST_CLICK_AHEAD", "ASSIST_WINDOW", "NOTIFY_URL", "THEME",
 )
 _DEFAULTS = {k: copy.deepcopy(globals()[k]) for k in USER_SETTINGS}
 # Anything wrong with wj_settings.json, in words. Never fatal: a bad value

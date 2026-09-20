@@ -551,6 +551,7 @@ bad value is reported at start-up and its default used, never fatal.
 | `FREE_SPACE_MARGIN_GB` | 20 | refuse a download batch that would leave less than this free |
 | `PARALLEL_SMALL_DOWNLOADS`, `SMALL_DOWNLOAD_MB` | 1, 50 | how many files under the threshold may download at once from direct sources; 1 is one at a time. See "Several small files at once" |
 | `ASSIST_CLICK_AHEAD` | `false` | assist mode opens the next Nexus page while the current file downloads |
+| `ASSIST_WINDOW` | `true` | show the Nexus pages in the wizard's own window rather than your browser; see "The download window" |
 | `NOTIFY_URL` | `null` | an ntfy topic or Discord webhook for a scheduled run's report |
 | `THEME` | `light` | the window's colours, `light` or `dark`; the Dark mode switch writes it |
 
@@ -562,17 +563,35 @@ check still confirms they agree.
 
 Nexus only mints automated download links for Premium accounts. On a free
 account the website mints one per click, which assist mode captures: it
-registers itself as the `nxm://` handler, opens each mod's download page in
-turn, and waits for you to click *Mod manager download*. One tab per file, in
-your normal browser. The handler is always handed back on exit, including
-Ctrl+C — without that, Wabbajack's own downloads keep landing here instead.
+registers itself as the `nxm://` handler, shows each mod's download page in
+turn, and waits for you to click *Slow download*. The handler is always handed
+back on exit, including Ctrl+C — without that, Wabbajack's own downloads keep
+landing here instead.
 
-The program registered as the handler is the console exe, from a build and from
-the scripts alike whenever a build sits beside them. Firefox will not launch a
-protocol handler whose program is `python.exe`: the click ends on Windows' "no
-app associated" dialog, though Windows runs the very same command from a shell.
-Running from the scripts with no build present falls back to the interpreter,
-and then Firefox is not the browser to click in.
+### The download window
+
+The pages are shown in a window of the wizard's own, the way Wabbajack's
+installer does it: one window, one page at a time, replaced for each file, with
+a banner across the top saying which file this is and how many are left. It is
+Edge's WebView2 engine, which Windows 10 and 11 ship, reached through the
+pywebview library. The window keeps its own browser profile under `.webview\`
+beside the scripts — cookies, and so the Nexus login — so you sign in to Nexus
+in it once, and everything stays inside the folder. Edge asks once whether the
+`nxm://` link may open the wizard; tick *always allow*. Closing the window ends
+the run, and everything downloaded so far is kept.
+
+`ASSIST_WINDOW` set to `false`, or the engine or library missing, falls back to
+your normal browser, one tab per file. `wj_downloader.py --check-window` says
+which it would be on this machine, without opening anything.
+
+Two things this needs on a network share. .NET Framework refuses to load
+assemblies from a mapped drive unless the host program's config allows it, so
+`python.exe.config` sits beside the interpreter in `.python\` and the build
+writes `WabbajackWizard.exe.config` and `WabbajackWizard-console.exe.config`
+beside its binaries, each one line of substance: `loadFromRemoteSources`. And
+the browser side: Firefox will not launch a protocol handler whose program is
+`python.exe`, so the handler registered is the console exe whenever a build
+sits beside the scripts, from source and from the build alike.
 
 The page URL is confirmed against the API rather than taken from the manifest.
 Manifests disagree with themselves: this collection records `skyrimse` in a
@@ -743,6 +762,7 @@ recognised (if unfetchable) source rather than "unknown".
 | `wj_gui.py` | the desktop window: a tab per stage, a log pane, a Settings tab |
 | `wj_wizard.py` | the console wizard, and the per-stage helpers both front ends share |
 | `wj_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
+| `wj_assistwin.py` | the download window assist mode shows Nexus pages in: WebView2 through pywebview, one page at a time, its own login |
 | `wj_sorter.py` | moves archives between pools |
 | `wj_cdn.py` | the Wabbajack CDN's multi-part protocol |
 | `wj_merge_pool.py` | folds one game's pool folder into another's, once: renames, hash-proven drops, a record |
@@ -757,7 +777,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 941 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 946 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -767,7 +787,7 @@ exactly the failure they want to check.
 | suite | covers |
 | --- | --- |
 | `t1_sorter` | aborting on an unreadable manifest, reserved names, demand-based pooling, staging, size-checked collisions, dry-run purity, bad arguments, identical extras settling in one pass, the shared manifest cache |
-| `t2_download` | hard vs transient HTTP failures, retry and resume, truncated transfers, verification, `.meta` sidecars, URL encoding, several small files at once with a stalled slot holding up nothing else, and assist mode's click-ahead |
+| `t2_download` | hard vs transient HTTP failures, retry and resume, truncated transfers, verification, `.meta` sidecars, URL encoding, several small files at once with a stalled slot holding up nothing else, assist mode's click-ahead, the pages shown by a window that ends the run when closed, a progress line that cannot be written, and which program is registered for `nxm://` |
 | `t3_cdn` | broken definitions in four shapes, bad part bytes and lengths, whole-file hash mismatch, resume from a partial download, stale and impossible sidecars |
 | `t4_updater` | filename-to-feed-key matching, negative-cache expiry, damaged state files, odd feed shapes, the start-up guards |
 | `t5_wizard` | empty data in every stage, missing folders, deleting a modlist whose pieces are already gone, awkward filenames |

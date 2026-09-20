@@ -154,6 +154,12 @@ PARALLEL_SMALL = max(1, int(getattr(CFG, "PARALLEL_SMALL_DOWNLOADS", 1) or 1))
 SMALL_BYTES = int(getattr(CFG, "SMALL_DOWNLOAD_MB", 50) or 0) * (1 << 20)
 # Assist mode: open the next Nexus page while the current file downloads.
 CLICK_AHEAD = bool(getattr(CFG, "ASSIST_CLICK_AHEAD", False))
+# Assist mode: show the pages in a window of our own rather than the browser.
+ASSIST_WINDOW = bool(getattr(CFG, "ASSIST_WINDOW", True))
+try:
+    import wj_assistwin as _ASSISTWIN
+except Exception:                       # the module is optional at run time
+    _ASSISTWIN = None
 
 # Nexus API tuning -----------------------------------------------------
 NEXUS_API_BASE   = "https://api.nexusmods.com/v1"
@@ -1980,14 +1986,18 @@ class _AssistDownloader:
                 self.q.task_done()
 
     def wait_for_room(self):
-        """Block while a file is already waiting behind the one downloading."""
+        """Block while a file is already waiting behind the one downloading.
+
+        Said aloud only when the wait is real: right after a submit the queue
+        holds the file for the instant before the thread takes it, and a note
+        on every page for that would be noise."""
         said = False
         while self.q.qsize() >= 1:
-            if not said:
+            time.sleep(0.25)
+            if not said and self.q.qsize() >= 1:
                 LOG.info("  (%s is still downloading; the next page opens when the "
                          "queued file starts)", self.current or "a file")
                 said = True
-            time.sleep(0.25)
 
     def submit(self, url, a, ids):
         self.q.put((url, a, ids))
@@ -2035,11 +2045,60 @@ def download_nexus_from_file(items, nexus, dest_dir, results, nxm_path, limit=0)
                     len(missing))
 
 
-def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
-    """Interactive free-account capture: open each page, catch the nxm click."""
+class _BrowserOpener:
+    """The pages in the user's normal browser, one tab each: the arrangement
+    before the window existed, and the fallback when it cannot open."""
+    closed = threading.Event()          # a browser is never 'closed' on us
+
+    def show(self, url, banner=""):
+        try:
+            webbrowser.open(url)
+            return True
+        except Exception:
+            LOG.info("  (Could not auto-open a browser; open the URL above manually.)")
+            return False
+
+
+def _wait_click(listener, timeout, stop=None):
+    """One captured nxm URL within `timeout` seconds, or None.
+
+    Wakes every two seconds to notice `stop`: the window being closed must end
+    the wait at once, not after the three minutes a click is given."""
+    deadline = time.time() + timeout
+    while True:
+        left = deadline - time.time()
+        if left <= 0 or (stop is not None and stop.is_set()):
+            return None
+        url = listener.wait(min(2.0, left))
+        if url:
+            return url
+
+
+def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args, opener=None):
+    """Interactive free-account capture: show each page, catch the nxm click.
+
+    Where the pages are shown: `opener` if given; else a window of our own
+    when ASSIST_WINDOW is on and the engine is there (see wj_assistwin); else
+    the browser. The window owns the main thread while it is open, so the
+    capture loop then runs on a thread of the window's making."""
     if not _HAVE_WINREG:
         LOG.error("[ERROR] winreg unavailable; cannot register the nxm handler.")
         return
+    if opener is None:
+        if ASSIST_WINDOW and _ASSISTWIN is not None and _ASSISTWIN.available():
+            LOG.info("The Nexus pages open in a window of their own. Sign in to Nexus there "
+                     "if it asks - once; the window keeps its login. Closing it ends the run.")
+            win = _ASSISTWIN.AssistWindow()
+            win.run(lambda w: _assist_loop(items, nexus, dest_dir, results, script_dir, args, w))
+            return
+        if ASSIST_WINDOW:
+            LOG.info("The Nexus pages open in your browser (%s).",
+                     _ASSISTWIN.why_not() if _ASSISTWIN is not None else "wj_assistwin is missing")
+        opener = _BrowserOpener()
+    _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener)
+
+
+def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
     by_ids = {nexus_ids(a): a for a in items}
     fetched = set()
     learned_domains = {}
@@ -2050,8 +2109,8 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
         return
 
     listener = NxmListener(script_dir)
-    LOG.info("Capture listener on %s:%d. For each file, your browser opens the Nexus "
-             "download page - click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
+    LOG.info("Capture listener on %s:%d. For each file, the Nexus download page opens - "
+             "click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
     LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
     worker = None
     if CLICK_AHEAD:
@@ -2060,6 +2119,13 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
     try:
         pending = list(items)
         for idx, a in enumerate(pending, 1):
+            if opener.closed.is_set():
+                LOG.info("\n[ABORT] The download window was closed; stopping here. Everything "
+                         "downloaded so far is kept.")
+                if worker is not None:
+                    worker.abort()
+                    worker = None
+                break
             if args.limit and results["done"] >= args.limit:
                 LOG.info("  [STOP] Reached --limit; stopping.")
                 break
@@ -2089,13 +2155,13 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
             if dom_note:
                 LOG.info("  [NOTE] %s", dom_note)
             LOG.info("  Opening: %s", page)
-            try:
-                webbrowser.open(page)
-            except Exception:
-                LOG.info("  (Could not auto-open a browser; open the URL above manually.)")
+            opener.show(page, f"Wabbajack Wizard  ·  file {idx} of {len(pending)}  ·  "
+                              f"{a['name']}  ·  click Slow download")
             LOG.info("  Waiting up to %ds for your click... (Ctrl+C to stop)", NXM_CLICK_TIMEOUT)
-            url = listener.wait(NXM_CLICK_TIMEOUT)
+            url = _wait_click(listener, NXM_CLICK_TIMEOUT, opener.closed)
             if not url:
+                if opener.closed.is_set():
+                    continue                    # the loop's head says why, and stops
                 LOG.warning("  [TIMEOUT] No click captured for %s; moving on.", a["name"])
                 with _RESULTS_LOCK:
                     results["failures"].append((a["name"], "no nxm click captured"))
@@ -2167,6 +2233,9 @@ def main():
     parser.add_argument("--unregister-nxm", action="store_true",
                         help="Restore the previous nxm:// handler and exit (Windows).")
     parser.add_argument("--nxm", help=argparse.SUPPRESS)  # internal: handler invocation
+    parser.add_argument("--check-window", action="store_true",
+                        help="Report whether assist mode can open its own download window "
+                             "here (the WebView2 engine and its Python wrapper), then exit.")
     parser.add_argument("--allow-size-only", action="store_true",
                         help="Proceed even though 'xxhash' is missing and files "
                              "can only be checked by size. Off by default: a "
@@ -2181,6 +2250,25 @@ def main():
     # --- Handler-invocation entry point: forward the URL and exit immediately.
     if args.nxm:
         forward_nxm(args.nxm, script_dir)
+        return
+
+    if args.check_window:
+        # No window is opened: the engine's presence and the .NET bridge are
+        # what fail on a machine that cannot do this, and both can be asked
+        # about without one.
+        if _ASSISTWIN is None:
+            print("no: wj_assistwin.py could not be imported (pywebview missing?)")
+            return
+        if not _ASSISTWIN.available():
+            print(f"no: {_ASSISTWIN.why_not()}")
+            return
+        try:
+            import clr  # noqa: F401  (pythonnet: loads the .NET runtime)
+        except Exception as e:
+            print(f"no: the .NET bridge failed to load ({e})")
+            return
+        print(f"yes: WebView2 runtime present, pywebview and .NET loaded; profile at "
+              f"{_ASSISTWIN.storage_dir()}")
         return
 
     log_path = setup_logging(script_dir, verbose=args.verbose)

@@ -351,12 +351,13 @@ def fake_open(page):
 
 
 saved_assist = (D.webbrowser, D.register_nxm, D.unregister_nxm, D.resolve_browser_domain,
-                D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT)
+                D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW)
 D.webbrowser = types.SimpleNamespace(open=fake_open)
 D.register_nxm = lambda sd: True                 # the registry is not touched by a test
 D.unregister_nxm = lambda sd: None
 D.resolve_browser_domain = lambda nexus, a, learned: ("skyrimspecialedition", None)
 D.NXM_CLICK_TIMEOUT = 10
+D.ASSIST_WINDOW = False                          # the browser path: a test opens no window
 args = types.SimpleNamespace(limit=0)
 
 
@@ -386,9 +387,55 @@ try:
     res = run_assist(False)
     check("with click-ahead off, the second page waits for the first download",
           res["done"] == 2 and opened[1] >= when("end", "nx1.bin"))
+
+    print("\n      the pages can be shown by a window of our own, and closing it ends the run")
+
+    class FakeWindow:
+        """Shows pages like the window would, and 'closes' after the first."""
+        def __init__(self):
+            self.closed = threading.Event()
+            self.shown = []
+
+        def show(self, url, banner=""):
+            self.shown.append((url, banner))
+            fake_open(url)                       # 'you' click this one
+            threading.Timer(0.4, self.closed.set).start()   # then shut the window
+            return True
+
+    events.clear()
+    opened.clear()
+    for n in ("nx1.bin", "nx2.bin"):
+        dest(n)
+    # The first file takes a second to arrive, so the window is shut while it
+    # is still downloading and the loop must notice before the second page.
+    nx_items[:] = [nx_item("nx1.bin", "/hold", 1, len(BIG)), nx_item("nx2.bin", "/ok", 2, len(BODY))]
+    D.CLICK_AHEAD = False
+    fw = FakeWindow()
+    res = {"done": 0, "failed": 0, "failures": []}
+    t0 = time.time()
+    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args, opener=fw)
+    check("the page went to the window, with a banner naming the file and its place",
+          len(fw.shown) == 1 and "file 1 of 2" in fw.shown[0][1] and "nx1.bin" in fw.shown[0][1],
+          str(fw.shown))
+    check("  the clicked file landed", res["done"] == 1, str(res))
+    check("  closing the window stopped the run before the second page, within seconds",
+          len(fw.shown) == 1 and time.time() - t0 < 8, f"{time.time() - t0:.1f}s")
+    check("  and the listener was cleaned up", not os.path.exists(os.path.join(TMP, D.NXM_PORT_FILE)))
+
+    print("\n      the wait for a click ends the moment the window is closed")
+    lst = D.NxmListener(TMP)
+    stop = threading.Event()
+    threading.Timer(0.5, stop.set).start()
+    t0 = time.time()
+    try:
+        got = D._wait_click(lst, 30, stop)
+    finally:
+        lst.close()
+    check("no click and a closed window: None, promptly, not after the timeout",
+          got is None and time.time() - t0 < 5, f"{time.time() - t0:.1f}s")
 finally:
     (D.webbrowser, D.register_nxm, D.unregister_nxm, D.resolve_browser_domain,
-     D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT) = saved_assist
+     D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW) = saved_assist
     D.download_one = real_one
 
 # ---------------------------------------------------------------- 2.12

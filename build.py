@@ -52,6 +52,19 @@ OUT = os.path.join(HERE, "dist", "WabbajackWizard")
 # the licence, the documentation, and the settings template to copy from.
 COMPANIONS = ("README.md", "CHANGELOG.md", "LICENSE", "wj_settings.example.json")
 
+# Written beside each binary as <name>.exe.config. The download window is
+# Edge's WebView2 engine reached through .NET, and .NET Framework refuses to
+# load assemblies from a network share - a mapped drive counts - unless the
+# host program's config says otherwise. This tool lives on a share by design,
+# so it says otherwise. The interpreter in .python\ carries the same file.
+CLR_CONFIG = """<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <runtime>
+    <loadFromRemoteSources enabled="true"/>
+  </runtime>
+</configuration>
+"""
+
 
 def builder():
     """The interpreter that has PyInstaller, or None.
@@ -112,6 +125,10 @@ def main():
             return 2
     for name in COMPANIONS:
         shutil.copy2(os.path.join(HERE, name), os.path.join(OUT, name))
+    for exe in (wj_paths.GUI_EXE, wj_paths.CONSOLE_EXE):
+        with io.open(os.path.join(OUT, exe + ".config"), "w", encoding="utf-8",
+                     newline="\n") as f:
+            f.write(CLR_CONFIG)
 
     name = f"WabbajackWizard-v{version}-win64"
     zip_path = os.path.join(HERE, "dist", name + ".zip")

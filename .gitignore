@@ -55,6 +55,7 @@ dist/
 # has to sit: everything it reads is in the folder it starts from.
 WabbajackWizard.exe
 WabbajackWizard-console.exe
+WabbajackWizard*.exe.config
 _internal/
 
 # Wabbajack itself, kept inside the project so the whole arrangement moves as
@@ -76,6 +77,10 @@ desktop.ini
 
 # Before/after snapshots written by a verification run.
 park_before.json
+
+# The download window's own browser profile: its login to Nexus and its
+# cookies, kept here so the whole arrangement stays inside the folder.
+.webview/
 
 # Wabbajack's published validation reports, cached so the browse stage can
 # say how much of a list you already hold without downloading its
