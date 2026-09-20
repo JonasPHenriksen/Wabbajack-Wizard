@@ -9,9 +9,12 @@ BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 import base64
 import io
 import os
+import socket
 import struct
 import sys
 import threading
+import time
+import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -25,6 +28,12 @@ D.LOG.setLevel(logging.CRITICAL)
 TMP = os.path.join(os.environ["TEMP"], "wj_t2")
 os.makedirs(TMP, exist_ok=True)
 BODY = b"A" * 5000
+BIG = b"B" * ((1 << 20) + 5)          # over the pool's 1 MiB 'small' threshold
+# 2.10 runs the pool with a 2 s stream timeout: /slow must go silent for
+# longer than that, so it is a stall; /hold must answer within it, so it is
+# merely a large file that takes a moment.
+STALL = 3.5                           # how long /slow goes silent for
+HOLD = 1.0                            # how long /hold takes before it answers
 HITS = {}
 
 
@@ -77,6 +86,38 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(BODY)))
             self.end_headers()
             self.wfile.write(BODY)
+        elif path == "/slow":
+            # Answers, sends a little, then goes silent: a stalled connection.
+            # The retry, with its Range, gets the rest at once.
+            if HITS[path] == 1:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(BODY)))
+                self.end_headers()
+                self.wfile.write(BODY[:100])
+                self.wfile.flush()
+                time.sleep(STALL)
+                self.close_connection = True
+            else:
+                start = 0
+                rng = self.headers.get("Range")
+                if rng and rng.startswith("bytes="):
+                    start = int(rng.split("=")[1].split("-")[0])
+                    self.send_response(206)
+                    self.send_header("Content-Range", "bytes %d-%d/%d"
+                                     % (start, len(BODY) - 1, len(BODY)))
+                else:
+                    self.send_response(200)
+                self.send_header("Content-Length", str(len(BODY) - start))
+                self.end_headers()
+                self.wfile.write(BODY[start:])
+        elif path == "/hold":
+            # A large file that takes its time to start: nothing else may
+            # start beside it.
+            time.sleep(HOLD)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(BIG)))
+            self.end_headers()
+            self.wfile.write(BIG)
         else:
             self.send_error(404)
 
@@ -201,6 +242,154 @@ check("resumes to a complete file", ok is True and
       os.path.getsize(p) == len(BODY))
 check("file contents are correct after resume",
       io.open(p, "rb").read() == BODY)
+
+# ---------------------------------------------------------------- 2.10
+print("\n 2.10  several small files at once: a stalled slot holds up nothing else")
+events = []
+real_one = D.download_one
+
+
+def spy(url, a, dest_dir, results, quiet=False):
+    events.append(("start", a["name"], time.time()))
+    ok = real_one(url, a, dest_dir, results, quiet=quiet)
+    events.append(("end", a["name"], time.time()))
+    return ok
+
+
+def when(kind, name):
+    return next(t for k, n, t in events if k == kind and n == name)
+
+
+def item(name, path, size):
+    return ("http", {"name": name, "size": size, "hash": None, "meta_text": "",
+                     "meta": {}, "state": {"Url": BASE + path}})
+
+
+check("a file of unknown size counts as large", not D.is_small_download({"size": None}, 100))
+check("  one at the threshold counts as small, one over it does not",
+      D.is_small_download({"size": 100}, 100) and not D.is_small_download({"size": 101}, 100))
+
+saved_pool = (D.PARALLEL_SMALL, D.SMALL_BYTES, D.STREAM_TIMEOUT)
+D.download_one = spy
+D.PARALLEL_SMALL, D.SMALL_BYTES, D.STREAM_TIMEOUT = 3, 1 << 20, 2
+for n in ("s1.bin", "s2.bin", "s3.bin", "big.bin", "after.bin"):
+    dest(n)
+HITS.clear()
+results = {"done": 0, "failed": 0, "failures": []}
+items = [item("s1.bin", "/slow", len(BODY)), item("s2.bin", "/ok", len(BODY)),
+         item("s3.bin", "/ok", len(BODY)), item("big.bin", "/hold", len(BIG)),
+         item("after.bin", "/ok", len(BODY))]
+try:
+    D.download_direct(items, TMP, results)
+finally:
+    D.PARALLEL_SMALL, D.SMALL_BYTES, D.STREAM_TIMEOUT = saved_pool
+check("every file landed", results["done"] == 5 and results["failed"] == 0, str(results))
+check("  with the right bytes",
+      all(os.path.getsize(os.path.join(TMP, n)) == len(BODY) for n in ("s1.bin", "s2.bin", "s3.bin", "after.bin"))
+      and os.path.getsize(os.path.join(TMP, "big.bin")) == len(BIG))
+check("the stalled file was retried and resumed", HITS.get("/slow", 0) >= 2, str(HITS))
+check("  and the two beside it finished long before it did",
+      when("end", "s2.bin") < when("end", "s1.bin") and when("end", "s3.bin") < when("end", "s1.bin"))
+check("the small files ran together", when("start", "s3.bin") < when("end", "s1.bin"))
+check("the large file started as soon as a slot freed, while the stall was still going",
+      when("start", "big.bin") < when("end", "s1.bin"))
+check("  and nothing new started beside it",
+      when("start", "after.bin") >= when("end", "big.bin"))
+
+print("\n      at the default of 1 the pool is not used")
+events.clear()
+HITS.clear()
+for n in ("q1.bin", "q2.bin"):
+    dest(n)
+D.PARALLEL_SMALL = 1
+results = {"done": 0, "failed": 0, "failures": []}
+try:
+    D.download_direct([item("q1.bin", "/ok", len(BODY)), item("q2.bin", "/ok", len(BODY))], TMP, results)
+finally:
+    D.PARALLEL_SMALL = saved_pool[0]
+check("two files, one after the other",
+      results["done"] == 2 and when("start", "q2.bin") >= when("end", "q1.bin"))
+
+# ---------------------------------------------------------------- 2.11
+print("\n 2.11  assist mode with click-ahead: the next page opens while the file downloads")
+
+
+class FakeNexus:
+    daily_remaining = None
+
+    def resolve_link(self, a, key=None, expires=None, forced_domain=None,
+                     allow_fileid_fallback=True):
+        return a["state"]["Url"], None
+
+
+def nx_item(name, path, mod_id, size):
+    return {"name": name, "size": size, "hash": None, "meta_text": "",
+            "meta": {"gamename": "skyrimspecialedition", "modid": str(mod_id),
+                     "fileid": str(mod_id * 10)},
+            "state": {"Url": BASE + path}}
+
+
+opened = []
+nx_items = []
+
+
+def fake_open(page):
+    """The browser: a moment later, 'you' click, and the handler forwards the
+    nxm link to the listener exactly as the real one does."""
+    opened.append(time.time())
+    a = nx_items[len(opened) - 1]
+    mod, fid = D.nexus_ids(a)
+
+    def click():
+        time.sleep(0.2)
+        port = int(io.open(os.path.join(TMP, D.NXM_PORT_FILE)).read())
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(f"nxm://skyrimspecialedition/mods/{mod}/files/{fid}"
+                      f"?key=k&expires=1\n".encode())
+    threading.Thread(target=click, daemon=True).start()
+    return True
+
+
+saved_assist = (D.webbrowser, D.register_nxm, D.unregister_nxm, D.resolve_browser_domain,
+                D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT)
+D.webbrowser = types.SimpleNamespace(open=fake_open)
+D.register_nxm = lambda sd: True                 # the registry is not touched by a test
+D.unregister_nxm = lambda sd: None
+D.resolve_browser_domain = lambda nexus, a, learned: ("skyrimspecialedition", None)
+D.NXM_CLICK_TIMEOUT = 10
+args = types.SimpleNamespace(limit=0)
+
+
+def run_assist(ahead):
+    events.clear()
+    opened.clear()
+    HITS.clear()
+    for n in ("nx1.bin", "nx2.bin"):
+        dest(n)
+    nx_items[:] = [nx_item("nx1.bin", "/hold", 1, len(BIG)), nx_item("nx2.bin", "/ok", 2, len(BODY))]
+    D.CLICK_AHEAD = ahead
+    res = {"done": 0, "failed": 0, "failures": []}
+    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args)
+    return res
+
+
+try:
+    res = run_assist(True)
+    check("both files landed through the capture flow", res["done"] == 2 and res["failed"] == 0, str(res))
+    check("  the second page opened while the first file was still downloading",
+          len(opened) == 2 and opened[1] < when("end", "nx1.bin"),
+          str((len(opened), opened[1:] and opened[1] - when("end", "nx1.bin"))))
+    check("  and its download waited for the first to finish: still one at a time",
+          when("start", "nx2.bin") >= when("end", "nx1.bin"))
+    check("  the listener's port file was cleaned up",
+          not os.path.exists(os.path.join(TMP, D.NXM_PORT_FILE)))
+    res = run_assist(False)
+    check("with click-ahead off, the second page waits for the first download",
+          res["done"] == 2 and opened[1] >= when("end", "nx1.bin"))
+finally:
+    (D.webbrowser, D.register_nxm, D.unregister_nxm, D.resolve_browser_domain,
+     D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT) = saved_assist
+    D.download_one = real_one
 
 srv.shutdown()
 sys.exit(summary())

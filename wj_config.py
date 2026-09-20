@@ -208,6 +208,35 @@ DOWNLOAD_ORDER = "smallest"
 # Refuse to start a download batch that would leave less than this free.
 FREE_SPACE_MARGIN_GB = 20
 
+# Downloads run one file at a time, which is what keeps them reliable: a
+# stalled connection competes with nothing, costs at most its two-minute
+# timeout, and resumes where it stopped. What one-at-a-time wastes is the
+# fixed cost before each file's bytes flow - the connection, the request, the
+# response - which for a small file is most of the download. These two
+# settings let several SMALL files from direct sources (the Wabbajack CDN,
+# GitHub, plain http) overlap that cost, while anything larger still runs
+# alone and fills the line by itself: it starts as soon as a slot is free,
+# and nothing new starts beside it.
+#
+#   PARALLEL_SMALL_DOWNLOADS  how many files under the threshold may be in
+#                             flight at once. 1 is off, and the default. 3 is
+#                             a sensible value; more only splits the line.
+#   SMALL_DOWNLOAD_MB         the threshold: a file this size or under counts
+#                             as small. A file of unknown size counts as large.
+#
+# Nexus files on a free account are one click each and are not affected.
+PARALLEL_SMALL_DOWNLOADS = 1
+SMALL_DOWNLOAD_MB = 50
+
+# Assist mode opens each Nexus file's page, waits for your click, downloads
+# the file, then opens the next page. With this on, the next page opens while
+# the current file is still downloading, so you are never waiting on a
+# transfer and a transfer is never waiting on you. The captured link is
+# resolved to a download URL at once, and at most one file waits behind the
+# one downloading, so a link cannot sit long enough to expire. The downloads
+# themselves stay one at a time.
+ASSIST_CLICK_AHEAD = False
+
 # An ntfy topic URL or Discord webhook URL for a scheduled run's report. None
 # disables.
 NOTIFY_URL = None
@@ -225,7 +254,8 @@ USER_SETTINGS = (
     "EXCLUDE_POOL_DIRS", "UNMANAGED_FOLDER", "TRASH_FOLDER", "TRASH_KEEP_DAYS",
     "WABBAJACK_DIR", "INSTALL_MODE", "AUTO_TRACK", "EXCLUDE", "TRACK", "HIDDEN",
     "STAGE_LIST", "NEXUS_MODE", "KEEP_BACKUP_DAYS", "REQUIRE_HASH",
-    "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "NOTIFY_URL", "THEME",
+    "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "PARALLEL_SMALL_DOWNLOADS",
+    "SMALL_DOWNLOAD_MB", "ASSIST_CLICK_AHEAD", "NOTIFY_URL", "THEME",
 )
 _DEFAULTS = {k: copy.deepcopy(globals()[k]) for k in USER_SETTINGS}
 # Anything wrong with wj_settings.json, in words. Never fatal: a bad value

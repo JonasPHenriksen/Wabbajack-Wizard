@@ -25,6 +25,9 @@
   "REQUIRE_HASH": true,
   "DOWNLOAD_ORDER": "smallest",
   "FREE_SPACE_MARGIN_GB": 20,
+  "PARALLEL_SMALL_DOWNLOADS": 1,
+  "SMALL_DOWNLOAD_MB": 50,
+  "ASSIST_CLICK_AHEAD": false,
   "NOTIFY_URL": null,
   "THEME": "light"
 }

@@ -2245,6 +2245,10 @@ class App:
                     "STAGE_LIST": "empty = most recently updated",
                     "WABBAJACK_DIR": "empty = auto-detect", "NOTIFY_URL": "empty = off",
                     "THEME": "the Dark mode switch beside the progress bar writes this",
+                    "PARALLEL_SMALL_DOWNLOADS": "files under the threshold in flight at once from "
+                                                "direct sources; 1 = one at a time",
+                    "SMALL_DOWNLOAD_MB": "a file this size or under counts as small",
+                    "ASSIST_CLICK_AHEAD": "open the next Nexus page while the current file downloads",
                     "ARCHIVE_ROOT": "restart to apply", "MANIFEST_DIR": "restart to apply"}.get(key, "")
             ttk.Label(form, text=hint, style="Hint.TLabel").grid(row=row, column=2, sticky="w",
                                                                   padx=(8, 12))

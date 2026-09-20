@@ -54,6 +54,21 @@
   the check too. A lookup that fails is "cannot tell", which neither blocks an
   install nor blesses one. The finding, the game preflight and the lookup now
   run off the window's main thread.
+- **Several small files at once, opt-in.** Downloads have always run one
+  file at a time, and that stays the default: a stalled connection competes
+  with nothing, costs at most its two-minute timeout, and resumes. What it
+  wastes is the fixed cost before each file's bytes flow, which for a small
+  file is most of the download. `PARALLEL_SMALL_DOWNLOADS` lets up to that
+  many files under `SMALL_DOWNLOAD_MB` from direct sources run together;
+  anything larger, or of unknown size, still runs alone, starting as soon as
+  a slot frees and with nothing new starting beside it. Every stream keeps its
+  own timeout, resume and retries, so a stall in one slot holds up nothing
+  else. Nexus files on a free account are one click each and are not pooled.
+- **Click-ahead for assist mode, opt-in.** `ASSIST_CLICK_AHEAD` opens the next
+  Nexus page while the current file is still downloading, so you are never
+  waiting on a transfer and a transfer is never waiting on you. The captured
+  link is resolved to a download URL at once and at most one file waits
+  behind the one downloading, so a link cannot sit long enough to expire.
 - **Wabbajack can live inside the folder**, in `Wabbajack\`, which is looked in
   first and is gitignored, so tools, Python, git and Wabbajack move as one.
   Wabbajack's launcher leaves every superseded version folder behind at some
@@ -76,7 +91,7 @@
 - The Settings form outgrew the tab at the default window size, and its Save
   button with it. The buttons now sit above the form, and the form scrolls.
 
-Tests: 921 checks across 16 sandbox suites, up from 810.
+Tests: 936 checks across 16 sandbox suites, up from 810.
 
 ## 1.1.0 — 2026-09-05
 

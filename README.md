@@ -549,6 +549,8 @@ bad value is reported at start-up and its default used, never fatal.
 | `REQUIRE_HASH` | `true` | refuse to run rather than silently degrade to size-only checks |
 | `DOWNLOAD_ORDER` | `smallest` | `smallest`, `largest`, or `manifest`; see below |
 | `FREE_SPACE_MARGIN_GB` | 20 | refuse a download batch that would leave less than this free |
+| `PARALLEL_SMALL_DOWNLOADS`, `SMALL_DOWNLOAD_MB` | 1, 50 | how many files under the threshold may download at once from direct sources; 1 is one at a time. See "Several small files at once" |
+| `ASSIST_CLICK_AHEAD` | `false` | assist mode opens the next Nexus page while the current file downloads |
 | `NOTIFY_URL` | `null` | an ntfy topic or Discord webhook for a scheduled run's report |
 | `THEME` | `light` | the window's colours, `light` or `dark`; the Dark mode switch writes it |
 
@@ -670,6 +672,36 @@ size always go last, whichever order is chosen: there is nowhere sensible to put
 them. `nexus_todo_<list>.csv` follows the same order, so it can be worked through
 top to bottom alongside a run.
 
+## Several small files at once
+
+Downloads run one file at a time, and that is the default for a reason: a
+stalled connection competes with nothing, costs at most its two-minute timeout,
+and resumes from its partial file. What one-at-a-time wastes is the fixed cost
+before each file's bytes flow — the connection, the request, the response —
+which for a small file is most of the download, and a big list has hundreds of
+those. Wabbajack's own eight-way parallelism is faster through that stretch,
+and worse afterwards, when eight streams split a slow line and a stuck slot
+starves the rest.
+
+`PARALLEL_SMALL_DOWNLOADS` takes the good half. Set it to 3 and up to three
+files under `SMALL_DOWNLOAD_MB` from direct sources — the Wabbajack CDN,
+GitHub, plain http — run together, while anything larger, or of unknown size,
+still runs alone: it starts as soon as a slot frees, and nothing new starts
+beside it. Because archives are fetched smallest first, a run turns into a
+parallel phase of small files followed by a sequential phase of large ones.
+Every stream keeps its own timeout, resume and retries, so a stall in one slot
+holds up nothing else. Concurrency cannot add bandwidth — on a 3 MB/s line one
+stream already fills it — so the number is for hiding per-file latency, not
+for speed, and more than three only splits the line.
+
+Nexus files on a free account are not pooled: each is a click. What helps
+there is `ASSIST_CLICK_AHEAD`, which opens the next file's page while the
+current file is still downloading, so you are never waiting on a transfer and a
+transfer is never waiting on you. The captured link is resolved to a download
+URL the moment it arrives, and at most one file waits behind the one
+downloading, so a link cannot sit long enough to expire. The downloads
+themselves stay one at a time.
+
 ## When results look wrong
 
 ```
@@ -718,7 +750,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 921 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 936 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -728,7 +760,7 @@ exactly the failure they want to check.
 | suite | covers |
 | --- | --- |
 | `t1_sorter` | aborting on an unreadable manifest, reserved names, demand-based pooling, staging, size-checked collisions, dry-run purity, bad arguments, identical extras settling in one pass, the shared manifest cache |
-| `t2_download` | hard vs transient HTTP failures, retry and resume, truncated transfers, verification, `.meta` sidecars, URL encoding |
+| `t2_download` | hard vs transient HTTP failures, retry and resume, truncated transfers, verification, `.meta` sidecars, URL encoding, several small files at once with a stalled slot holding up nothing else, and assist mode's click-ahead |
 | `t3_cdn` | broken definitions in four shapes, bad part bytes and lengths, whole-file hash mismatch, resume from a partial download, stale and impossible sidecars |
 | `t4_updater` | filename-to-feed-key matching, negative-cache expiry, damaged state files, odd feed shapes, the start-up guards |
 | `t5_wizard` | empty data in every stage, missing folders, deleting a modlist whose pieces are already gone, awkward filenames |

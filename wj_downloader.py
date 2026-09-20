@@ -85,7 +85,10 @@ import logging
 import argparse
 import platform
 import http.client
+import queue
+import threading
 import webbrowser
+import concurrent.futures
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -145,6 +148,13 @@ MANIFEST_SUBDIR = CFG.MANIFEST_SUBDIR
 REQUIRE_HASH = CFG.REQUIRE_HASH
 DOWNLOAD_ORDER = CFG.DOWNLOAD_ORDER or "smallest"
 
+# Several small files at once, from direct sources only; see wj_config.py.
+# 1 is one at a time, which is the default and the reliable arrangement.
+PARALLEL_SMALL = max(1, int(getattr(CFG, "PARALLEL_SMALL_DOWNLOADS", 1) or 1))
+SMALL_BYTES = int(getattr(CFG, "SMALL_DOWNLOAD_MB", 50) or 0) * (1 << 20)
+# Assist mode: open the next Nexus page while the current file downloads.
+CLICK_AHEAD = bool(getattr(CFG, "ASSIST_CLICK_AHEAD", False))
+
 # Nexus API tuning -----------------------------------------------------
 NEXUS_API_BASE   = "https://api.nexusmods.com/v1"
 # Sent as the Application-Name and Application-Version headers Nexus asks
@@ -155,6 +165,7 @@ REQUEST_PAUSE_S  = 0.30          # polite gap between Nexus API calls
 DOWNLOAD_CHUNK   = 1 << 20       # 1 MiB streaming chunks
 NEXUS_DAILY_FLOOR = 5            # stop minting links when daily allowance hits this
 DOWNLOAD_RETRIES = 4             # attempts per file when the stream drops mid-transfer
+STREAM_TIMEOUT   = 120           # seconds a connection may go silent before it is a retry
 
 # Many modlists pin a file to the *target* game's Nexus domain even though the
 # file actually lives on a parent game's page. The classic case: an Enderal
@@ -1314,15 +1325,19 @@ def resolve_mediafire(page_url):
 # ----------------------------------------------------------------------
 # Generic streaming download with resume + progress
 # ----------------------------------------------------------------------
-def stream_download(url, dest, expected_size=None, retries=DOWNLOAD_RETRIES):
+def stream_download(url, dest, expected_size=None, retries=DOWNLOAD_RETRIES, quiet=False):
     """Download with resume-aware retries. Each attempt resumes from the .part
     file the previous attempt left behind, so a dropped connection on a large
     file doesn't restart from zero. A clean HTTP error (e.g. 403/404) is not
-    retried; only transient connection/timeout/write failures are."""
+    retried; only transient connection/timeout/write failures are.
+
+    `quiet` suppresses the per-file progress line, for a download that runs
+    beside others: several streams writing carriage returns to one console
+    would garble each other, so the pool prints one line for all of them."""
     attempt = 0
     while True:
         attempt += 1
-        status = _stream_download_once(url, dest, expected_size)
+        status = _stream_download_once(url, dest, expected_size, quiet=quiet)
         if status is True:
             return True
         if status == "fatal" or attempt > retries:
@@ -1333,9 +1348,14 @@ def stream_download(url, dest, expected_size=None, retries=DOWNLOAD_RETRIES):
         time.sleep(wait)
 
 
-def _stream_download_once(url, dest, expected_size=None):
+def _stream_download_once(url, dest, expected_size=None, quiet=False):
     """One download attempt. Returns True on success, 'fatal' on an
-    unrecoverable HTTP error, or False on a transient failure worth retrying."""
+    unrecoverable HTTP error, or False on a transient failure worth retrying.
+
+    STREAM_TIMEOUT bounds every wait on the socket, the connect and each
+    read alike, so a connection that goes silent becomes a retry rather than
+    a hang. That, with the resume above, is what makes a stall cost at most
+    the timeout - whether the file runs alone or beside others."""
     url = sanitize_url(url)
     part = dest + ".part"
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -1348,14 +1368,14 @@ def _stream_download_once(url, dest, expected_size=None):
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        resp = urllib.request.urlopen(req, timeout=120)
+        resp = urllib.request.urlopen(req, timeout=STREAM_TIMEOUT)
     except urllib.error.HTTPError as e:
         if e.code == 416:
             try:
                 os.remove(part)
             except OSError:
                 pass
-            return _stream_download_once(url, dest, expected_size)
+            return _stream_download_once(url, dest, expected_size, quiet=quiet)
         LOG.error("  [ERROR] HTTP %s downloading %s", e.code, os.path.basename(dest))
         return "fatal"
     except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -1383,7 +1403,7 @@ def _stream_download_once(url, dest, expected_size=None):
                     f.write(chunk)
                     downloaded += len(chunk)
                     now = time.time()
-                    if now - last_print > 0.5:
+                    if not quiet and now - last_print > 0.5:
                         last_print = now
                         if total:
                             pct = downloaded * 100 / total
@@ -1394,13 +1414,15 @@ def _stream_download_once(url, dest, expected_size=None):
                         sys.stdout.flush()
         except (OSError, urllib.error.URLError, TimeoutError,
                 http.client.IncompleteRead, http.client.HTTPException) as e:
-            sys.stdout.write("\n")
+            if not quiet:
+                sys.stdout.write("\n")
             LOG.warning("  [WARN] Transfer interrupted for %s: %s (will resume)",
                         os.path.basename(dest), e)
             return False
 
-    sys.stdout.write("\r" + " " * 60 + "\r")
-    sys.stdout.flush()
+    if not quiet:
+        sys.stdout.write("\r" + " " * 60 + "\r")
+        sys.stdout.flush()
 
     # A connection that closes cleanly part-way through looks exactly like a
     # finished download: read() returns b"" and nothing raises. Without this
@@ -1438,8 +1460,27 @@ def write_meta(dest, meta_text):
         LOG.warning("  [WARN] Could not write .meta for %s: %s", os.path.basename(dest), e)
 
 
-def download_one(url, archive, dest_dir, results):
-    """Download a resolved URL into dest_dir, verify, write .meta. Update results."""
+# The results dict is shared by every download of a run. With several files
+# in flight it is written from several threads, so every change goes through
+# here; a lost increment would make the summary lie about what landed.
+_RESULTS_LOCK = threading.Lock()
+
+
+def _tally(results, ok, name=None, reason=None):
+    with _RESULTS_LOCK:
+        if ok:
+            results["done"] += 1
+        else:
+            results["failed"] += 1
+            results["failures"].append((name, reason))
+
+
+def download_one(url, archive, dest_dir, results, quiet=False):
+    """Download a resolved URL into dest_dir, verify, write .meta. Update results.
+
+    `quiet` is for a download running beside others: no progress line of its
+    own, and a CDN file is fetched with fewer part-workers so a pool of them
+    does not open a dozen connections at once."""
     name = archive["name"]
     dest = os.path.join(dest_dir, name)
 
@@ -1454,13 +1495,12 @@ def download_one(url, archive, dest_dir, results):
         # always discarded a wrong-hash file; this path used to keep it.
         ok, got = _CDN.download(url, dest, expected_size=archive["size"],
                                 expected_hash=archive["hash"], detail=True,
-                                strict_hash=True)
+                                strict_hash=True, progress=not quiet,
+                                workers=(2 if quiet else _CDN.DEFAULT_WORKERS))
         if not ok:
-            results["failed"] += 1
-            results["failures"].append((name, "CDN multi-part download failed "
-                                              "(see log: definition, parts, or "
-                                              "a hash that differs from the "
-                                              "manifest)"))
+            _tally(results, False, name, "CDN multi-part download failed (see log: "
+                                         "definition, parts, or a hash that differs "
+                                         "from the manifest)")
             return False
         # The CDN module already hashed the assembled file; do not read a
         # multi-GB archive off the share a second time just to repeat that.
@@ -1475,24 +1515,21 @@ def download_one(url, archive, dest_dir, results):
                 os.remove(dest)
             except OSError:
                 pass
-            results["failed"] += 1
-            results["failures"].append((name, f"verify: {reason}"))
+            _tally(results, False, name, f"verify: {reason}")
             return False
         write_meta(dest, archive["meta_text"])
-        results["done"] += 1
+        _tally(results, True)
         return True
 
     if _HAVE_CDN is False and isinstance(url, str) and (
             "wabbajack.org" in url or "b-cdn.net" in url):
         LOG.error("  [SKIP] %s needs wj_cdn.py, which is not next to "
                   "this script.", name)
-        results["failed"] += 1
-        results["failures"].append((name, "wj_cdn.py missing"))
+        _tally(results, False, name, "wj_cdn.py missing")
         return False
 
-    if not stream_download(url, dest, expected_size=archive["size"]):
-        results["failed"] += 1
-        results["failures"].append((name, "download failed"))
+    if not stream_download(url, dest, expected_size=archive["size"], quiet=quiet):
+        _tally(results, False, name, "download failed")
         return False
     good, reason = verify_file(dest, archive["size"], archive["hash"])
     if not good:
@@ -1503,11 +1540,10 @@ def download_one(url, archive, dest_dir, results):
             os.remove(dest)
         except OSError:
             pass
-        results["failed"] += 1
-        results["failures"].append((name, f"verify: {reason}"))
+        _tally(results, False, name, f"verify: {reason}")
         return False
     write_meta(dest, archive["meta_text"])
-    results["done"] += 1
+    _tally(results, True)
     return True
 
 
@@ -1614,38 +1650,155 @@ def resolve_api_key(cli_key, script_dir, prompt=True):
 # ----------------------------------------------------------------------
 # Download routines per situation
 # ----------------------------------------------------------------------
+def _direct_url(kind, a, results):
+    """The URL a direct-source archive is fetched from, or None after
+    recording why there is none."""
+    try:
+        if kind in ("http", "wabbajackcdn"):
+            url = (a["state"] or {}).get("Url") or a["meta"].get("directurl")
+        elif kind == "mediafire":
+            page = (a["state"] or {}).get("Url") or a["meta"].get("directurl")
+            url = resolve_mediafire(page) if page else None
+            if not url:
+                raise RuntimeError("could not resolve MediaFire direct link")
+        else:
+            url = None
+    except RuntimeError as e:
+        LOG.error("  [SKIP] %s: %s", a["name"], e)
+        _tally(results, False, a["name"], str(e))
+        return None
+    if not url:
+        LOG.error("  [SKIP] %s: no usable download URL.", a["name"])
+        _tally(results, False, a["name"], "no URL")
+        return None
+    # The manifest's own State type is the authoritative signal that this
+    # is a multi-part CDN file, more reliable than matching the hostname.
+    a["_cdn"] = (kind == "wabbajackcdn")
+    return url
+
+
+def is_small_download(archive, small_bytes):
+    """May this file share the line with others? Only a file of known size at
+    or under the threshold. Unknown counts as large: a file that turns out
+    to be 4 GB must not have started beside two others."""
+    size = archive.get("size")
+    return isinstance(size, int) and size <= small_bytes
+
+
 def download_direct(items, dest_dir, results, limit=0):
-    """Non-Nexus sources (http / wabbajackcdn / mediafire). No account needed."""
-    for kind, a in items:
-        if limit and results["done"] >= limit:
-            LOG.info("  [STOP] Reached --limit; stopping.")
-            return
-        LOG.info("[%s] %s  (%s)", kind, a["name"],
-                 human_bytes(a["size"]) if a["size"] else "size unknown")
+    """Non-Nexus sources (http / wabbajackcdn / mediafire). No account needed.
+
+    One file at a time, unless PARALLEL_SMALL says otherwise: then up to
+    that many files under SMALL_BYTES run together, and anything larger
+    still runs alone - it starts as soon as a slot is free, and nothing new
+    starts beside it. The order the items arrive in is the order they are
+    admitted in, so 'smallest first' turns a run into a parallel phase of
+    small files followed by a sequential phase of large ones."""
+    if PARALLEL_SMALL <= 1:
+        for kind, a in items:
+            if limit and results["done"] >= limit:
+                LOG.info("  [STOP] Reached --limit; stopping.")
+                return
+            LOG.info("[%s] %s  (%s)", kind, a["name"],
+                     human_bytes(a["size"]) if a["size"] else "size unknown")
+            url = _direct_url(kind, a, results)
+            if url:
+                download_one(url, a, dest_dir, results)
+        return
+    _DirectPool(PARALLEL_SMALL, SMALL_BYTES, dest_dir, results, limit).run(items)
+
+
+class _DirectPool:
+    """Several small direct downloads at once, large ones alone.
+
+    Every stream keeps its own timeout, resume and retries, so a stall in one
+    slot costs that slot at most STREAM_TIMEOUT and holds up nothing else:
+    the other slots finish and are refilled around it. Small files run
+    quiet, with one aggregate progress line for the pool; a large file has
+    the console to itself and prints its own line as it always did."""
+
+    def __init__(self, workers, small_bytes, dest_dir, results, limit):
+        self.workers = max(1, workers)
+        self.small_bytes = small_bytes
+        self.dest_dir, self.results, self.limit = dest_dir, results, limit
+        self.running = {}                 # future -> (archive, is_large)
+        self.large_running = False
+        self.small_total = self.small_done = 0
+        self.small_bytes_done = 0
+        self.started = time.time()
+        self.last_print = 0.0
+        self.printed = False
+
+    def run(self, items):
+        self.small_total = sum(1 for _k, a in items if is_small_download(a, self.small_bytes))
+        LOG.info("Up to %d small file(s) (under %s) at once; larger ones one at a time.",
+                 self.workers, human_bytes(self.small_bytes))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=self.workers,
+                                                     thread_name_prefix="download")
         try:
-            if kind in ("http", "wabbajackcdn"):
-                url = (a["state"] or {}).get("Url") or a["meta"].get("directurl")
-            elif kind == "mediafire":
-                page = (a["state"] or {}).get("Url") or a["meta"].get("directurl")
-                url = resolve_mediafire(page) if page else None
+            for kind, a in items:
+                if self.limit and self.results["done"] >= self.limit:
+                    LOG.info("  [STOP] Reached --limit; stopping.")
+                    break
+                is_large = not is_small_download(a, self.small_bytes)
+                # A slot must be free, and nothing may start while a large
+                # file runs: that is what keeps the line whole for it.
+                while self.large_running or len(self.running) >= self.workers:
+                    self._reap(0.5)
+                url = _direct_url(kind, a, self.results)
                 if not url:
-                    raise RuntimeError("could not resolve MediaFire direct link")
-            else:
-                url = None
-        except RuntimeError as e:
-            LOG.error("  [SKIP] %s: %s", a["name"], e)
-            results["failed"] += 1
-            results["failures"].append((a["name"], str(e)))
-            continue
-        if not url:
-            LOG.error("  [SKIP] %s: no usable download URL.", a["name"])
-            results["failed"] += 1
-            results["failures"].append((a["name"], "no URL"))
-            continue
-        # The manifest's own State type is the authoritative signal that this
-        # is a multi-part CDN file, more reliable than matching the hostname.
-        a["_cdn"] = (kind == "wabbajackcdn")
-        download_one(url, a, dest_dir, results)
+                    continue
+                LOG.info("[%s] %s  (%s)%s", kind, a["name"],
+                         human_bytes(a["size"]) if a["size"] else "size unknown",
+                         "" if is_large else "  [pooled]")
+                fut = pool.submit(download_one, url, a, self.dest_dir, self.results,
+                                  quiet=not is_large)
+                self.running[fut] = (a, is_large)
+                if is_large:
+                    self.large_running = True
+            while self.running:
+                self._reap(0.5)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+            if self.printed:
+                sys.stdout.write("\r" + " " * 70 + "\r")
+                sys.stdout.flush()
+
+    def _reap(self, timeout):
+        """Collect whatever finished, then refresh the pool's progress line."""
+        done, _ = concurrent.futures.wait(list(self.running), timeout=timeout,
+                                          return_when=concurrent.futures.FIRST_COMPLETED)
+        for fut in done:
+            a, is_large = self.running.pop(fut)
+            if is_large:
+                self.large_running = False
+            try:
+                ok = fut.result()
+            except Exception as e:                  # a bug, not a bad download
+                LOG.error("  [ERROR] %s: %s", a["name"], e)
+                _tally(self.results, False, a["name"], str(e))
+                ok = False
+            if not is_large:
+                self.small_done += 1
+                if ok:
+                    self.small_bytes_done += a.get("size") or 0
+                LOG.info("  [%s] %s", "OK" if ok else "FAILED", a["name"])
+        self._progress()
+
+    def _progress(self):
+        now = time.time()
+        in_flight = sum(1 for _f, (_a, large) in self.running.items() if not large)
+        if not in_flight and not (self.small_total and self.small_done < self.small_total):
+            return
+        if now - self.last_print < 0.5:
+            return
+        self.last_print = now
+        pct = (100.0 * self.small_done / self.small_total) if self.small_total else 0.0
+        rate = self.small_bytes_done / max(0.1, now - self.started) / (1 << 20)
+        sys.stdout.write(f"\r    {pct:5.1f}%  {self.small_done}/{self.small_total} small "
+                         f"file(s), {in_flight} in flight, {rate:.1f} MB/s   ")
+        sys.stdout.flush()
+        self.printed = True
 
 
 def download_nexus_premium(items, nexus, dest_dir, results, limit=0,
@@ -1666,28 +1819,30 @@ def download_nexus_premium(items, nexus, dest_dir, results, limit=0,
                 allow_fileid_fallback=allow_fileid_fallback)
         except RuntimeError as e:
             LOG.error("  [SKIP] %s: %s", a["name"], e)
-            results["failed"] += 1
-            results["failures"].append((a["name"], str(e)))
+            _tally(results, False, a["name"], str(e))
             continue
         if note:
             LOG.info("  [NOTE] %s: %s", a["name"], note)
         download_one(url, a, dest_dir, results)
 
 
-def _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched):
-    """Given a parsed nxm dict, resolve via the API and download the matching archive."""
-    a = by_ids.get((link["mod_id"], link["file_id"]))
+def _resolve_nxm(link, nexus, by_ids, results, fetched):
+    """Turn a captured nxm link into (download_url, archive, ids) through the
+    API, or None after saying why not. The resolving is done at once, while
+    the click is fresh: the key in the link expires, the URL it mints does
+    not need to be fetched this second."""
+    ids = (link["mod_id"], link["file_id"])
+    a = by_ids.get(ids)
     if a is None:
         LOG.info("  [SKIP] nxm for mod %s file %s is not a pending file for this list.",
                  link["mod_id"], link["file_id"])
-        return
-    if (link["mod_id"], link["file_id"]) in fetched:
-        return
+        return None
+    if ids in fetched:
+        return None
     if not (link["key"] and link["expires"]):
         LOG.error("  [SKIP] %s: nxm link has no key/expires.", a["name"])
-        results["failed"] += 1
-        results["failures"].append((a["name"], "nxm missing key/expires"))
-        return
+        _tally(results, False, a["name"], "nxm missing key/expires")
+        return None
     LOG.info("[nexus] %s  (%s)", a["name"],
              human_bytes(a["size"]) if a["size"] else "size unknown")
     try:
@@ -1702,13 +1857,87 @@ def _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched):
             allow_fileid_fallback=False)
     except RuntimeError as e:
         LOG.error("  [SKIP] %s: %s", a["name"], e)
-        results["failed"] += 1
-        results["failures"].append((a["name"], str(e)))
-        return
+        _tally(results, False, a["name"], str(e))
+        return None
     if note:
         LOG.info("  [NOTE] %s: %s", a["name"], note)
+    return url, a, ids
+
+
+def _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched):
+    """Given a parsed nxm dict, resolve via the API and download the matching archive."""
+    resolved = _resolve_nxm(link, nexus, by_ids, results, fetched)
+    if resolved is None:
+        return
+    url, a, ids = resolved
     if download_one(url, a, dest_dir, results):
-        fetched.add((link["mod_id"], link["file_id"]))
+        fetched.add(ids)
+
+
+class _AssistDownloader:
+    """Assist mode's downloads on a thread of their own, one at a time, so
+    the next Nexus page can open while the current file is still arriving.
+
+    At most one file waits behind the one downloading. That bound is what
+    keeps a minted link from sitting long enough to expire, and it is where
+    the person and the transfer meet: when a large file is downloading, the
+    next page opens as soon as the waiting file starts, not before."""
+
+    def __init__(self, dest_dir, results, fetched):
+        self.dest_dir, self.results, self.fetched = dest_dir, results, fetched
+        self.q = queue.Queue()
+        self.current = None
+        self.thread = threading.Thread(target=self._run, daemon=True,
+                                       name="assist-download")
+        self.thread.start()
+
+    def _run(self):
+        while True:
+            item = self.q.get()
+            if item is None:
+                self.q.task_done()
+                return
+            url, a, ids = item
+            self.current = a["name"]
+            try:
+                if download_one(url, a, self.dest_dir, self.results):
+                    self.fetched.add(ids)
+                    LOG.info("  [OK] %s", a["name"])
+            except Exception as e:                  # a bug, not a bad download
+                LOG.error("  [ERROR] %s: %s", a["name"], e)
+                _tally(self.results, False, a["name"], str(e))
+            finally:
+                self.current = None
+                self.q.task_done()
+
+    def wait_for_room(self):
+        """Block while a file is already waiting behind the one downloading."""
+        said = False
+        while self.q.qsize() >= 1:
+            if not said:
+                LOG.info("  (%s is still downloading; the next page opens when the "
+                         "queued file starts)", self.current or "a file")
+                said = True
+            time.sleep(0.25)
+
+    def submit(self, url, a, ids):
+        self.q.put((url, a, ids))
+
+    def finish(self):
+        """Let the queue drain, then stop the thread."""
+        self.q.put(None)
+        self.thread.join()
+
+    def abort(self):
+        """Drop whatever is waiting. The download in progress is left to
+        run out with the process: its .part resumes next time."""
+        while True:
+            try:
+                self.q.get_nowait()
+                self.q.task_done()
+            except queue.Empty:
+                break
+        self.q.put(None)
 
 
 def download_nexus_from_file(items, nexus, dest_dir, results, nxm_path, limit=0):
@@ -1755,6 +1984,10 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
     LOG.info("Capture listener on %s:%d. For each file, your browser opens the Nexus "
              "download page - click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
     LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
+    worker = None
+    if CLICK_AHEAD:
+        worker = _AssistDownloader(dest_dir, results, fetched)
+        LOG.info("Click-ahead is on: the next page opens while the current file downloads.")
     try:
         pending = list(items)
         for idx, a in enumerate(pending, 1):
@@ -1766,7 +1999,7 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
                 continue
             if not (nexus_domain(a) and ids[0] and ids[1]):
                 LOG.error("  [SKIP] %s: incomplete Nexus identifiers.", a["name"])
-                results["failed"] += 1
+                _tally(results, False, a["name"], "incomplete Nexus identifiers")
                 continue
             if (nexus.daily_remaining is not None
                     and nexus.daily_remaining <= NEXUS_DAILY_FLOOR):
@@ -1775,6 +2008,8 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
                           "Everything downloaded so far is kept.",
                           nexus.daily_remaining)
                 break
+            if worker is not None:
+                worker.wait_for_room()
             # Confirm the domain against the API rather than trusting the
             # manifest's Meta gameName: this list records "skyrimse", which the
             # website does not serve, and every page then opens on "mod could
@@ -1793,15 +2028,28 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args):
             url = listener.wait(NXM_CLICK_TIMEOUT)
             if not url:
                 LOG.warning("  [TIMEOUT] No click captured for %s; moving on.", a["name"])
-                results["failures"].append((a["name"], "no nxm click captured"))
+                with _RESULTS_LOCK:
+                    results["failures"].append((a["name"], "no nxm click captured"))
                 continue
             link = parse_nxm(url)
             if not link:
                 LOG.warning("  [WARN] Captured a non-nxm URL; skipping.")
                 continue
-            _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched)
+            if worker is None:
+                _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched)
+                continue
+            resolved = _resolve_nxm(link, nexus, by_ids, results, fetched)
+            if resolved is not None:
+                worker.submit(*resolved)
+        if worker is not None:
+            if worker.q.qsize() or worker.current:
+                LOG.info("  Every page has been clicked; finishing the download(s) in flight.")
+            worker.finish()
+            worker = None
     except KeyboardInterrupt:
         LOG.info("\n[ABORT] Capture interrupted by user.")
+        if worker is not None:
+            worker.abort()
     finally:
         listener.close()
         # Hand the nxm:// handler back to whatever owned it (normally
