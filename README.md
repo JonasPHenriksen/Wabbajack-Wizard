@@ -568,6 +568,16 @@ turn, and waits for you to click *Slow download*. The handler is always handed
 back on exit, including Ctrl+C — without that, Wabbajack's own downloads keep
 landing here instead.
 
+Before a page is opened, the API is asked which game's site serves the mod,
+because manifests name a game several ways and not all of them are site names.
+A game other than the manifest's own is believed only when it lists the wanted
+file: mod ids are per game and dense, so a Special Edition mod's id is usually
+some unrelated old-Skyrim mod's as well, and a page for a stranger is what that
+used to open. A mod its own game reports as hidden, removed or unpublished has
+no page to click; it is recorded as not downloaded, with Nexus's word for why,
+and passed over at once instead of waiting out the three minutes a click is
+given.
+
 ### The download window
 
 The pages are shown in a window of the wizard's own, the way Wabbajack's
@@ -576,9 +586,19 @@ a banner across the top saying which file this is and how many are left. It is
 Edge's WebView2 engine, which Windows 10 and 11 ship, reached through the
 pywebview library. The window keeps its own browser profile under `.webview\`
 beside the scripts — cookies, and so the Nexus login — so you sign in to Nexus
-in it once, and everything stays inside the folder. Edge asks once whether the
-`nxm://` link may open the wizard; tick *always allow*. Closing the window ends
-the run, and everything downloaded so far is kept.
+in it once, and everything stays inside the folder. Closing the window ends
+the run, and everything downloaded so far is kept. A page with nothing to
+click on it - a file Nexus no longer offers - has *Skip this file* at the
+banner's right, which records the file as not downloaded and goes on to the
+next; left alone, the run goes on by itself after three minutes.
+
+The click is caught inside the window. The engine announces a navigation to an
+external scheme before it happens and leaves the decision to the host; the
+wizard cancels the `nxm://` one and hands the link straight to the waiting run,
+so no protocol handler and no "open this program?" prompt is involved. That
+matters more than it sounds: Nexus fires the link from a timer after your click,
+and the engine's default for a launch not directly caused by a click is to drop
+it without a word. The protocol handler stays registered as the fallback.
 
 `ASSIST_WINDOW` set to `false`, or the engine or library missing, falls back to
 your normal browser, one tab per file. `wj_downloader.py --check-window` says
@@ -777,7 +797,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 946 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 968 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

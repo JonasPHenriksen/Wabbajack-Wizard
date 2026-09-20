@@ -15,10 +15,18 @@ and so the Nexus login - under STORAGE_DIRNAME beside the scripts, so the
 sign-in is done once in this window and stays inside the folder with
 everything else.
 
-The click itself is captured exactly as before. The page hands the nxm://
-link to Windows, Windows runs the registered handler, and the handler
-forwards the link to the run that is waiting for it. Nothing here reads the
-page or presses anything in it; it only shows it.
+The click is caught inside the window. The engine announces every navigation
+before it starts, and a navigation to an nxm:// link is cancelled there and
+handed to the run instead - no protocol handler, no "open this program?"
+prompt, nothing leaving the process. The handler stays registered as the
+fallback for an engine that will not say. Nothing here reads the page or
+presses anything in it; it only shows it and listens for that one link.
+
+The banner also carries a Skip button, for a page with nothing on it to
+click - a mod taken off Nexus since the list was built. It is an nxm:// link
+of our own under SKIP_URI, so it travels the same road as a click: caught in
+the window it raises `skip`, and through the protocol handler it reaches the
+run's listener, which knows the host.
 
 Threads: the engine owns the process's main thread from webview.start() to
 the window closing. The capture loop therefore runs on a thread the engine
@@ -39,6 +47,7 @@ except Exception:                      # not installed, or .NET refused to load
 
 STORAGE_DIRNAME = ".webview"
 TITLE = "Wabbajack Wizard - Nexus downloads"
+SKIP_URI = "nxm://wabbajackwizard/skip"     # wj_downloader.NXM_SKIP_PREFIX + "skip"
 
 # WebView2's Evergreen runtime installs here on 64-bit Windows; Windows 11
 # ships it, Windows 10 gets it with Edge. A folder named for a version is the
@@ -60,24 +69,42 @@ p{margin:.4em 0;color:#bdbdbd}</style></head><body><div>
 Nexus's short timer, and the file lands in your pools; the next page follows on its own.</p>
 <p>Not signed in to Nexus in this window yet? Sign in when the first page asks; this window
 keeps its own login, so that is once.</p>
+<p>A page with nothing to click - a mod taken off Nexus, say - has <b>Skip this file</b> in the
+banner; the file is recorded as not downloaded and the next page follows.</p>
 <p>Closing this window ends the run. Everything downloaded so far is kept.</p>
 </div></body></html>"""
 
 # Injected into every page once it has loaded. Runs from outside the page,
 # so the site's own content-security rules do not apply to it. Idempotent:
-# a page that reloads itself gets the banner once.
+# a page that reloads itself gets the banner once. The Skip button is a
+# plain link to SKIP_URI: a click on it is a user-initiated launch of an
+# external scheme, which is what the window's hook listens for. No literal
+# percent sign in here; the text goes in through %-formatting.
 BANNER_JS = """(function () {
   var b = document.getElementById('wj-assist-banner');
   if (!b) {
     b = document.createElement('div');
     b.id = 'wj-assist-banner';
     b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
+      'display:flex;align-items:center;gap:16px;' +
       'background:#1f1f1f;color:#e4e4e4;font:14px/1.4 "Segoe UI",sans-serif;' +
       'padding:9px 16px;box-shadow:0 2px 8px rgba(0,0,0,.6);border-bottom:2px solid #4a90d9';
+    var t = document.createElement('span');
+    t.id = 'wj-assist-text';
+    t.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    var s = document.createElement('a');
+    s.id = 'wj-assist-skip';
+    s.href = '""" + SKIP_URI + """';
+    s.textContent = 'Skip this file';
+    s.title = 'Nothing to click here? Record this file as not downloaded and go on to the next.';
+    s.style.cssText = 'flex:none;color:#e4e4e4;background:#3a3a3a;border:1px solid #666;' +
+      'border-radius:4px;padding:3px 10px;text-decoration:none;font-size:13px;cursor:pointer';
+    b.appendChild(t);
+    b.appendChild(s);
     document.documentElement.appendChild(b);
     document.documentElement.style.marginTop = '42px';
   }
-  b.textContent = %s;
+  document.getElementById('wj-assist-text').textContent = %s;
 })();"""
 
 
@@ -120,14 +147,23 @@ class AssistWindow:
     it returns when work returns, which closes the window, or when the user
     closes the window, which sets `closed` for work to notice. show(url,
     banner) replaces the page and, once it has loaded, writes the banner
-    across its top."""
+    across its top. The banner's Skip button sets `skip`, which work clears
+    when it has acted on it."""
 
-    def __init__(self, title=TITLE):
+    def __init__(self, title=TITLE, on_link=None):
         self.title = title
         self.window = None
         self.closed = threading.Event()
+        self.finished = threading.Event()
+        self.skip = threading.Event()
         self._banner = ""
         self.error = None
+        # Called with each nxm:// link the page tries to open, from the
+        # engine's thread. The run sets it to whatever delivers the link to
+        # its listener.
+        self.on_link = on_link
+        self.hooked = False
+        self.hook_error = None
 
     def run(self, work):
         self.window = webview.create_window(self.title, html=WELCOME_HTML,
@@ -135,13 +171,24 @@ class AssistWindow:
                                             text_select=True)
         self.window.events.closed += self._on_closed
         self.window.events.loaded += self._on_loaded
+        self.window.events.shown += self._hook_navigation
 
         def go():
+            # Shown on purpose, not left to the process's start-up state. A
+            # child launched with its window hidden - as a console child is,
+            # to keep its console off the screen - hands that state to the
+            # first window it makes, and this window is that first window.
+            try:
+                self.window.show()
+                self.window.restore()
+            except Exception:
+                pass
             try:
                 work(self)
             except Exception as e:             # surfaced to the caller, not lost in a thread
                 self.error = e
             finally:
+                self.finished.set()
                 if not self.closed.is_set():
                     try:
                         self.window.destroy()
@@ -149,6 +196,11 @@ class AssistWindow:
                         pass
         webview.start(func=go, gui="edgechromium", private_mode=False,
                       storage_path=storage_dir())
+        # The window closing returns control here at once, while the work is
+        # still noticing and tidying up: handing the nxm handler back, closing
+        # its listener. Without this wait the caller printed its summary and
+        # went on before that had happened.
+        self.finished.wait(60)
         if self.error is not None:
             raise self.error
 
@@ -156,7 +208,80 @@ class AssistWindow:
         self.closed.set()
 
     def _on_loaded(self):
+        self._hook_navigation()
         self._inject()
+
+    def _hook_navigation(self):
+        """Subscribe to the engine's NavigationStarting, once.
+
+        Reached through pywebview's Windows backend: the form it keeps per
+        window, the Edge control on it, and that control's event. A pywebview
+        that arranges those differently leaves `hooked` False, and the run
+        then relies on the registered protocol handler as before."""
+        if self.hooked or self.window is None:
+            return
+        try:
+            from webview.platforms import winforms
+            import System.Windows.Forms as WinForms          # via pythonnet
+            form = winforms.BrowserView.instances[self.window.uid]
+        except Exception as e:
+            self.hook_error = f"{type(e).__name__}: {e}"
+            return
+
+        def subscribe():
+            # On the window's own thread: the control refuses to be touched
+            # from any other, and pywebview raises its events elsewhere.
+            try:
+                control = form.browser.webview
+                core = control.CoreWebView2
+                if core is None:               # not initialised yet; the next event retries
+                    return
+                # An external scheme is not a navigation to the engine: it
+                # raises this instead, with the decision left to the host.
+                # Unhandled, a launch that did not come straight from a click
+                # - Nexus fires its link from a timer after the click - is
+                # dropped without a word, which is exactly what a person sees
+                # as 'nothing happened'.
+                core.LaunchingExternalUriScheme += self._on_external
+                control.NavigationStarting += self._on_navigating
+                self.hooked = True
+            except Exception as e:
+                self.hooked = False
+                self.hook_error = f"{type(e).__name__}: {e}"
+        try:
+            form.Invoke(WinForms.MethodInvoker(subscribe))
+        except Exception as e:
+            self.hook_error = f"{type(e).__name__}: {e}"
+
+    def _take(self, args):
+        """Keep an nxm:// link in the process: cancel whatever the engine was
+        about to do with it and hand it to the run - or, for the banner's own
+        Skip link, raise `skip`. True when it was one."""
+        try:
+            uri = str(args.Uri)
+        except Exception:
+            return False
+        if not uri.lower().startswith("nxm://"):
+            return False
+        try:
+            args.Cancel = True
+        except Exception:
+            pass
+        if uri.lower().startswith(SKIP_URI):
+            self.skip.set()
+            return True
+        if self.on_link is not None:
+            try:
+                self.on_link(uri)
+            except Exception:
+                pass
+        return True
+
+    def _on_external(self, sender, args):
+        self._take(args)
+
+    def _on_navigating(self, sender, args):
+        self._take(args)
 
     def show(self, url, banner=""):
         """Replace the page. The banner is written when the page has loaded."""

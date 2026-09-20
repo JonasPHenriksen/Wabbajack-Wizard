@@ -75,12 +75,24 @@
   engine, which Windows ships, through the pywebview library. One page at a
   time, replaced for each file, a banner across the top saying which file
   this is and how many are left, and a profile of its own under `.webview\`
-  so the Nexus login is done there once and stays inside the folder. Closing
-  the window ends the run. `ASSIST_WINDOW` turns it off, and the browser is
+  so the Nexus login is done there once and stays inside the folder. The click
+  is caught inside the window: the engine's external-scheme event is answered
+  by cancelling the `nxm://` launch and handing the link to the run, so no
+  protocol handler or prompt is involved there. Closing the window ends the
+  run, and the run waits for that to finish before summing up. The banner
+  has a **Skip this file** button for a page with nothing to click, which
+  records the file as not downloaded and moves on. `ASSIST_WINDOW`
+  turns it off, and the browser is
   the fallback wherever the engine or the library is missing;
   `--check-window` says which it would be. The build carries pywebview and
   pythonnet, and writes a `.exe.config` beside each binary so .NET will load
   them from a network share.
+- **A mod taken off Nexus is passed over at once.** Assist mode asks the API
+  which game's site serves each mod before opening its page; a mod its own
+  game reports as hidden, removed or unpublished now has no page opened for
+  it at all. It is recorded as not downloaded, with Nexus's word for why, and
+  the run goes on, instead of showing a dead page and waiting three minutes
+  for a click that cannot come.
 - **Wabbajack can live inside the folder**, in `Wabbajack\`, which is looked in
   first and is gitignored, so tools, Python, git and Wabbajack move as one.
   Wabbajack's launcher leaves every superseded version folder behind at some
@@ -119,8 +131,17 @@
   `nxm://` does not keep a stale answer, and unregistering removes the whole
   `nxm` class rather than leaving one with no command behind, which made every
   `nxm://` click fail between runs.
+- **Assist mode could open the wrong game's page, and then keep doing it.**
+  When the manifest's own game would not serve a mod, the fallback to a
+  related game accepted any mod under the same id there. Mod ids are per game
+  and dense, so a Special Edition mod removed from Nexus sent the run to old
+  Skyrim's page for an unrelated mod - "Object not found" once the file id
+  was added - and old Skyrim was then remembered as the site for every
+  Special Edition mod after it in the run. Another game is now believed only
+  when it lists the wanted file, and the manifest's own game is asked why it
+  will not serve the mod before any fallback is opened.
 
-Tests: 946 checks across 16 sandbox suites, up from 810.
+Tests: 968 checks across 16 sandbox suites, up from 810.
 
 ## 1.1.0 — 2026-09-05
 

@@ -200,6 +200,10 @@ NXM_LISTEN_HOST   = "127.0.0.1"
 NXM_PORT_FILE     = ".nxm_listener_port"   # written next to the script
 NXM_PREV_HANDLER  = ".nxm_prev_handler"    # saved previous nxm:// command
 NXM_FALLBACK_FILE = "nxm_captured.txt"     # forwarder appends here if no listener
+# The download window's Skip button is an nxm:// link under this host, so it
+# travels the same way a click does whichever path catches it.
+NXM_SKIP_PREFIX   = "nxm://wabbajackwizard/"
+SKIPPED           = object()               # _wait_click's verdict for that button
 NXM_CLICK_TIMEOUT = 180          # seconds to wait per file for a click
 
 # =======================================================================
@@ -946,6 +950,30 @@ class NexusClient:
         files = payload.get("files") if isinstance(payload, dict) else None
         return (files if isinstance(files, list) else []), "ok"
 
+    def mod_info(self, domain, mod_id):
+        """The mod's own record. Returns (record, status), status 'ok' /
+        'notfound' / 'error:<msg>'. The record's `status` field says whether
+        the page has anything on it - 'published', or 'hidden', 'removed',
+        'not_published', 'under_moderation' - and is served for a hidden or
+        removed mod when its files (403) no longer are."""
+        url = f"{NEXUS_API_BASE}/games/{domain}/mods/{mod_id}.json"
+        payload, err = self._get_json(url)
+        if err is not None:
+            code = getattr(err, "code", None)
+            if code in (404, 410):
+                return None, "notfound"
+            return None, f"error:{err}"
+        return (payload if isinstance(payload, dict) else {}), "ok"
+
+    @staticmethod
+    def _file_ids(files):
+        """The ids in a files.json listing."""
+        ids = set()
+        for f in files or []:
+            if isinstance(f, dict) and isinstance(f.get("file_id"), int):
+                ids.add(f["file_id"])
+        return ids
+
     @staticmethod
     def _file_size_bytes(entry):
         """Nexus file entries report size in a few historical fields/units."""
@@ -1312,17 +1340,32 @@ def nexus_url_domain(domain):
 
 
 def resolve_browser_domain(nexus, archive, learned):
-    """The domain whose website actually hosts this mod's page.
+    """The domain whose website actually hosts this mod's page, or None when
+    Nexus says there is no page to click.
 
     Asks the API instead of trusting the manifest. Meta gameName and
     State.GameName disagree often enough to matter - this list records
     "skyrimse" in Meta and "SkyrimSpecialEdition" in State, and only the second
     is a real site slug - and nothing in the manifest says which is right.
 
+    A game other than the manifest's own is believed only when it lists the
+    wanted file. Mod ids are per game and dense, so a Special Edition mod's id
+    is usually some unrelated old-Skyrim mod's as well, and "that game serves
+    a mod by this id" proved nothing: a mod removed from Special Edition sent
+    the run to old Skyrim's page for a stranger, and had it remember old
+    Skyrim for every Special Edition mod after it. Instead the manifest's own
+    game is asked why it will not serve the files: a mod it lists as hidden,
+    removed or unpublished has no page to click, and the caller skips it
+    rather than waiting out the click timeout.
+
     The domain that worked last time is tried first, so a list normally costs
-    one API call per mod. Returns (domain, note)."""
+    one API call per mod. Returns (domain, note); (None, reason) when the mod
+    is gone."""
     primary = (nexus_domain(archive) or "").lower()
-    mod_id, _fid = nexus_ids(archive)
+    home = nexus_url_domain(primary)           # the manifest's game, as the site names it
+    mod_id, file_id = nexus_ids(archive)
+    if not mod_id:
+        return home, None
     order = []
     if learned.get(primary):
         order.append(learned[primary])
@@ -1330,20 +1373,36 @@ def resolve_browser_domain(nexus, archive, learned):
         cand = nexus_url_domain(d)
         if cand not in order:
             order.append(cand)
+
+    def accept(cand):
+        note = None
+        if cand != primary and learned.get(primary) != cand:
+            note = "manifest records domain '%s'; the site uses '%s'" % (primary, cand)
+        learned[primary] = cand
+        return cand, note
+
+    serves_mod = []                 # other games serving a mod by this id, not this file
     for cand in order:
-        if not mod_id:
-            break
-        _files, status = nexus.mod_files(cand, mod_id)
+        files, status = nexus.mod_files(cand, mod_id)
         time.sleep(REQUEST_PAUSE_S)
-        if status == "ok":
-            note = None
-            if cand != primary and learned.get(primary) != cand:
-                note = ("manifest records domain '%s'; the site uses '%s'"
-                        % (primary, cand))
-            learned[primary] = cand
-            return cand, note
-    return nexus_url_domain(primary), ("no Nexus domain served mod %s; this "
-                                       "page link may 404" % mod_id)
+        if status != "ok":
+            continue
+        if cand == home or file_id in NexusClient._file_ids(files):
+            return accept(cand)
+        serves_mod.append(cand)
+    record, status = nexus.mod_info(home, mod_id)
+    time.sleep(REQUEST_PAUSE_S)
+    state = (record or {}).get("status") if status == "ok" else None
+    if isinstance(state, str) and state and state != "published":
+        return None, ("Nexus lists mod %s as %s on %s; there is no page to click"
+                      % (mod_id, state.replace("_", " "), home))
+    if serves_mod:
+        # Not learned: a stranger under the same id is the likelier reading,
+        # and the next mod is measured on its own.
+        return serves_mod[0], ("manifest records domain '%s'; '%s' serves mod %s but does "
+                               "not list file %s - the page may not offer it"
+                               % (primary, serves_mod[0], mod_id, file_id))
+    return home, "no Nexus domain served mod %s; this page link may 404" % mod_id
 
 
 def nexus_file_page(domain, mod_id, file_id):
@@ -2059,18 +2118,26 @@ class _BrowserOpener:
             return False
 
 
-def _wait_click(listener, timeout, stop=None):
-    """One captured nxm URL within `timeout` seconds, or None.
+def _wait_click(listener, timeout, stop=None, skip=None):
+    """One captured nxm URL within `timeout` seconds; SKIPPED when the
+    window's Skip button was pressed (`skip` is cleared for the next page);
+    None on the timeout or on `stop`.
 
-    Wakes every two seconds to notice `stop`: the window being closed must end
-    the wait at once, not after the three minutes a click is given."""
+    Wakes every two seconds to notice `stop` and `skip`: the window being
+    closed must end the wait at once, not after the three minutes a click is
+    given."""
     deadline = time.time() + timeout
     while True:
+        if skip is not None and skip.is_set():
+            skip.clear()
+            return SKIPPED
         left = deadline - time.time()
         if left <= 0 or (stop is not None and stop.is_set()):
             return None
         url = listener.wait(min(2.0, left))
         if url:
+            if url.strip().lower().startswith(NXM_SKIP_PREFIX):
+                return SKIPPED          # the button, by way of the protocol handler
             return url
 
 
@@ -2109,6 +2176,10 @@ def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
         return
 
     listener = NxmListener(script_dir)
+    if hasattr(opener, "on_link"):
+        # The window catches the nxm:// link itself and hands it here; the
+        # registered handler above is only the fallback should it not.
+        opener.on_link = lambda uri: forward_nxm(uri, script_dir)
     LOG.info("Capture listener on %s:%d. For each file, the Nexus download page opens - "
              "click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
     LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
@@ -2116,6 +2187,7 @@ def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
     if CLICK_AHEAD:
         worker = _AssistDownloader(dest_dir, results, fetched)
         LOG.info("Click-ahead is on: the next page opens while the current file downloads.")
+    skip = getattr(opener, "skip", None)      # the window's Skip button; the browser has none
     try:
         pending = list(items)
         for idx, a in enumerate(pending, 1):
@@ -2145,20 +2217,33 @@ def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
                 break
             if worker is not None:
                 worker.wait_for_room()
+            LOG.info("\n[%d/%d] %s", idx, len(pending), a["name"])
             # Confirm the domain against the API rather than trusting the
             # manifest's Meta gameName: this list records "skyrimse", which the
             # website does not serve, and every page then opens on "mod could
-            # not be found". Cached, so it costs about one call per mod.
+            # not be found". Cached, so it costs about one call per mod. A mod
+            # Nexus has taken down has no page worth opening: recorded and
+            # passed over, not waited out.
             domain, dom_note = resolve_browser_domain(nexus, a, learned_domains)
+            if domain is None:
+                LOG.warning("  [SKIP] %s", dom_note)
+                _tally(results, False, a["name"], dom_note)
+                continue
             page = nexus_file_page(domain, ids[0], ids[1])
-            LOG.info("\n[%d/%d] %s", idx, len(pending), a["name"])
             if dom_note:
                 LOG.info("  [NOTE] %s", dom_note)
             LOG.info("  Opening: %s", page)
+            if skip is not None:
+                skip.clear()                    # a press meant for the last page is spent
             opener.show(page, f"Wabbajack Wizard  ·  file {idx} of {len(pending)}  ·  "
                               f"{a['name']}  ·  click Slow download")
-            LOG.info("  Waiting up to %ds for your click... (Ctrl+C to stop)", NXM_CLICK_TIMEOUT)
-            url = _wait_click(listener, NXM_CLICK_TIMEOUT, opener.closed)
+            LOG.info("  Waiting up to %ds for your click... (Ctrl+C to stop%s)", NXM_CLICK_TIMEOUT,
+                     "; Skip in the window's banner moves on" if skip is not None else "")
+            url = _wait_click(listener, NXM_CLICK_TIMEOUT, opener.closed, skip)
+            if url is SKIPPED:
+                LOG.warning("  [SKIP] You skipped %s; moving on.", a["name"])
+                _tally(results, False, a["name"], "skipped in the download window")
+                continue
             if not url:
                 if opener.closed.is_set():
                     continue                    # the loop's head says why, and stops

@@ -422,6 +422,25 @@ try:
           len(fw.shown) == 1 and time.time() - t0 < 8, f"{time.time() - t0:.1f}s")
     check("  and the listener was cleaned up", not os.path.exists(os.path.join(TMP, D.NXM_PORT_FILE)))
 
+    print("\n      a mod Nexus says is gone is passed over at once, not waited out")
+    GONE = "Nexus lists mod 2 as removed on skyrimspecialedition; there is no page to click"
+    D.resolve_browser_domain = lambda nexus, a, learned: (
+        (None, GONE) if a["name"] == "nx2.bin" else ("skyrimspecialedition", None))
+    events.clear()
+    opened.clear()
+    for n in ("nx1.bin", "nx2.bin"):
+        dest(n)
+    nx_items[:] = [nx_item("nx1.bin", "/ok", 1, len(BODY)), nx_item("nx2.bin", "/ok", 2, len(BODY))]
+    D.CLICK_AHEAD = False
+    res = {"done": 0, "failed": 0, "failures": []}
+    t0 = time.time()
+    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args)
+    check("the file that is there landed; the gone one is a recorded failure carrying Nexus's verdict",
+          res["done"] == 1 and res["failed"] == 1 and ("nx2.bin", GONE) in res["failures"], str(res))
+    check("  no page was opened for it, and no click was waited for",
+          len(opened) == 1 and time.time() - t0 < 8, f"{len(opened)} page(s), {time.time() - t0:.1f}s")
+    D.resolve_browser_domain = lambda nexus, a, learned: ("skyrimspecialedition", None)
+
     print("\n      the wait for a click ends the moment the window is closed")
     lst = D.NxmListener(TMP)
     stop = threading.Event()
@@ -433,6 +452,49 @@ try:
         lst.close()
     check("no click and a closed window: None, promptly, not after the timeout",
           got is None and time.time() - t0 < 5, f"{time.time() - t0:.1f}s")
+
+    print("\n      the window's Skip button ends the wait without a click")
+    skip = threading.Event()
+    threading.Timer(0.3, skip.set).start()
+    lst = D.NxmListener(TMP)
+    t0 = time.time()
+    try:
+        got = D._wait_click(lst, 30, None, skip)
+    finally:
+        lst.close()
+    check("the skip flag: the SKIPPED verdict, promptly, and the flag spent for the next page",
+          got is D.SKIPPED and time.time() - t0 < 5 and not skip.is_set(), f"{time.time() - t0:.1f}s")
+    lst = D.NxmListener(TMP)
+    try:
+        threading.Timer(0.2, lambda: D.forward_nxm("nxm://wabbajackwizard/skip", TMP)).start()
+        got = D._wait_click(lst, 30, None, None)
+    finally:
+        lst.close()
+    check("  the same button by way of the protocol handler is the same verdict", got is D.SKIPPED, repr(got))
+
+    import wj_assistwin as AW
+    caught = []
+    w = AW.AssistWindow(on_link=caught.append)
+
+    class EngineArgs:
+        def __init__(self, uri):
+            self.Uri = uri
+            self.Cancel = False
+
+    ev = EngineArgs(AW.SKIP_URI)
+    took = w._take(ev)
+    check("in the window, the Skip link is cancelled in the engine and raises the flag, and is not a click",
+          took and ev.Cancel and w.skip.is_set() and not caught)
+    ev = EngineArgs("nxm://skyrimspecialedition/mods/1/files/2?key=k&expires=1")
+    w._take(ev)
+    check("  a real nxm link is cancelled in the engine and handed to the run",
+          ev.Cancel and caught == ["nxm://skyrimspecialedition/mods/1/files/2?key=k&expires=1"], str(caught))
+    ev = EngineArgs("https://www.nexusmods.com/skyrimspecialedition/mods/1")
+    check("  an ordinary page is neither", not w._take(ev) and not ev.Cancel)
+    check("  the banner offers the button, under the host the downloader knows",
+          "Skip this file" in AW.BANNER_JS and AW.SKIP_URI in AW.BANNER_JS
+          and AW.SKIP_URI.startswith(D.NXM_SKIP_PREFIX))
+    check("  and the banner text still formats in", "= \"file 3 of 9\";" in (AW.BANNER_JS % '"file 3 of 9"'))
 finally:
     (D.webbrowser, D.register_nxm, D.unregister_nxm, D.resolve_browser_domain,
      D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW) = saved_assist
@@ -485,6 +547,93 @@ try:
     check("  and never the interpreter: Firefox refuses a python.exe handler", "python" not in cmd.lower())
 finally:
     D.wj_paths.frozen, D.wj_paths.app_dir = saved_paths
+
+# ---------------------------------------------------------------- 2.14
+print("\n 2.14  which game's page to open for a Nexus mod, and when there is none to click")
+
+
+class ScriptedNexus:
+    """A Nexus whose answers are written down:
+    {(domain, mod_id): (files status, [file ids], mod status or None)}."""
+    def __init__(self, table):
+        self.table = table
+        self.calls = []
+
+    def mod_files(self, domain, mod_id):
+        self.calls.append(("files", domain, mod_id))
+        status, ids, _ = self.table.get((domain, mod_id), ("notfound", [], None))
+        return ([{"file_id": i} for i in ids] if status == "ok" else None), status
+
+    def mod_info(self, domain, mod_id):
+        self.calls.append(("info", domain, mod_id))
+        _, _, state = self.table.get((domain, mod_id), (None, None, None))
+        return ({"status": state}, "ok") if state else (None, "notfound")
+
+
+def se_item(mod_id, file_id, game="skyrimse"):
+    return {"name": f"mod{mod_id}", "meta": {"gamename": game, "modid": str(mod_id),
+                                            "fileid": str(file_id)}, "state": {}}
+
+
+saved_pause = D.REQUEST_PAUSE_S
+D.REQUEST_PAUSE_S = 0
+try:
+    # The case from the Alpyne run: a Special Edition mod removed from Nexus,
+    # while old Skyrim serves an unrelated mod under the same id.
+    nx = ScriptedNexus({("skyrimspecialedition", 120897): ("error:HTTP Error 403: Forbidden", [], "removed"),
+                        ("skyrim", 120897): ("ok", [1000380757], "published")})
+    learned = {}
+    dom, note = D.resolve_browser_domain(nx, se_item(120897, 539400), learned)
+    check("a mod removed from its own game: nothing to click, and old Skyrim's stranger is not taken for it",
+          dom is None and "removed" in (note or "") and "120897" in note, str((dom, note)))
+    check("  and no domain was learned from it", not learned, str(learned))
+    check("  the verdict came from the mod's own game", ("info", "skyrimspecialedition", 120897) in nx.calls,
+          str(nx.calls))
+
+    nx = ScriptedNexus({("skyrimspecialedition", 5): ("ok", [50], "published"),
+                        ("skyrim", 5): ("ok", [7], "published")})
+    learned = {"skyrimse": "skyrim"}             # what the old code would have remembered
+    dom, note = D.resolve_browser_domain(nx, se_item(5, 50), learned)
+    check("a remembered other game is not believed on the mod id alone: the file must be listed there",
+          dom == "skyrimspecialedition", str((dom, note, nx.calls)))
+    check("  and the memory is corrected", learned.get("skyrimse") == "skyrimspecialedition", str(learned))
+
+    en = se_item(9, 90, game="enderalspecialedition")
+    nx = ScriptedNexus({("skyrimspecialedition", 9): ("ok", [90], "published")})
+    learned = {}
+    dom, note = D.resolve_browser_domain(nx, en, learned)
+    check("a file really hosted on the parent game's page: that game, with a note, and remembered",
+          dom == "skyrimspecialedition" and "the site uses" in (note or "")
+          and learned.get("enderalspecialedition") == "skyrimspecialedition", str((dom, note, learned)))
+    dom, note = D.resolve_browser_domain(nx, se_item(9, 90, game="enderalspecialedition"), learned)
+    check("  and the second time without the note", dom == "skyrimspecialedition" and note is None, str(note))
+
+    nx = ScriptedNexus({("skyrimspecialedition", 5): ("ok", [50], "published")})
+    D.resolve_browser_domain(nx, se_item(5, 50), {})
+    check("the usual mod costs one API call", nx.calls == [("files", "skyrimspecialedition", 5)], str(nx.calls))
+
+    nx = ScriptedNexus({("skyrimspecialedition", 6): ("error:HTTP Error 403: Forbidden", [], "hidden")})
+    dom, note = D.resolve_browser_domain(nx, se_item(6, 60), {})
+    check("a hidden mod is nothing to click either", dom is None and "hidden" in (note or ""), str((dom, note)))
+    nx = ScriptedNexus({("skyrimspecialedition", 6): ("notfound", [], "not_published")})
+    dom, note = D.resolve_browser_domain(nx, se_item(6, 60), {})
+    check("  so is an unpublished one, said in words", dom is None and "not published" in (note or ""),
+          str((dom, note)))
+
+    nx = ScriptedNexus({("skyrim", 8): ("ok", [3], "published")})
+    dom, note = D.resolve_browser_domain(nx, se_item(8, 80), {})
+    check("no verdict from its own game and another serving only the id: that page, with the doubt said",
+          dom == "skyrim" and "does not list file 80" in (note or ""), str((dom, note)))
+    nx = ScriptedNexus({})
+    dom, note = D.resolve_browser_domain(nx, se_item(7, 70), {})
+    check("a mod no game serves: the manifest's own page, with the 404 warning",
+          dom == "skyrimspecialedition" and "404" in (note or ""), str((dom, note)))
+    nx = ScriptedNexus({})
+    dom, note = D.resolve_browser_domain(nx, {"name": "x", "meta": {"gamename": "skyrimse"}, "state": {}}, {})
+    check("no mod id: the manifest's game, and no API call", dom == "skyrimspecialedition" and not nx.calls,
+          str((dom, nx.calls)))
+finally:
+    D.REQUEST_PAUSE_S = saved_pause
 
 srv.shutdown()
 sys.exit(summary())
