@@ -92,7 +92,12 @@
   game reports as hidden, removed or unpublished now has no page opened for
   it at all. It is recorded as not downloaded, with Nexus's word for why, and
   the run goes on, instead of showing a dead page and waiting three minutes
-  for a click that cannot come.
+  for a click that cannot come. The other dead page - the mod is up but the
+  author has replaced the pinned file since the list was built - is caught
+  from the same listing: the page opened is the current file's of the same
+  name or size, the hash check after the download says whether it was the
+  same bytes, and a file nothing matches is recorded and passed over too.
+  The listing is asked for once per mod and remembered for the run.
 - **Wabbajack can live inside the folder**, in `Wabbajack\`, which is looked in
   first and is gitignored, so tools, Python, git and Wabbajack move as one.
   Wabbajack's launcher leaves every superseded version folder behind at some
@@ -141,7 +146,7 @@
   when it lists the wanted file, and the manifest's own game is asked why it
   will not serve the mod before any fallback is opened.
 
-Tests: 968 checks across 16 sandbox suites, up from 810.
+Tests: 970 checks across 16 sandbox suites, up from 810.
 
 ## 1.1.0 — 2026-09-05
 

@@ -860,6 +860,10 @@ class NexusClient:
         self.hourly_remaining = None
         self.is_premium = None
         self.user_name = None
+        # files.json answers by (domain, mod_id): asked once per mod, read
+        # several times - to place the mod, to see whether the pinned file is
+        # still offered, to find its replacement.
+        self._files_cache = {}
 
     def _headers(self):
         return {
@@ -939,16 +943,22 @@ class NexusClient:
     def mod_files(self, domain, mod_id):
         """List a mod's files. Returns (files_list, status) where status is
         'ok' / 'notfound' / 'error:<msg>'. Used to recover a file id that the
-        manifest pinned but Nexus has since purged (author updated the mod)."""
+        manifest pinned but Nexus has since purged (author updated the mod).
+        A definite answer is remembered for the run; an error is asked again."""
+        key = (domain, mod_id)
+        if key in self._files_cache:
+            return self._files_cache[key]
         url = f"{NEXUS_API_BASE}/games/{domain}/mods/{mod_id}/files.json"
         payload, err = self._get_json(url)
         if err is not None:
             code = getattr(err, "code", None)
             if code in (404, 410):
-                return None, "notfound"
+                self._files_cache[key] = (None, "notfound")
+                return self._files_cache[key]
             return None, f"error:{err}"
         files = payload.get("files") if isinstance(payload, dict) else None
-        return (files if isinstance(files, list) else []), "ok"
+        self._files_cache[key] = ((files if isinstance(files, list) else []), "ok")
+        return self._files_cache[key]
 
     def mod_info(self, domain, mod_id):
         """The mod's own record. Returns (record, status), status 'ok' /
@@ -1980,12 +1990,17 @@ def _resolve_nxm(link, nexus, by_ids, results, fetched):
     LOG.info("[nexus] %s  (%s)", a["name"],
              human_bytes(a["size"]) if a["size"] else "size unknown")
     try:
-        # The click pins this exact file id, so we don't substitute file ids
-        # here; we still let the domain fall back (the nxm netloc is sometimes
-        # the target game rather than the file's host game).
+        # The click pins the file id: the key in the link is good for that id
+        # alone, so no substitution here - and a page opened for a replacement
+        # file (_assist_loop, when the pinned one is gone) yields a click for
+        # the replacement's id, which is then the one asked for. The domain
+        # may still fall back (the nxm netloc is sometimes the target game
+        # rather than the file's host game).
         a_with_domain = dict(a)
         a_with_domain["meta"] = dict(a.get("meta") or {})
         a_with_domain["meta"]["gamename"] = link["domain"]
+        a_with_domain["meta"]["modid"] = str(link["mod_id"])
+        a_with_domain["meta"]["fileid"] = str(link["file_id"])
         url, note = nexus.resolve_link(
             a_with_domain, key=link["key"], expires=link["expires"],
             allow_fileid_fallback=False)
@@ -2229,7 +2244,29 @@ def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
                 LOG.warning("  [SKIP] %s", dom_note)
                 _tally(results, False, a["name"], dom_note)
                 continue
-            page = nexus_file_page(domain, ids[0], ids[1])
+            page_ids = ids
+            files, fstatus = nexus.mod_files(domain, ids[0])    # remembered from the resolve
+            if fstatus == "ok" and ids[1] not in NexusClient._file_ids(files):
+                # The author has updated the mod and taken this file down
+                # since the list was built: its page would show the mod with
+                # no button for this file, the other kind of dead page. A
+                # current file of the same name (or size) is the likelier
+                # same bytes, so its page is opened instead, and the hash
+                # check after the download is the judge of that.
+                new_fid = nexus.recover_file_id(domain, ids[0], a)
+                if not new_fid:
+                    reason = ("Nexus no longer offers file %s of mod %s - the mod was updated "
+                              "since the list was built - and no current file matches it; "
+                              "there is no page to click" % (ids[1], ids[0]))
+                    LOG.warning("  [SKIP] %s", reason)
+                    _tally(results, False, a["name"], reason)
+                    continue
+                LOG.info("  [NOTE] file %s is no longer offered; opening its replacement %s, which "
+                         "matches by name or size (the hash is checked after the download)",
+                         ids[1], new_fid)
+                page_ids = (ids[0], new_fid)
+                by_ids[page_ids] = a                # the click will carry the replacement's id
+            page = nexus_file_page(domain, page_ids[0], page_ids[1])
             if dom_note:
                 LOG.info("  [NOTE] %s", dom_note)
             LOG.info("  Opening: %s", page)

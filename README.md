@@ -576,7 +576,11 @@ some unrelated old-Skyrim mod's as well, and a page for a stranger is what that
 used to open. A mod its own game reports as hidden, removed or unpublished has
 no page to click; it is recorded as not downloaded, with Nexus's word for why,
 and passed over at once instead of waiting out the three minutes a click is
-given.
+given. A mod that is still up but no longer offers the pinned file - the author
+has updated it since the list was built - gets the page of its current file of
+the same name or size instead, and the hash check after the download decides
+whether those were the same bytes; when nothing matches, the file is recorded
+and passed over the same way.
 
 ### The download window
 
@@ -797,7 +801,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 968 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 970 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

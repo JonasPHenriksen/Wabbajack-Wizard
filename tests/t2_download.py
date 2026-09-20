@@ -9,6 +9,7 @@ BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 import base64
 import io
 import os
+import re
 import socket
 import struct
 import sys
@@ -316,6 +317,23 @@ print("\n 2.11  assist mode with click-ahead: the next page opens while the file
 
 class FakeNexus:
     daily_remaining = None
+    gone = {}          # (mod_id, file_id) the author has taken down -> replacement id, or None
+
+    def mod_files(self, domain, mod_id):
+        ids = []
+        for a in nx_items:
+            m, f = D.nexus_ids(a)
+            if m != mod_id:
+                continue
+            if (m, f) in self.gone:
+                if self.gone[(m, f)]:
+                    ids.append(self.gone[(m, f)])
+            else:
+                ids.append(f)
+        return [{"file_id": i} for i in ids], "ok"
+
+    def recover_file_id(self, domain, mod_id, archive):
+        return self.gone.get(D.nexus_ids(archive))
 
     def resolve_link(self, a, key=None, expires=None, forced_domain=None,
                      allow_fileid_fallback=True):
@@ -330,15 +348,18 @@ def nx_item(name, path, mod_id, size):
 
 
 opened = []
+pages = []
 nx_items = []
 
 
 def fake_open(page):
     """The browser: a moment later, 'you' click, and the handler forwards the
-    nxm link to the listener exactly as the real one does."""
+    nxm link to the listener exactly as the real one does - for the file the
+    page is for."""
     opened.append(time.time())
-    a = nx_items[len(opened) - 1]
-    mod, fid = D.nexus_ids(a)
+    pages.append(page)
+    m = re.search(r"mods/(\d+)\?tab=files&file_id=(\d+)", page)
+    mod, fid = int(m.group(1)), int(m.group(2))
 
     def click():
         time.sleep(0.2)
@@ -440,6 +461,26 @@ try:
     check("  no page was opened for it, and no click was waited for",
           len(opened) == 1 and time.time() - t0 < 8, f"{len(opened)} page(s), {time.time() - t0:.1f}s")
     D.resolve_browser_domain = lambda nexus, a, learned: ("skyrimspecialedition", None)
+
+    print("\n      a pinned file the author has since replaced: its replacement's page, or nothing to click")
+    events.clear()
+    opened.clear()
+    pages.clear()
+    for n in ("nx1.bin", "nx2.bin"):
+        dest(n)
+    nx_items[:] = [nx_item("nx1.bin", "/ok", 1, len(BODY)), nx_item("nx2.bin", "/ok", 2, len(BODY))]
+    fn = FakeNexus()
+    fn.gone = {(1, 10): 77, (2, 20): None}      # nx1 has a same-name replacement, nx2 has nothing
+    D.CLICK_AHEAD = False
+    res = {"done": 0, "failed": 0, "failures": []}
+    t0 = time.time()
+    D.download_nexus_assist(nx_items, fn, TMP, res, TMP, args)
+    check("the replaced file: its replacement's page was opened, and the click there landed the file",
+          len(pages) == 1 and "mods/1?tab=files&file_id=77" in pages[0] and res["done"] == 1,
+          str((pages, res)))
+    check("  the file with no replacement was recorded with the reason, and not waited for",
+          res["failed"] == 1 and any("no longer offers file 20 of mod 2" in (r or "") for _n, r in res["failures"])
+          and time.time() - t0 < 8, str((res, f"{time.time() - t0:.1f}s")))
 
     print("\n      the wait for a click ends the moment the window is closed")
     lst = D.NxmListener(TMP)
