@@ -391,5 +391,53 @@ finally:
      D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT) = saved_assist
     D.download_one = real_one
 
+# ---------------------------------------------------------------- 2.12
+print("\n 2.12  a progress line that cannot be written must not fail the download")
+
+
+class BrokenPipe:
+    """stdout after the window that was reading it has gone."""
+    def write(self, s):
+        raise OSError(22, "Invalid argument")
+
+    def flush(self):
+        raise OSError(22, "Invalid argument")
+
+
+real_stdout, D._PROGRESS_BROKEN = sys.stdout, False
+sys.stdout = BrokenPipe()
+try:
+    p = dest("nostdout.bin")
+    ok = D.stream_download(BASE + "/ok", p, expected_size=len(BODY))
+finally:
+    sys.stdout = real_stdout
+check("the download completes although every progress write raises",
+      ok is True and os.path.getsize(p) == len(BODY))
+check("  and progress output is switched off for the rest of the run", D._PROGRESS_BROKEN is True)
+D._PROGRESS_BROKEN = False
+
+# ---------------------------------------------------------------- 2.13
+print("\n 2.13  which program Windows is told to run for an nxm:// click")
+fake_dir = os.path.join(TMP, "handler-home")
+os.makedirs(fake_dir, exist_ok=True)
+for leftover in os.listdir(fake_dir):                 # from an earlier run
+    os.remove(os.path.join(fake_dir, leftover))
+saved_paths = (D.wj_paths.frozen, D.wj_paths.app_dir)
+D.wj_paths.frozen = lambda: False
+D.wj_paths.app_dir = lambda f: fake_dir
+try:
+    cmd = D.nxm_handler_command()
+    check("from source with no build beside the scripts, the interpreter runs the script",
+          sys.executable in cmd and "wj_downloader" in cmd and '--nxm "%1"' in cmd, cmd)
+    exe = os.path.join(fake_dir, D.wj_paths.CONSOLE_EXE)
+    io.open(exe, "wb").write(b"MZ")
+    cmd = D.nxm_handler_command()
+    check("with a build beside the scripts, the console exe is the handler, as the build itself uses",
+          cmd.startswith('"' + exe + '"') and D.wj_paths.STAGE_FLAG + "wj_downloader" in cmd
+          and '--nxm "%1"' in cmd, cmd)
+    check("  and never the interpreter: Firefox refuses a python.exe handler", "python" not in cmd.lower())
+finally:
+    D.wj_paths.frozen, D.wj_paths.app_dir = saved_paths
+
 srv.shutdown()
 sys.exit(summary())

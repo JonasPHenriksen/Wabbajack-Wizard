@@ -567,6 +567,13 @@ turn, and waits for you to click *Mod manager download*. One tab per file, in
 your normal browser. The handler is always handed back on exit, including
 Ctrl+C — without that, Wabbajack's own downloads keep landing here instead.
 
+The program registered as the handler is the console exe, from a build and from
+the scripts alike whenever a build sits beside them. Firefox will not launch a
+protocol handler whose program is `python.exe`: the click ends on Windows' "no
+app associated" dialog, though Windows runs the very same command from a shell.
+Running from the scripts with no build present falls back to the interpreter,
+and then Firefox is not the browser to click in.
+
 The page URL is confirmed against the API rather than taken from the manifest.
 Manifests disagree with themselves: this collection records `skyrimse` in a
 file's `Meta gameName` and `SkyrimSpecialEdition` in its `State.GameName`, and
@@ -750,7 +757,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 936 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 941 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

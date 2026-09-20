@@ -1089,10 +1089,21 @@ def nxm_handler_command():
 
     Frozen there is no script to hand an interpreter, so the console binary is
     told to be the downloader instead. The --nxm flag lands in the same place
-    either way, and so does the URL Windows substitutes for %1."""
+    either way, and so does the URL Windows substitutes for %1.
+
+    From source the same binary is used whenever a build sits beside the
+    scripts, and the interpreter only when none does. Firefox will not launch
+    a protocol handler whose program is python.exe: the click ends on
+    Windows' 'no app associated' dialog, although Windows itself runs the
+    very same command from a shell. The exe is launched without complaint,
+    and all the handler does is forward the link to the run that is waiting
+    for it, which every build has done the same way."""
     if wj_paths.frozen():
         return (f'"{wj_paths.console_exe()}" {wj_paths.STAGE_FLAG}wj_downloader'
                 f' --nxm "%1"')
+    built = os.path.join(wj_paths.app_dir(__file__), wj_paths.CONSOLE_EXE)
+    if os.path.isfile(built):
+        return f'"{built}" {wj_paths.STAGE_FLAG}wj_downloader --nxm "%1"'
     exe, script = _python_launcher()
     return f'"{exe}" "{script}" --nxm "%1"'
 
@@ -1134,10 +1145,47 @@ def register_nxm(script_dir):
     except OSError as e:
         LOG.error("[ERROR] Could not register nxm handler: %s", e)
         return False
-    LOG.info("[OK] Registered this script as the nxm:// handler.")
-    if prev:
+    _associations_changed()
+    LOG.info("[OK] Registered this script as the nxm:// handler: %s", ours)
+    if prev and os.path.normcase(prev.strip()) != os.path.normcase(ours.strip()):
         LOG.info("     Previous handler saved; --unregister-nxm restores it.")
     return True
+
+
+def _associations_changed():
+    """Tell the shell the protocol associations changed.
+
+    Explorer, and every process that asked the shell about a protocol, keeps
+    what it learnt in a cache that only this notification flushes. Without
+    it a browser that had already asked about nxm:// keeps its old answer -
+    'no handler' - and a click lands on Windows' 'no app associated' dialog
+    although the registry is right. Harmless anywhere it cannot run."""
+    try:
+        import ctypes
+        # SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x1000, None, None)
+    except (OSError, AttributeError):
+        pass
+
+
+def _delete_key_tree(root, path):
+    """Remove a registry key and everything under it. winreg deletes one
+    key at a time, and only when it has no subkeys."""
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
+            subs = []
+            i = 0
+            while True:
+                try:
+                    subs.append(winreg.EnumKey(k, i))
+                    i += 1
+                except OSError:
+                    break
+        for s in subs:
+            _delete_key_tree(root, path + "\\" + s)
+        winreg.DeleteKey(root, path)
+    except OSError:
+        pass
 
 
 def unregister_nxm(script_dir):
@@ -1158,17 +1206,19 @@ def unregister_nxm(script_dir):
                 winreg.SetValueEx(k, None, 0, winreg.REG_SZ, prev)
             LOG.info("[OK] Restored the previous nxm:// handler.")
         else:
-            # No prior handler recorded -> remove our command key.
-            try:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, cmd_key)
-            except OSError:
-                pass
+            # No prior handler recorded -> remove the whole class, not only
+            # the command under it. A class that says 'URL Protocol' but has
+            # no command is a registered protocol with nothing to run, and
+            # every nxm:// click then meets Windows' 'no app associated'
+            # dialog until something registers again.
+            _delete_key_tree(winreg.HKEY_CURRENT_USER, r"Software\Classes\nxm")
             LOG.info("[OK] Removed this script's nxm:// handler "
                      "(no previous handler was recorded; re-run your mod manager "
                      "to re-register if needed).")
     except OSError as e:
         LOG.error("[ERROR] Could not restore nxm handler: %s", e)
         return False
+    _associations_changed()
     return True
 
 
@@ -1407,22 +1457,20 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
                         last_print = now
                         if total:
                             pct = downloaded * 100 / total
-                            sys.stdout.write(
+                            say_progress(
                                 f"\r    {pct:5.1f}%  {human_bytes(downloaded)} / {human_bytes(total)}   ")
                         else:
-                            sys.stdout.write(f"\r    {human_bytes(downloaded)}   ")
-                        sys.stdout.flush()
+                            say_progress(f"\r    {human_bytes(downloaded)}   ")
         except (OSError, urllib.error.URLError, TimeoutError,
                 http.client.IncompleteRead, http.client.HTTPException) as e:
             if not quiet:
-                sys.stdout.write("\n")
+                say_progress("\n")
             LOG.warning("  [WARN] Transfer interrupted for %s: %s (will resume)",
                         os.path.basename(dest), e)
             return False
 
     if not quiet:
-        sys.stdout.write("\r" + " " * 60 + "\r")
-        sys.stdout.flush()
+        say_progress("\r" + " " * 60 + "\r")
 
     # A connection that closes cleanly part-way through looks exactly like a
     # finished download: read() returns b"" and nothing raises. Without this
@@ -1458,6 +1506,29 @@ def write_meta(dest, meta_text):
             f.write(meta_text if meta_text.endswith("\n") else meta_text + "\n")
     except OSError as e:
         LOG.warning("  [WARN] Could not write .meta for %s: %s", os.path.basename(dest), e)
+
+
+_PROGRESS_BROKEN = False
+
+
+def say_progress(text):
+    """Write a progress line to stdout, and never let that fail a download.
+
+    Under the window, stdout is a pipe the window reads. If the window is
+    closed while a download runs, the child lives on but every write to that
+    pipe raises EINVAL - and the write sat inside the transfer loop, so each
+    chunk's progress line was read as a broken transfer, retried four times,
+    and given up on: every file after the window closed 'failed' although
+    the network was fine. Progress is decoration; the first failure switches
+    it off for the rest of the run and the bytes keep flowing."""
+    global _PROGRESS_BROKEN
+    if _PROGRESS_BROKEN:
+        return
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except (OSError, ValueError, AttributeError):
+        _PROGRESS_BROKEN = True
 
 
 # The results dict is shared by every download of a run. With several files
@@ -1761,8 +1832,7 @@ class _DirectPool:
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
             if self.printed:
-                sys.stdout.write("\r" + " " * 70 + "\r")
-                sys.stdout.flush()
+                say_progress("\r" + " " * 70 + "\r")
 
     def _reap(self, timeout):
         """Collect whatever finished, then refresh the pool's progress line."""
@@ -1795,9 +1865,8 @@ class _DirectPool:
         self.last_print = now
         pct = (100.0 * self.small_done / self.small_total) if self.small_total else 0.0
         rate = self.small_bytes_done / max(0.1, now - self.started) / (1 << 20)
-        sys.stdout.write(f"\r    {pct:5.1f}%  {self.small_done}/{self.small_total} small "
-                         f"file(s), {in_flight} in flight, {rate:.1f} MB/s   ")
-        sys.stdout.flush()
+        say_progress(f"\r    {pct:5.1f}%  {self.small_done}/{self.small_total} small "
+                     f"file(s), {in_flight} in flight, {rate:.1f} MB/s   ")
         self.printed = True
 
 

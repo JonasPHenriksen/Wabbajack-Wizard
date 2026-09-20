@@ -29,6 +29,7 @@ starting over. The sidecar is removed on success.
 """
 
 import os
+import sys
 import io
 import json
 import gzip
@@ -66,6 +67,23 @@ except ImportError:                     # usable on its own, with a plain name
 HTTP_TIMEOUT = 120
 PART_RETRIES = 4
 DEFAULT_WORKERS = 4
+
+_PROGRESS_BROKEN = False
+
+
+def say_progress(text):
+    """A progress line on stdout that can never fail the download. Under the
+    window stdout is a pipe; once the window is closed every write to it
+    raises, and a raise here used to end a multi-gigabyte transfer that was
+    otherwise fine. The first failure switches progress off for the run."""
+    global _PROGRESS_BROKEN
+    if _PROGRESS_BROKEN:
+        return
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except (OSError, ValueError, AttributeError):
+        _PROGRESS_BROKEN = True
 
 
 # ----------------------------------------------------------------------
@@ -375,17 +393,16 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
                 if progress and total_size:
                     pct = written * 100 / total_size
                     rate = written / max(0.1, time.time() - started) / (1 << 20)
-                    print(f"\r    {pct:5.1f}%  {written / (1 << 20):.0f}/"
-                          f"{total_size / (1 << 20):.0f} MiB  "
-                          f"{len(done)}/{n_parts} parts  {rate:.1f} MiB/s   ",
-                          end="", flush=True)
+                    say_progress(f"\r    {pct:5.1f}%  {written / (1 << 20):.0f}/"
+                                 f"{total_size / (1 << 20):.0f} MiB  "
+                                 f"{len(done)}/{n_parts} parts  {rate:.1f} MiB/s   ")
     finally:
         try:
             fh.close()
         except OSError:
             pass
         if progress:
-            print("\r" + " " * 78 + "\r", end="", flush=True)
+            say_progress("\r" + " " * 78 + "\r")
 
     _save_sidecar(dest, base, total_size, done)
 

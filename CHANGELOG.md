@@ -90,8 +90,25 @@
 
 - The Settings form outgrew the tab at the default window size, and its Save
   button with it. The buttons now sit above the form, and the form scrolls.
+- **Closing the window failed every download still running.** The download
+  child kept going, but its progress lines went to a pipe the window had
+  been reading, every write to it then raised, and the raise sat inside the
+  transfer loop, so each chunk read as a broken transfer: retried four times
+  and given up, file after file, with the network fine. Progress output can
+  no longer fail a transfer; the first failed write switches it off for the
+  rest of the run, in the downloader and in the CDN module alike.
+- **Assist mode's clicks were lost from Firefox when running from the
+  scripts.** Firefox will not launch a protocol handler whose program is
+  `python.exe`; the click ends on Windows' "no app associated" dialog, though
+  Windows runs the same command from a shell. A source run now registers the
+  console exe beside the scripts as the handler whenever there is one, as the
+  build itself always did. Registering and unregistering also tell the shell
+  the associations changed, so a browser that had already asked about
+  `nxm://` does not keep a stale answer, and unregistering removes the whole
+  `nxm` class rather than leaving one with no command behind, which made every
+  `nxm://` click fail between runs.
 
-Tests: 936 checks across 16 sandbox suites, up from 810.
+Tests: 941 checks across 16 sandbox suites, up from 810.
 
 ## 1.1.0 — 2026-09-05
 
