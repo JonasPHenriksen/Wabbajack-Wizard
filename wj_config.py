@@ -232,10 +232,18 @@ SMALL_DOWNLOAD_MB = 50
 # the file, then opens the next page. With this on, the next page opens while
 # the current file is still downloading, so you are never waiting on a
 # transfer and a transfer is never waiting on you. The captured link is
-# resolved to a download URL at once, and at most one file waits behind the
-# one downloading, so a link cannot sit long enough to expire. The downloads
-# themselves stay one at a time.
+# resolved to a download URL at once. The downloads themselves stay one at a
+# time.
 ASSIST_CLICK_AHEAD = False
+
+# With click-ahead on, how many clicked files may wait behind the one
+# downloading. 1 keeps you in step with the transfer: the next page opens
+# when the waiting file starts, so you never click pages for files that will
+# not start for an hour. More lets you click that many pages ahead and leave
+# the run to itself. A minted download URL is good for four hours and the
+# click's key for some two days, so a file whose URL has aged out by its turn
+# is minted a fresh one from the key.
+ASSIST_QUEUE_DEPTH = 1
 
 # Where assist mode shows the Nexus pages. True: a window of its own, the
 # way Wabbajack does it - one page at a time in the same window, nothing
@@ -264,7 +272,8 @@ USER_SETTINGS = (
     "WABBAJACK_DIR", "INSTALL_MODE", "AUTO_TRACK", "EXCLUDE", "TRACK", "HIDDEN",
     "STAGE_LIST", "NEXUS_MODE", "KEEP_BACKUP_DAYS", "REQUIRE_HASH",
     "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "PARALLEL_SMALL_DOWNLOADS",
-    "SMALL_DOWNLOAD_MB", "ASSIST_CLICK_AHEAD", "ASSIST_WINDOW", "NOTIFY_URL", "THEME",
+    "SMALL_DOWNLOAD_MB", "ASSIST_CLICK_AHEAD", "ASSIST_QUEUE_DEPTH", "ASSIST_WINDOW",
+    "NOTIFY_URL", "THEME",
 )
 _DEFAULTS = {k: copy.deepcopy(globals()[k]) for k in USER_SETTINGS}
 # Anything wrong with wj_settings.json, in words. Never fatal: a bad value

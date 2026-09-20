@@ -2249,6 +2249,8 @@ class App:
                                                 "direct sources; 1 = one at a time",
                     "SMALL_DOWNLOAD_MB": "a file this size or under counts as small",
                     "ASSIST_CLICK_AHEAD": "open the next Nexus page while the current file downloads",
+                    "ASSIST_QUEUE_DEPTH": "with click-ahead, how many clicked files may wait behind the "
+                                          "one downloading; 1 keeps you in step with it",
                     "ASSIST_WINDOW": "show the Nexus pages in a window of their own, not your browser",
                     "ARCHIVE_ROOT": "restart to apply", "MANIFEST_DIR": "restart to apply"}.get(key, "")
             ttk.Label(form, text=hint, style="Hint.TLabel").grid(row=row, column=2, sticky="w",

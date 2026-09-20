@@ -67,12 +67,16 @@
 - **Click-ahead for assist mode, opt-in.** `ASSIST_CLICK_AHEAD` opens the next
   Nexus page while the current file is still downloading, so you are never
   waiting on a transfer and a transfer is never waiting on you. The captured
-  link is resolved to a download URL at once and at most one file waits
-  behind the one downloading, so a link cannot sit long enough to expire.
-  The log records, for every click, how much longer the key and the minted
-  URL were good for, read off the timestamps both carry, which is the slack
-  that bound lives on: measured at some 48 hours for the key and 4 hours for
-  the URL, against a wait of one download.
+  link is resolved to a download URL at once. `ASSIST_QUEUE_DEPTH` says how
+  many clicked files may wait behind the one downloading: 1, the default,
+  opens the next page when the waiting file starts, so you stay in step with
+  the transfer; more lets you click that many pages ahead and walk away. The
+  downloads stay one at a time. The log records, for every click, how much
+  longer the key and the minted URL were good for, read off the timestamps
+  both carry: measured at some 48 hours for the key and 4 hours for the URL.
+  A file whose URL has aged out by its turn in a deep queue is minted a fresh
+  one from the key before it starts, and closing the window with files
+  waiting says how many were dropped; they are offered again next run.
 - **A download window of the wizard's own.** Assist mode used to open a
   browser tab per file, several hundred for a large list. The pages now show
   in one window, the way Wabbajack's installer does it: Edge's WebView2
@@ -150,7 +154,7 @@
   when it lists the wanted file, and the manifest's own game is asked why it
   will not serve the mod before any fallback is opened.
 
-Tests: 972 checks across 16 sandbox suites, up from 810.
+Tests: 976 checks across 16 sandbox suites, up from 810.
 
 ## 1.1.0 — 2026-09-05
 

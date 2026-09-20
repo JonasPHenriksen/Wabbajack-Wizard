@@ -372,7 +372,7 @@ def fake_open(page):
 
 
 saved_assist = (D.webbrowser, D.register_nxm, D.unregister_nxm, D.resolve_browser_domain,
-                D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW)
+                D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW, D.QUEUE_DEPTH)
 D.webbrowser = types.SimpleNamespace(open=fake_open)
 D.register_nxm = lambda sd: True                 # the registry is not touched by a test
 D.unregister_nxm = lambda sd: None
@@ -408,6 +408,57 @@ try:
     res = run_assist(False)
     check("with click-ahead off, the second page waits for the first download",
           res["done"] == 2 and opened[1] >= when("end", "nx1.bin"))
+
+    print("\n      the queue can hold more than one clicked file (ASSIST_QUEUE_DEPTH)")
+    for depth in (1, 2):
+        events.clear()
+        opened.clear()
+        pages.clear()
+        for n in ("nx1.bin", "nx2.bin", "nx3.bin"):
+            dest(n)
+        nx_items[:] = [nx_item("nx1.bin", "/hold", 1, len(BIG)), nx_item("nx2.bin", "/ok", 2, len(BODY)),
+                       nx_item("nx3.bin", "/ok", 3, len(BODY))]
+        D.CLICK_AHEAD, D.QUEUE_DEPTH = True, depth
+        res = {"done": 0, "failed": 0, "failures": []}
+        D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args)
+        third_early = len(opened) == 3 and opened[2] < when("end", "nx1.bin")
+        if depth == 1:
+            check("depth 1: the third page waits for the first download to end, one file already waiting",
+                  res["done"] == 3 and not third_early, str((res, len(opened))))
+        else:
+            check("depth 2: the third page opens while the first file still downloads, two waiting behind it",
+                  res["done"] == 3 and third_early, str((res, len(opened))))
+            check("  and the downloads still ran one after another",
+                  when("start", "nx2.bin") >= when("end", "nx1.bin")
+                  and when("start", "nx3.bin") >= when("end", "nx2.bin"))
+    D.QUEUE_DEPTH = 1
+
+    print("\n      a download URL that aged out in the queue is minted afresh from the click's key")
+
+    class AgingNexus(FakeNexus):
+        """Mints a URL already past its time the first time, a good one after."""
+        def __init__(self):
+            self.minted = []
+
+        def resolve_link(self, a, key=None, expires=None, forced_domain=None,
+                         allow_fileid_fallback=True):
+            self.minted.append((D.nexus_ids(a), key))
+            stale = len(self.minted) == 1
+            return a["state"]["Url"] + ("?expires=1" if stale else ""), None
+
+    events.clear()
+    opened.clear()
+    pages.clear()
+    dest("nx1.bin")
+    nx_items[:] = [nx_item("nx1.bin", "/ok", 1, len(BODY))]
+    aging = AgingNexus()
+    D.CLICK_AHEAD = True
+    res = {"done": 0, "failed": 0, "failures": []}
+    D.download_nexus_assist(nx_items, aging, TMP, res, TMP, args)
+    check("the stale URL was seen before the download and a fresh one minted with the click's key",
+          aging.minted == [((1, 10), "k"), ((1, 10), "k")] and res["done"] == 1 and res["failed"] == 0,
+          str((aging.minted, res)))
+    D.CLICK_AHEAD = False
 
     print("\n      the pages can be shown by a window of our own, and closing it ends the run")
 
@@ -549,7 +600,7 @@ try:
           and D._minutes(90) == "1.5 min")
 finally:
     (D.webbrowser, D.register_nxm, D.unregister_nxm, D.resolve_browser_domain,
-     D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW) = saved_assist
+     D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW, D.QUEUE_DEPTH) = saved_assist
     D.download_one = real_one
 
 # ---------------------------------------------------------------- 2.12

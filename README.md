@@ -551,6 +551,7 @@ bad value is reported at start-up and its default used, never fatal.
 | `FREE_SPACE_MARGIN_GB` | 20 | refuse a download batch that would leave less than this free |
 | `PARALLEL_SMALL_DOWNLOADS`, `SMALL_DOWNLOAD_MB` | 1, 50 | how many files under the threshold may download at once from direct sources; 1 is one at a time. See "Several small files at once" |
 | `ASSIST_CLICK_AHEAD` | `false` | assist mode opens the next Nexus page while the current file downloads |
+| `ASSIST_QUEUE_DEPTH` | 1 | with click-ahead, how many clicked files may wait behind the one downloading; 1 keeps you in step with the transfer |
 | `ASSIST_WINDOW` | `true` | show the Nexus pages in the wizard's own window rather than your browser; see "The download window" |
 | `NOTIFY_URL` | `null` | an ntfy topic or Discord webhook for a scheduled run's report |
 | `THEME` | `light` | the window's colours, `light` or `dark`; the Dark mode switch writes it |
@@ -748,9 +749,15 @@ Nexus files on a free account are not pooled: each is a click. What helps
 there is `ASSIST_CLICK_AHEAD`, which opens the next file's page while the
 current file is still downloading, so you are never waiting on a transfer and a
 transfer is never waiting on you. The captured link is resolved to a download
-URL the moment it arrives, and at most one file waits behind the one
-downloading, so a link cannot sit long enough to expire. The downloads
-themselves stay one at a time.
+URL the moment it arrives. `ASSIST_QUEUE_DEPTH` says how many clicked files may
+wait behind the one downloading. At 1, the default, the next page opens when
+the waiting file starts, so you stay in step with the transfer and never click
+pages for files that will not start for an hour; higher lets you click that
+many pages ahead and leave the run to itself. The downloads themselves stay one
+at a time. A minted URL is good for four hours and the click's key for some two
+days, both read off the links and written to the log for every click, so a
+file whose URL has aged out by its turn in a deep queue is minted a fresh one
+from the key before it starts.
 
 ## When results look wrong
 
@@ -801,7 +808,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 972 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 976 checks across sixteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

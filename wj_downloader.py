@@ -152,8 +152,14 @@ DOWNLOAD_ORDER = CFG.DOWNLOAD_ORDER or "smallest"
 # 1 is one at a time, which is the default and the reliable arrangement.
 PARALLEL_SMALL = max(1, int(getattr(CFG, "PARALLEL_SMALL_DOWNLOADS", 1) or 1))
 SMALL_BYTES = int(getattr(CFG, "SMALL_DOWNLOAD_MB", 50) or 0) * (1 << 20)
-# Assist mode: open the next Nexus page while the current file downloads.
+# Assist mode: open the next Nexus page while the current file downloads,
+# and how many clicked files may wait behind the one downloading.
 CLICK_AHEAD = bool(getattr(CFG, "ASSIST_CLICK_AHEAD", False))
+QUEUE_DEPTH = max(1, int(getattr(CFG, "ASSIST_QUEUE_DEPTH", 1) or 1))
+# A queued download URL with less than this left is minted afresh from the
+# click's key before its download starts. The URL lives four hours, the key
+# some two days (measured 2026-09-20); a deep queue can outlast the first.
+URL_REMINT_MARGIN_S = 300
 # Assist mode: show the pages in a window of our own rather than the browser.
 ASSIST_WINDOW = bool(getattr(CFG, "ASSIST_WINDOW", True))
 try:
@@ -1993,6 +1999,22 @@ def _minutes(seconds):
     return "unknown" if seconds is None else f"{seconds / 60:.1f} min"
 
 
+def _nxm_archive(link, a):
+    """The archive as the click describes it: the link's game, mod and file
+    ids over the manifest's. The click pins the file id - the key in the link
+    is good for that id alone, so no substitution here, and a page opened for
+    a replacement file (_assist_loop, when the pinned one is gone) yields a
+    click for the replacement's id, which is then the one asked for. The
+    domain may still fall back (the nxm netloc is sometimes the target game
+    rather than the file's host game)."""
+    b = dict(a)
+    b["meta"] = dict(a.get("meta") or {})
+    b["meta"]["gamename"] = link["domain"]
+    b["meta"]["modid"] = str(link["mod_id"])
+    b["meta"]["fileid"] = str(link["file_id"])
+    return b
+
+
 def _resolve_nxm(link, nexus, by_ids, results, fetched):
     """Turn a captured nxm link into (download_url, archive, ids) through the
     API, or None after saying why not. The resolving is done at once, while
@@ -2013,19 +2035,8 @@ def _resolve_nxm(link, nexus, by_ids, results, fetched):
     LOG.info("[nexus] %s  (%s)", a["name"],
              human_bytes(a["size"]) if a["size"] else "size unknown")
     try:
-        # The click pins the file id: the key in the link is good for that id
-        # alone, so no substitution here - and a page opened for a replacement
-        # file (_assist_loop, when the pinned one is gone) yields a click for
-        # the replacement's id, which is then the one asked for. The domain
-        # may still fall back (the nxm netloc is sometimes the target game
-        # rather than the file's host game).
-        a_with_domain = dict(a)
-        a_with_domain["meta"] = dict(a.get("meta") or {})
-        a_with_domain["meta"]["gamename"] = link["domain"]
-        a_with_domain["meta"]["modid"] = str(link["mod_id"])
-        a_with_domain["meta"]["fileid"] = str(link["file_id"])
         url, note = nexus.resolve_link(
-            a_with_domain, key=link["key"], expires=link["expires"],
+            _nxm_archive(link, a), key=link["key"], expires=link["expires"],
             allow_fileid_fallback=False)
     except RuntimeError as e:
         LOG.error("  [SKIP] %s: %s", a["name"], e)
@@ -2053,16 +2064,20 @@ class _AssistDownloader:
     """Assist mode's downloads on a thread of their own, one at a time, so
     the next Nexus page can open while the current file is still arriving.
 
-    At most one file waits behind the one downloading. That bound keeps a
-    minted link from sitting long enough to expire - measured on 2026-09-20
-    from the timestamps the links carry: the click's key is good for some 48
-    hours, the minted URL for 4 hours, so the bound has slack to spare - and
-    it is where the person and the transfer meet: when a large file is
-    downloading, the next page opens as soon as the waiting file starts, not
-    before, so nobody clicks pages for files that will not start for an hour."""
+    Up to `depth` clicked files wait behind the one downloading
+    (ASSIST_QUEUE_DEPTH). At one, the default, the person and the transfer
+    stay in step: when a large file is downloading, the next page opens as
+    soon as the waiting file starts, not before, so nobody clicks pages for
+    files that will not start for an hour. Deeper lets that many pages be
+    clicked ahead and the run left to itself. A minted download URL is good
+    for four hours and the click's key for some two days (measured
+    2026-09-20 from the timestamps the links carry), so a file whose URL has
+    aged out by its turn is minted a fresh one from the key first."""
 
-    def __init__(self, dest_dir, results, fetched):
+    def __init__(self, dest_dir, results, fetched, nexus=None, depth=1):
         self.dest_dir, self.results, self.fetched = dest_dir, results, fetched
+        self.nexus = nexus
+        self.depth = max(1, int(depth or 1))
         self.q = queue.Queue()
         self.current = None
         self.thread = threading.Thread(target=self._run, daemon=True,
@@ -2075,10 +2090,11 @@ class _AssistDownloader:
             if item is None:
                 self.q.task_done()
                 return
-            url, a, ids = item
+            url, a, ids, link, queued_at = item
             self.current = a["name"]
             try:
-                if download_one(url, a, self.dest_dir, self.results):
+                url = self._fresh_url(url, a, link, queued_at)
+                if url and download_one(url, a, self.dest_dir, self.results):
                     self.fetched.add(ids)
                     LOG.info("  [OK] %s", a["name"])
             except Exception as e:                  # a bug, not a bad download
@@ -2088,22 +2104,54 @@ class _AssistDownloader:
                 self.current = None
                 self.q.task_done()
 
+    def _fresh_url(self, url, a, link, queued_at):
+        """The URL to download from: the one minted at the click, unless it
+        has aged out while waiting, in which case a fresh one from the click's
+        key - or None after recording why there is none."""
+        _key_left, url_left = _link_windows(link or {}, url)
+        if (url_left is None or url_left >= URL_REMINT_MARGIN_S
+                or self.nexus is None or not link):
+            return url
+        waited = _minutes(time.time() - queued_at)
+        try:
+            fresh, _note = self.nexus.resolve_link(
+                _nxm_archive(link, a), key=link["key"], expires=link["expires"],
+                allow_fileid_fallback=False)
+        except RuntimeError as e:
+            reason = (f"the download URL aged out in the queue ({waited} waiting) and a "
+                      f"fresh one could not be minted: {e}")
+            LOG.error("  [SKIP] %s: %s", a["name"], reason)
+            _tally(self.results, False, a["name"], reason)
+            return None
+        LOG.info("  [LINK] %s: the download URL aged out in the queue (%s waiting); "
+                 "minted a fresh one from the click's key", a["name"], waited)
+        return fresh
+
     def wait_for_room(self):
-        """Block while a file is already waiting behind the one downloading.
+        """Block while `depth` files already wait behind the one downloading.
 
         Said aloud only when the wait is real: right after a submit the queue
         holds the file for the instant before the thread takes it, and a note
         on every page for that would be noise."""
         said = False
-        while self.q.qsize() >= 1:
+        while self.q.qsize() >= self.depth:
             time.sleep(0.25)
-            if not said and self.q.qsize() >= 1:
-                LOG.info("  (%s is still downloading; the next page opens when the "
-                         "queued file starts)", self.current or "a file")
+            if not said and self.q.qsize() >= self.depth:
+                if self.depth == 1:
+                    LOG.info("  (%s is still downloading; the next page opens when the "
+                             "queued file starts)", self.current or "a file")
+                else:
+                    LOG.info("  (%s is still downloading and %d files wait behind it, as "
+                             "many as ASSIST_QUEUE_DEPTH allows; the next page opens when "
+                             "one of them starts)", self.current or "a file", self.q.qsize())
                 said = True
 
-    def submit(self, url, a, ids):
-        self.q.put((url, a, ids))
+    def submit(self, url, a, ids, link=None):
+        self.q.put((url, a, ids, link, time.time()))
+
+    def in_flight(self):
+        """Downloading plus waiting."""
+        return self.q.qsize() + (1 if self.current else 0)
 
     def finish(self):
         """Let the queue drain, then stop the thread."""
@@ -2111,15 +2159,26 @@ class _AssistDownloader:
         self.thread.join()
 
     def abort(self):
-        """Drop whatever is waiting. The download in progress is left to
-        run out with the process: its .part resumes next time."""
+        """Drop whatever is waiting and say how many that was. The download in
+        progress is left to run out with the process: its .part resumes next
+        time."""
+        dropped = 0
         while True:
             try:
                 self.q.get_nowait()
                 self.q.task_done()
+                dropped += 1
             except queue.Empty:
                 break
         self.q.put(None)
+        return dropped
+
+
+def _abort_worker(worker):
+    dropped = worker.abort()
+    if dropped:
+        LOG.info("  %d clicked file(s) had not started and are dropped; they are offered "
+                 "again next run.", dropped)
 
 
 def download_nexus_from_file(items, nexus, dest_dir, results, nxm_path, limit=0):
@@ -2229,8 +2288,9 @@ def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
     LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
     worker = None
     if CLICK_AHEAD:
-        worker = _AssistDownloader(dest_dir, results, fetched)
-        LOG.info("Click-ahead is on: the next page opens while the current file downloads.")
+        worker = _AssistDownloader(dest_dir, results, fetched, nexus, QUEUE_DEPTH)
+        LOG.info("Click-ahead is on: the next page opens while the current file downloads%s.",
+                 f", with up to {QUEUE_DEPTH} clicked files waiting behind it" if QUEUE_DEPTH > 1 else "")
     skip = getattr(opener, "skip", None)      # the window's Skip button; the browser has none
     try:
         pending = list(items)
@@ -2239,7 +2299,7 @@ def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
                 LOG.info("\n[ABORT] The download window was closed; stopping here. Everything "
                          "downloaded so far is kept.")
                 if worker is not None:
-                    worker.abort()
+                    _abort_worker(worker)
                     worker = None
                 break
             if args.limit and results["done"] >= args.limit:
@@ -2326,16 +2386,17 @@ def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
                 continue
             resolved = _resolve_nxm(link, nexus, by_ids, results, fetched)
             if resolved is not None:
-                worker.submit(*resolved)
+                worker.submit(*resolved, link)
         if worker is not None:
-            if worker.q.qsize() or worker.current:
-                LOG.info("  Every page has been clicked; finishing the download(s) in flight.")
+            if worker.in_flight():
+                LOG.info("  Every page has been clicked; finishing %d download(s) in flight.",
+                         worker.in_flight())
             worker.finish()
             worker = None
     except KeyboardInterrupt:
         LOG.info("\n[ABORT] Capture interrupted by user.")
         if worker is not None:
-            worker.abort()
+            _abort_worker(worker)
     finally:
         listener.close()
         # Hand the nxm:// handler back to whatever owned it (normally
