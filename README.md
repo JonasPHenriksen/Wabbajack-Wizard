@@ -822,6 +822,22 @@ itself and only starts it when nothing is missing: a file it found wrong it
 would ask Nexus for, and that request fails with a Premium error naming no
 file.
 
+### What the Wizard does around it
+
+The second test collection, *Basic Essential Mods For SSE v1.5.97* from 2022,
+found three things collections2mo2 gets wrong on its own, each now handled
+here and left alone in its pinned code:
+
+| found | what it did | what the Wizard does |
+| --- | --- | --- |
+| a collection from before Vortex tagged its mods | it names folders by tag-or-name but installs by tag alone, so all 26 mods went into one folder | lays the collection's archive where collections2mo2 reads it, with a tag of its own for every mod that has none, the curator's `collection.json` kept beside it |
+| a file-for-file mod packed as a FOMOD (SMIM) | it looks each listed path up in the archive, where the files sit under option folders, so none of SMIM's 1,427 matched | places each listed file by MD5, the way Vortex does, records it in collections2mo2's install records, and has it re-render the profile, which then orders the plugins those files brought |
+| a pinned file its author has replaced (eFPS 2.3) | refuses on a free account, since Nexus will not serve it | asks the mod's file listing; a file no longer offered is named and left out, and the build runs with `--allow-missing` instead of waiting for a download that can never come |
+
+It also reads a game's version from the executable's string table, the one
+Explorer shows: Skyrim 1.5.97 leaves the numeric field at 1.0.0.0, which is
+what collections2mo2's own check still prints.
+
 The instance holds a copy of the game, so it belongs on a local disk; the
 archives stay on the share.
 
@@ -925,7 +941,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1136 checks across seventeen suites. None of them touch the live archive pools:
+environment instead). 1167 checks across seventeen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -950,7 +966,7 @@ exactly the failure they want to check.
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
 | `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, and the Start tab opening a second window from the first one's file without measuring anything |
 | `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
-| `t17_collection` | Nexus collections: every form of a collection's address, collection.json turned into Archives[] (a removed file, a bundled mod, another site's link), the list file read by the planner, the light cache and the sorter like a modlist, MD5 verification, a fetch end to end against a stub API with a later revision asking only about what changed, the staged folder checked file by file, the feeds never asked about a collection, the collections2mo2 command, environment, instance-path checks and checksum refusal, which mod rules count, a chosen game folder, and a game folder assembled from Steam depots; `t15_gui` drives the fetch box and the Prepare hand-over |
+| `t17_collection` | Nexus collections: every form of a collection's address, collection.json turned into Archives[] (a removed file, a bundled mod, another site's link), the list file read by the planner, the light cache and the sorter like a modlist, MD5 verification, a fetch end to end against a stub API with a later revision asking only about what changed, the staged folder checked file by file, the feeds never asked about a collection, the collections2mo2 command, environment, instance-path checks and checksum refusal, which mod rules count, a chosen game folder, a game folder assembled from Steam depots, a replaced file left out, tags given to an untagged collection, and a FOMOD-packed file-for-file mod placed by MD5; `t15_gui` drives the fetch box and the Prepare hand-over |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the

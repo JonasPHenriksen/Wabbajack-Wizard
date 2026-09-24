@@ -696,8 +696,26 @@ def features(manifest):
     }
 
 
+_DOTTED = re.compile(r"^\s*(\d+)[.,]\s*(\d+)[.,]\s*(\d+)(?:[.,]\s*(\d+))?")
+
+
+def dotted_version(text):
+    """'1.5.97.0' from a version string as resource tables write it - '1.5.97.0',
+    '1, 5, 97, 0', with trailing words or not - or None."""
+    m = _DOTTED.match(text or "")
+    if not m:
+        return None
+    return ".".join(str(int(p)) for p in m.groups(default="0"))
+
+
 def exe_version(path):
-    """An executable's file version as 'a.b.c.d', or None."""
+    """An executable's file version as 'a.b.c.d', or None.
+
+    The version as the file's own string table writes it, the one Explorer and
+    PowerShell show, and only failing that the fixed binary field. Old
+    Bethesda executables leave the fixed field at 1.0.0.0: Skyrim 1.5.97's
+    SkyrimSE.exe says 1.5.97.0 only in its strings, where 1.7.104's says it in
+    both, so reading the fixed field alone mistook 1.5.97 for 1.0."""
     if os.name != "nt" or not os.path.isfile(path):
         return None
     try:
@@ -715,8 +733,30 @@ def exe_version(path):
         buf = ctypes.create_string_buffer(size)
         if not ver.GetFileVersionInfoW(path, 0, size, buf):
             return None
-        ptr, n = ctypes.c_void_p(), wintypes.UINT()
-        if not ver.VerQueryValueW(buf, "\\", ctypes.byref(ptr), ctypes.byref(n)) or not ptr:
+
+        def query(key):
+            ptr, n = ctypes.c_void_p(), wintypes.UINT()
+            if not ver.VerQueryValueW(buf, key, ctypes.byref(ptr), ctypes.byref(n)) or not ptr:
+                return None, 0
+            return ptr, n.value
+
+        # The string table, under each language and code page the file lists,
+        # then the ones resource compilers write when they list none.
+        tables = []
+        ptr, n = query("\\VarFileInfo\\Translation")
+        if ptr and n >= 4:
+            pairs = ctypes.cast(ptr, ctypes.POINTER(wintypes.WORD * (n // 2))).contents
+            tables += ["%04x%04x" % (pairs[i], pairs[i + 1]) for i in range(0, n // 2 - 1, 2)]
+        tables += ["040904b0", "040904e4", "000004b0"]
+        for table in tables:
+            for field in ("FileVersion", "ProductVersion"):
+                ptr, n = query("\\StringFileInfo\\%s\\%s" % (table, field))
+                if ptr and n:
+                    found = dotted_version(ctypes.wstring_at(ptr, n).rstrip("\x00"))
+                    if found:
+                        return found
+        ptr, n = query("\\")
+        if not ptr:
             return None
         words = ctypes.cast(ptr, ctypes.POINTER(wintypes.DWORD * 13)).contents
         ms, ls = words[2], words[3]          # dwFileVersionMS, dwFileVersionLS
@@ -901,6 +941,33 @@ def check_staged(list_path, downloads, say=None):
                 continue
         ok += 1
     return ok, problems
+
+
+def unobtainable(nexus, archives):
+    """Of these archives, the ones Nexus will not hand out any more, and why:
+    {name: why}.
+
+    A curator pins exact files, and authors replace theirs: the pinned file is
+    then archived out of the mod's listing and its page offers only the new
+    one - no click can fetch the old one, on any account, and Vortex stops at
+    the same place. Asked of the mod's own file listing, the one the download
+    page shows. Only a Nexus file can be judged; a missing direct download is
+    simply missing."""
+    out = {}
+    for a in archives:
+        if WJ.state_type(a["state"]) != "nexus":
+            continue
+        mod_id, file_id = WJ.nexus_ids(a)
+        domain = WJ.nexus_url_domain(WJ.nexus_domain(a))
+        if not (mod_id and file_id and domain):
+            continue
+        files, status = nexus.mod_files(domain, mod_id)
+        if status == "notfound":
+            out[a["name"]] = "the mod is gone from Nexus"
+        elif status == "ok" and file_id not in WJ.NexusClient._file_ids(files):
+            out[a["name"]] = ("Nexus no longer offers the file the collection pins; its author "
+                              "has replaced it")
+    return out
 
 
 def drive_is_remote(path):
@@ -1139,15 +1206,20 @@ def setup_c2mo2(say=None):
     return found
 
 
-def c2mo2_args(c2, url, revision, out, game_path, downloads, stock_game=True):
+def c2mo2_args(c2, url, revision, out, game_path, downloads, stock_game=True,
+               allow_missing=False):
     """The command that builds the instance. --skip-survey leaves out c2mo2's
     optional preview of every mod page, which costs API allowance and changes
-    nothing it installs."""
+    nothing it installs. --allow-missing, only when the plan found mods Nexus
+    no longer serves, has it build without them and name them; an MD5 that
+    does not match still stops it."""
     args = [c2["python"], "-X", "utf8", "-s", "-m", "collections2mo2.cli", "create", url,
             "--revision", str(revision), "--out", out, "--game-path", game_path,
             "--downloads-dir", downloads, "--skip-survey"]
     if stock_game:
         args.append("--stock-game")
+    if allow_missing:
+        args.append("--allow-missing")
     return args
 
 
@@ -1181,16 +1253,21 @@ def run_c2mo2(args, env, cwd, on_line=None):
     return proc.returncode
 
 
-def install_plan(list_path, out=None, game_path=None):
+def install_plan(list_path, out=None, game_path=None, nexus=None):
     """Everything the hand-over needs, and what stands in its way.
 
     Returns a dict: list, info (wizard.json), downloads, game (path, how,
     version, wanted, matches), c2 (find_c2mo2()), staged (ok, problems),
-    blockers - the reasons it cannot start - game_problems, and, once an
-    instance folder is chosen (here or with set_instance()), out and
+    unavailable, blockers - the reasons it cannot start - game_problems, and,
+    once an instance folder is chosen (here or with set_instance()), out and
     path_problems. Reading every staged archive for its MD5 is the slow part,
     so a plan is made once, then pointed at a game folder (set_game()) and an
-    instance folder (set_instance()) as those are chosen."""
+    instance folder (set_instance()) as those are chosen.
+
+    With `nexus`, a missing archive Nexus no longer hands out is moved from
+    the problems to `unavailable`: no download could ever supply it, so it is
+    not a reason to wait. The build then goes ahead without those mods, which
+    are named, and c2mo2 is told to leave them out (--allow-missing)."""
     data = read_list_file(list_path)
     wiz = data["wizard"]
     gametype = DOMAIN_GAMETYPE.get(wiz["domain"], wiz["domain"])
@@ -1208,12 +1285,19 @@ def install_plan(list_path, out=None, game_path=None):
         staged = (0, [("(folder)", "the list has not been staged yet")])
     else:
         staged = check_staged(list_path, downloads)
+    unavailable = []
+    missing = {name for name, why in staged[1] if why == "not in the staged folder"}
+    if nexus is not None and missing:
+        gone = unobtainable(nexus, [a for a in WJ.parse_manifest(list_path)["archives"]
+                                    if a["name"] in missing])
+        unavailable = sorted(gone.items())
+        staged = (staged[0], [(n, w) for n, w in staged[1] if n not in gone])
     if staged[1]:
         blockers.append(f"{len(staged[1])} archive(s) are missing or wrong in the staged folder")
     plan = {"list": list_path, "info": wiz, "gametype": gametype, "downloads": downloads,
             "wanted": list((data["collection"].get("info") or {}).get("gameVersions") or []),
-            "c2": c2, "staged": staged, "blockers": blockers, "game": None,
-            "game_problems": [], "out": None, "path_problems": []}
+            "c2": c2, "staged": staged, "unavailable": unavailable, "blockers": blockers,
+            "game": None, "game_problems": [], "out": None, "path_problems": []}
     set_game(plan, game_path)
     if out:
         set_instance(plan, out)
@@ -1271,6 +1355,8 @@ def plan_lines(plan):
         lines.append(f"              {name}: {why}")
     if len(problems) > 15:
         lines.append(f"              ... and {len(problems) - 15} more")
+    for name, why in plan.get("unavailable") or []:
+        lines.append(f"Left out    {name}: {why}. The instance is built without it.")
     want = ", ".join(plan.get("wanted") or []) or "no particular version"
     if game["path"]:
         verdict = {True: "matches", False: "DIFFERS from", None: "cannot be compared with"}[
@@ -1289,6 +1375,234 @@ def plan_lines(plan):
     return lines
 
 
+def tagless(manifest):
+    """The mods of a collection that carry no source.tag."""
+    return [m for m in manifest.get("mods") or [] if not (m.get("source") or {}).get("tag")]
+
+
+def give_tags(manifest):
+    """Give every mod without a tag one of its own; returns how many were given.
+
+    Vortex added per-mod tags in 2023, and a collection published before that
+    has none. c2mo2 names its folders by tag-or-name, but keys its install by
+    the tag alone, so every mod of such a collection falls onto the one empty
+    key and installs into one folder - the last mod's - which is what the first
+    build of 'Basic Essential Mods For SSE v1.5.97' did with its 26. The tags
+    given here are names for that bookkeeping only: unique, the same for the
+    same manifest, and prefixed so they read as ours."""
+    used = {(m.get("source") or {}).get("tag") for m in manifest.get("mods") or []} - {None, ""}
+    given = 0
+    for i, mod in enumerate(manifest.get("mods") or []):
+        src = mod.setdefault("source", {})
+        if src.get("tag"):
+            continue
+        tag = "wj%03d%s" % (i, (src.get("md5") or "")[:5])
+        while tag in used:
+            tag += "x"
+        src["tag"] = tag
+        used.add(tag)
+        given += 1
+    return given
+
+
+def seed_c2mo2_manifest(plan, nexus, say=None):
+    """Lay the collection's archive where c2mo2 reads it, with tags given to
+    the mods that have none. Returns how many mods were given one (0 when the
+    collection needs none, and nothing is written then).
+
+    c2mo2's fetch reuses an unpacked archive it finds in the instance, so the
+    archive is unpacked there in full - bundled mods and patches are read from
+    it - with collection.json rewritten and the curator's own kept beside it
+    as collection.original.json. c2mo2 itself is left exactly as pinned."""
+    manifest = read_list_file(plan["list"])["collection"]
+    if not tagless(manifest):
+        return 0
+    wiz = plan["info"]
+    rev_dir = os.path.join(plan["out"], "c2mo2", "collections", wiz["slug"], str(wiz["revision"]))
+    archive_dir = os.path.join(rev_dir, "archive")
+    target = os.path.join(archive_dir, "collection.json")
+    if os.path.isfile(target):
+        try:
+            with open(target, encoding="utf-8-sig") as f:
+                if not tagless(json.load(f)):
+                    return 0                         # seeded by an earlier run
+        except (OSError, ValueError):
+            pass
+    os.makedirs(rev_dir, exist_ok=True)
+    blob = os.path.join(rev_dir, "collection_archive.bin")     # the name c2mo2 gives it
+    if not os.path.isfile(blob):
+        info = revision_info(wiz["slug"], wiz["revision"])
+        link, status = nexus.collection_archive_url(info["download_link"])
+        if not link:
+            raise CollectionError("Nexus would not hand out the collection archive: " + status)
+        if not WJ.stream_download(link, blob, quiet=True):
+            raise CollectionError("the collection archive did not download")
+    shutil.rmtree(archive_dir, ignore_errors=True)
+    os.makedirs(archive_dir)
+    with open(blob, "rb") as f:
+        head = f.read(6)
+    if head.startswith(b"PK"):
+        with zipfile.ZipFile(blob) as z:
+            z.extractall(archive_dir)
+    else:
+        exe = seven_zip()
+        if not exe:
+            raise CollectionError("no 7-Zip was found to unpack the collection archive")
+        got = subprocess.run([exe, "x", "-y", "-o" + archive_dir, blob], capture_output=True,
+                             stdin=subprocess.DEVNULL,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if got.returncode != 0:
+            raise CollectionError("7-Zip could not unpack the collection archive")
+    original = os.path.join(archive_dir, "collection.json")
+    with open(original, encoding="utf-8-sig") as f:
+        unpacked = json.load(f)
+    os.replace(original, os.path.join(archive_dir, "collection.original.json"))
+    given = give_tags(unpacked)
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(unpacked, f, indent=1, ensure_ascii=False)
+    _say(say, f"gave {given} mod(s) with no tag one of their own, for collections2mo2")
+    return given
+
+
+PLUGIN_EXTS = (".esp", ".esm", ".esl")
+MISSING_MARK = "replicate: file listed in manifest is missing"
+
+
+def c2mo2_layer(out, slug, revision):
+    """c2mo2's own records for one collection layer of an instance: the ledger
+    and its path, and the paths of the layer's manifest, downloads.json and
+    install.json. None when the instance has no such layer."""
+    ledger_path = os.path.join(out, "c2mo2-instance.json")
+    try:
+        with open(ledger_path, encoding="utf-8") as f:
+            ledger = json.load(f)
+    except (OSError, ValueError):
+        return None
+    for layer in ledger.get("layers") or []:
+        if layer.get("slug") == slug and layer.get("revision") == revision:
+            files = layer.get("files") or {}
+            return {"ledger": ledger, "ledger_path": ledger_path,
+                    "manifest": os.path.join(out, layer.get("manifest") or ""),
+                    "downloads": os.path.join(out, files.get("downloads") or ""),
+                    "install": os.path.join(out, files.get("install") or "")}
+    return None
+
+
+def _write_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _unpack(archive, dest):
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(dest)
+        return
+    exe = seven_zip()
+    if not exe:
+        raise CollectionError("no 7-Zip was found to unpack " + os.path.basename(archive))
+    got = subprocess.run([exe, "x", "-y", "-o" + dest, archive], capture_output=True,
+                         stdin=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if got.returncode not in (0, 1):                  # 1 is 7-Zip's "warning", files written
+        raise CollectionError("7-Zip could not unpack " + os.path.basename(archive))
+
+
+def replicate_by_md5(plan, say=None):
+    """Install, file for file, the mods c2mo2's replicate step could not.
+
+    A curator can export a mod as its exact installed file list: a path and
+    an MD5 for every file (collection.json's `hashes`). Vortex installs such
+    a mod by hashing everything in the archive and copying each listed MD5 to
+    its listed path. c2mo2 looks the listed path up in the archive instead,
+    which only works when the archive is laid out the way the mod installs;
+    a FOMOD-packed archive keeps its files under option folders ('00 Core\\
+    meshes\\...'), so SMIM's 1,427 files all read as missing and it installed
+    none. This does it Vortex's way for exactly those mods, then records the
+    files and plugins in c2mo2's install.json and ledger, so its profile
+    re-render (profile-instance) orders the plugins they brought.
+
+    Returns [(mod name, files placed, files no archive member matched)]."""
+    wiz = plan["info"]
+    layer = c2mo2_layer(plan["out"], wiz["slug"], wiz["revision"])
+    if layer is None:
+        return []
+    with open(layer["install"], encoding="utf-8") as f:
+        install = json.load(f)
+    with open(layer["downloads"], encoding="utf-8") as f:
+        downloads = json.load(f)
+    with open(layer["manifest"], encoding="utf-8-sig") as f:
+        manifest = json.load(f)
+    mods = {(m.get("source") or {}).get("tag"): m for m in manifest.get("mods") or []}
+    archives = {e.get("tag"): e.get("path") for e in downloads.get("entries") or []}
+    fixed = []
+    for entry in install.get("entries") or []:
+        if entry.get("strategy") != "replicate" or not any(
+                str(w).startswith(MISSING_MARK) for w in entry.get("warnings") or []):
+            continue
+        mod, archive = mods.get(entry.get("tag")), archives.get(entry.get("tag"))
+        if not mod or not archive or not os.path.isfile(archive):
+            continue
+        _say(say, f"placing {entry['name']} file for file, by MD5...")
+        scratch = os.path.join(plan["out"], "c2mo2", "wj-replicate", entry["tag"])
+        shutil.rmtree(scratch, ignore_errors=True)
+        os.makedirs(scratch)
+        try:
+            _unpack(archive, scratch)
+            by_md5 = {}
+            for root, _dirs, names in os.walk(scratch):
+                for name in names:
+                    p = os.path.join(root, name)
+                    by_md5.setdefault(WJ.file_md5(p), []).append(p)
+            dest = os.path.join(install.get("mods_dir") or os.path.join(plan["out"], "mods"),
+                                entry["folder"])
+            placed, unmatched, plugins = 0, [], []
+            for item in mod.get("hashes") or []:
+                rel = str(item.get("path") or "").replace("\\", "/").strip("/")
+                found = by_md5.get((item.get("md5") or "").lower()) or []
+                if not rel or not found:
+                    unmatched.append(rel)
+                    continue
+                # Several copies of one file: the one under the same name.
+                src = next((c for c in found if os.path.basename(c).lower()
+                            == posixpath.basename(rel).lower()), found[0])
+                target = os.path.join(dest, *rel.split("/"))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copy2(src, target)
+                placed += 1
+                if "/" not in rel and rel.lower().endswith(PLUGIN_EXTS):
+                    plugins.append(rel)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        entry["file_count"] = placed
+        entry["plugins"] = sorted(set(entry.get("plugins") or []) | set(plugins))
+        entry["warnings"] = ([f"replicate: {placed} file(s) placed by MD5 by the Wabbajack Wizard"]
+                             + [f"replicate: no file in the archive has the MD5 listed for {r}"
+                                for r in unmatched])
+        record = (layer["ledger"].get("mods") or {}).get(entry["folder"])
+        if isinstance(record, dict):
+            record["plugins"] = entry["plugins"]
+        fixed.append((entry["name"], placed, len(unmatched)))
+        _say(say, f"  {entry['name']}: {placed} file(s) placed"
+                  + (f", {len(unmatched)} matched nothing in the archive" if unmatched else ""))
+    if fixed:
+        _write_json(layer["install"], install)
+        _write_json(layer["ledger_path"], layer["ledger"])
+        shutil.rmtree(os.path.join(plan["out"], "c2mo2", "wj-replicate"), ignore_errors=True)
+    return fixed
+
+
+def rerender_profile(plan, api_key, on_line=None):
+    """c2mo2's own re-render of the instance's profile, after the files under
+    it have changed. Returns its exit code."""
+    c2 = plan["c2"]
+    args = [c2["python"], "-X", "utf8", "-s", "-m", "collections2mo2.cli", "profile-instance",
+            "--instance", plan["out"]]
+    return run_c2mo2(args, c2mo2_env(c2, api_key), cwd=c2["dir"], on_line=on_line)
+
+
 def install(plan, api_key, on_line=None):
     """Run c2mo2 for a plan with nothing in its way. Returns its exit code."""
     problems = stops(plan)
@@ -1298,9 +1612,15 @@ def install(plan, api_key, on_line=None):
         raise CollectionError("; ".join(problems))
     wiz, c2 = plan["info"], plan["c2"]
     os.makedirs(plan["out"], exist_ok=True)
+    seed_c2mo2_manifest(plan, WJ.NexusClient(api_key), say=on_line)
     args = c2mo2_args(c2, wiz["url"], wiz["revision"], plan["out"], plan["game"]["path"],
-                      plan["downloads"])
-    return run_c2mo2(args, c2mo2_env(c2, api_key), cwd=c2["dir"], on_line=on_line)
+                      plan["downloads"], allow_missing=bool(plan.get("unavailable")))
+    rc = run_c2mo2(args, c2mo2_env(c2, api_key), cwd=c2["dir"], on_line=on_line)
+    if rc != 0:
+        return rc
+    if replicate_by_md5(plan, say=on_line):
+        rc = rerender_profile(plan, api_key, on_line=on_line)
+    return rc
 
 
 # ----------------------------------------------------------------------
@@ -1373,7 +1693,8 @@ def cmd_install(args):
     if not fn:
         raise CollectionError(f"no collection list matching '{args.ref}' in {mdir}")
     out = os.path.abspath(os.path.expandvars(os.path.expanduser(args.out)))
-    plan = install_plan(os.path.join(mdir, fn), out, game_path=args.game_path)
+    nexus, key = _nexus()
+    plan = install_plan(os.path.join(mdir, fn), out, game_path=args.game_path, nexus=nexus)
     for line in plan_lines(plan):
         print(line)
     if stops(plan):
@@ -1391,7 +1712,6 @@ def cmd_install(args):
         except EOFError:
             print("Nothing started (no answer; pass --yes to run unattended).")
             return 0
-    _nexus_client, key = _nexus()
     rc = install(plan, key, on_line=lambda l: print("  | " + l))
     print(f"\ncollections2mo2 exited {rc}." + (f" The instance is in {out}." if rc == 0 else ""))
     return 0 if rc == 0 else 1

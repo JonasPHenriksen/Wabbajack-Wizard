@@ -1869,10 +1869,12 @@ class App:
         that last part reads the whole list - then fill the panel."""
         path = os.path.join(A.MANIFESTS, fn)
         game_source = (self.state.get("game_source") or {}).get(W.stem_of(fn))
+        key = A.WJ.resolve_api_key(None, A.HERE, prompt=False)
 
         def job():
             try:
-                return {"plan": COL.install_plan(path, game_path=game_source)}
+                return {"plan": COL.install_plan(path, game_path=game_source,
+                                                 nexus=A.WJ.NexusClient(key) if key else None)}
             except COL.CollectionError as e:
                 return {"error": str(e)}
         self.run_job("Checking the collection", job,
@@ -1942,6 +1944,7 @@ class App:
         lines = [f"collection {plan['info']['name']}, revision {plan['info']['revision']}",
                  f"downloads  {plan['downloads']}", f"game       {plan['game']['path']}",
                  f"instance   {target}"]
+        lines += [f"left out   {name} ({why})" for name, why in plan.get("unavailable") or []]
         if not plan["c2"]:
             lines.append("\ncollections2mo2 is downloaded into .c2mo2 first.")
         if not self.confirm("Build a Mod Organizer 2 instance", lines,
@@ -1962,7 +1965,8 @@ class App:
             try:
                 if not p["c2"]:
                     COL.setup_c2mo2(say=say)
-                    p = COL.set_instance(COL.install_plan(p["list"], game_path=chosen_game), target)
+                    p = COL.set_instance(COL.install_plan(p["list"], game_path=chosen_game,
+                                                          nexus=A.WJ.NexusClient(key)), target)
                 return COL.install(p, key, on_line=lambda l: W.out("  | " + l))
             except COL.CollectionError as e:
                 W.out(f"[ERROR] {e}")

@@ -36,6 +36,14 @@
   version back; never into a Steam library.
 - The report counts the mod rules that name two of the collection's own mods,
   the only ones that decide a conflict, instead of every rule the curator had.
+- **Three collections2mo2 gaps, handled around it.** A collection from before
+  Vortex tagged its mods is given tags, laid where collections2mo2 reads it,
+  so its mods no longer all install into one folder. A file-for-file mod
+  packed as a FOMOD is placed by MD5, as Vortex does, and the profile
+  re-rendered so its plugins are ordered. A pinned file Nexus no longer
+  serves is named and left out (`--allow-missing`) rather than waited for.
+- A game's version is read from the executable's string table: Skyrim
+  1.5.97's numeric version field says 1.0.0.0.
 
 ## 1.2.0 — 2026-09-19
 

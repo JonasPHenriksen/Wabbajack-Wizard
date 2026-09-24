@@ -640,5 +640,200 @@ try:
 except COL.CollectionError as e:
     check("a depot not downloaded yet stops it, by name", "depot_489832" in str(e), str(e))
 
+# ---------------------------------------------------------------- 17.15
+print("\n 17.15  a pinned file its author has replaced, and the version a file states")
+check("a version is read from how resource tables write it",
+      COL.dotted_version("1, 5, 97, 0") == "1.5.97.0" and COL.dotted_version("1.7.104") == "1.7.104.0"
+      and COL.dotted_version(" 3.14.7150.1013 (x64)") == "3.14.7150.1013"
+      and COL.dotted_version("v2") is None and COL.dotted_version(None) is None)
+
+
+class ListingNexus:
+    """mod_files as the downloader's NexusClient answers it."""
+
+    def __init__(self, listings):
+        self.listings = listings
+
+    def mod_files(self, domain, mod_id):
+        if mod_id not in self.listings:
+            return None, "notfound"
+        return [{"file_id": f} for f in self.listings[mod_id]], "ok"
+
+
+rec = WJ.parse_manifest(spath)
+by = {a["name"]: a for a in rec["archives"]}
+gone = COL.unobtainable(ListingNexus({101: [1001], 102: [9999], 104: [1004]}), list(by.values()))
+check("a file its mod's listing no longer carries is unobtainable",
+      list(gone) == [NAMES[(102, 1002)][0]] and "replaced" in gone[NAMES[(102, 1002)][0]], str(gone))
+gone = COL.unobtainable(ListingNexus({101: [1001], 102: [1002]}), list(by.values()))
+check("  a mod gone from Nexus altogether is too", gone.get("Eta-104-1.zip") == "the mod is gone from Nexus",
+      str(gone))
+check("  and a direct download is never judged", "Delta File.zip" not in gone)
+
+real_dirs, real_dir = WJ.resolve_game_dirs, COL.c2mo2_dir
+COL.WJ.resolve_game_dirs = lambda g: (os.path.join(s.archives, POOL), None, None)
+COL.c2mo2_dir = lambda: c2root
+try:
+    os.remove(os.path.join(staged, "Eta-104-1.zip"))
+    plan = COL.install_plan(spath, game_path=gdir,
+                            nexus=ListingNexus({101: [1001], 102: [1002], 104: [7777]}))
+    check("with Nexus asked, a replaced file is left out rather than waited for",
+          plan["unavailable"] and plan["unavailable"][0][0] == "Eta-104-1.zip"
+          and plan["blockers"] == [], "%s %s" % (plan["unavailable"], plan["blockers"]))
+    check("  the plan names it", any(line.startswith("Left out    Eta-104-1.zip")
+                                     for line in COL.plan_lines(plan)))
+    plan_no_nexus = COL.install_plan(spath, game_path=gdir)
+    check("  without Nexus to ask it stays a reason to wait",
+          plan_no_nexus["unavailable"] == [] and plan_no_nexus["blockers"])
+    plan = COL.install_plan(spath, game_path=gdir,
+                            nexus=ListingNexus({101: [1001], 102: [1002], 104: [1004]}))
+    check("a missing file Nexus still offers is still a reason to wait",
+          plan["unavailable"] == [] and any("missing or wrong" in b for b in plan["blockers"]),
+          str(plan["blockers"]))
+    seen = {}
+    real_run = COL.run_c2mo2
+    COL.run_c2mo2 = lambda args, env, cwd, on_line=None: seen.setdefault("args", args) and 0
+    try:
+        plan = COL.install_plan(spath, game_path=gdir,
+                                nexus=ListingNexus({101: [1001], 102: [1002], 104: [7777]}))
+        COL.set_instance(plan, os.path.join(TMP, "instance2"))
+        COL.install(plan, "k")
+        check("collections2mo2 is told to build without it",
+              "--allow-missing" in seen.get("args", []), str(seen.get("args")))
+        io.open(os.path.join(staged, "Eta-104-1.zip"), "wb").write(ETA)
+        plan = COL.install_plan(spath, game_path=gdir,
+                                nexus=ListingNexus({101: [1001], 102: [1002], 104: [1004]}))
+        COL.set_instance(plan, os.path.join(TMP, "instance2"))
+        seen.clear()
+        COL.install(plan, "k")
+        check("  and only then", "--allow-missing" not in seen.get("args", []), str(seen.get("args")))
+    finally:
+        COL.run_c2mo2 = real_run
+finally:
+    COL.WJ.resolve_game_dirs, COL.c2mo2_dir = real_dirs, real_dir
+
+# ---------------------------------------------------------------- 17.16
+print("\n 17.16  a collection from before Vortex tagged its mods")
+old = json.loads(json.dumps(MANIFEST))
+for m in old["mods"]:
+    m["source"].pop("tag", None)
+old["mods"][1]["source"]["tag"] = "keepme"          # a mix: one tagged, the rest not
+check("the mods without a tag are found", len(COL.tagless(old)) == len(old["mods"]) - 1)
+again = json.loads(json.dumps(old))
+given = COL.give_tags(old)
+tags = [m["source"]["tag"] for m in old["mods"]]
+check("every one of them is given a tag", given == len(old["mods"]) - 1 and all(tags), str(tags))
+check("  all different", len(set(tags)) == len(tags), str(tags))
+check("  a tag already there is kept", old["mods"][1]["source"]["tag"] == "keepme")
+check("  and the same manifest gets the same tags", (COL.give_tags(again), [
+    m["source"]["tag"] for m in again["mods"]])[1] == tags)
+check("a tagged collection is given none", COL.give_tags(json.loads(json.dumps(MANIFEST))) == 0)
+
+buf = io.BytesIO()
+untagged = json.loads(json.dumps(MANIFEST))
+for m in untagged["mods"]:
+    m["source"].pop("tag", None)
+with zipfile.ZipFile(buf, "w") as z:
+    z.writestr("collection.json", json.dumps(untagged))
+    z.writestr("bundled/Bundled - Epsilon/a.esp", b"esp")
+FILES["/untagged.zip"] = buf.getvalue()
+odir = os.path.join(TMP, "untagged")
+os.makedirs(odir)
+opath = COL.write_list_file(os.path.join(odir, "Old_@@_abcd12.collection"), INFO, untagged,
+                            entries, left, members)
+inst = os.path.join(TMP, "instance3")
+oplan = {"list": opath, "info": COL.read_list_file(opath)["wizard"], "out": inst}
+real_info = COL.revision_info
+COL.revision_info = lambda slug, revision=None: dict(INFO)
+try:
+    n = COL.seed_c2mo2_manifest(oplan, FakeNexus(BASE + "/untagged.zip"), say=lambda s: None)
+    arch = os.path.join(inst, "c2mo2", "collections", "abcd12", "3", "archive")
+    check("the archive is unpacked where collections2mo2 reads it",
+          os.path.isfile(os.path.join(arch, "bundled", "Bundled - Epsilon", "a.esp")), arch)
+    seeded = json.load(io.open(os.path.join(arch, "collection.json"), encoding="utf-8"))
+    check("  with a tag on every mod", n == len(untagged["mods"]) and not COL.tagless(seeded))
+    check("  and the curator's own collection.json kept beside it",
+          json.load(io.open(os.path.join(arch, "collection.original.json"), encoding="utf-8"))
+          == untagged)
+    hits = HITS.get("/untagged.zip", 0)
+    check("a second run finds it done and fetches nothing",
+          COL.seed_c2mo2_manifest(oplan, FakeNexus(BASE + "/untagged.zip"), say=lambda s: None) == 0
+          and HITS.get("/untagged.zip", 0) == hits)
+    tplan = {"list": spath, "info": COL.read_list_file(spath)["wizard"],
+             "out": os.path.join(TMP, "instance4")}
+    check("a tagged collection is left for collections2mo2 to fetch itself",
+          COL.seed_c2mo2_manifest(tplan, FakeNexus(None), say=lambda s: None) == 0
+          and not os.path.exists(os.path.join(TMP, "instance4", "c2mo2")))
+finally:
+    COL.revision_info = real_info
+
+# ---------------------------------------------------------------- 17.17
+print("\n 17.17  a file-for-file mod packed as a FOMOD, placed by MD5")
+ESP, NIF, OTHER = b"plugin bytes", b"mesh bytes", b"option two"
+inst = os.path.join(TMP, "instance5")
+arch_path = os.path.join(TMP, "fomodpacked.zip")
+with zipfile.ZipFile(arch_path, "w") as z:
+    z.writestr("fomod/ModuleConfig.xml", "<config/>")
+    z.writestr("00 Core/Packed.esp", ESP)
+    z.writestr("00 Core/meshes/a.nif", NIF)
+    z.writestr("01 Option/meshes/b.nif", OTHER)
+    z.writestr("02 Copy/Packed.esp", ESP)                     # the same bytes twice
+rman = {"info": {"name": "R", "domainName": "skyrimspecialedition"},
+        "mods": [{"name": "Packed", "source": {"type": "nexus", "tag": "tP", "md5": "m"},
+                  "hashes": [{"path": "Packed.esp", "md5": md5(ESP)},
+                             {"path": "meshes\\a.nif", "md5": md5(NIF)},
+                             {"path": "meshes\\gone.nif", "md5": "0" * 32}]},
+                 {"name": "Plain", "source": {"type": "nexus", "tag": "tQ", "md5": "n"},
+                  "hashes": [{"path": "x.esp", "md5": md5(b"x")}]}]}
+os.makedirs(os.path.join(inst, "c2mo2", "archive"))
+json.dump(rman, io.open(os.path.join(inst, "c2mo2", "archive", "collection.json"), "w"))
+json.dump({"entries": [{"name": "Packed", "tag": "tP", "path": arch_path},
+                       {"name": "Plain", "tag": "tQ", "path": arch_path}]},
+          io.open(os.path.join(inst, "c2mo2", "r.downloads.json"), "w"))
+json.dump({"mods_dir": os.path.join(inst, "mods"), "entries": [
+    {"name": "Packed", "folder": "Packed", "tag": "tP", "strategy": "replicate", "file_count": 0,
+     "plugins": [], "warnings": [COL.MISSING_MARK + ": Packed.esp"]},
+    {"name": "Plain", "folder": "Plain", "tag": "tQ", "strategy": "replicate", "file_count": 1,
+     "plugins": ["x.esp"], "warnings": []}]},
+    io.open(os.path.join(inst, "c2mo2", "r.install.json"), "w"))
+json.dump({"layers": [{"slug": "rr1", "revision": 2, "manifest": "c2mo2/archive/collection.json",
+                       "files": {"downloads": "c2mo2/r.downloads.json",
+                                 "install": "c2mo2/r.install.json"}}],
+           "mods": {"Packed": {"plugins": []}, "Plain": {"plugins": ["x.esp"]}}},
+          io.open(os.path.join(inst, "c2mo2-instance.json"), "w"))
+rplan = {"info": {"slug": "rr1", "revision": 2}, "out": inst,
+         "c2": {"python": sys.executable, "src": "s", "site": "t", "dir": TMP}}
+fixed = COL.replicate_by_md5(rplan, say=lambda s: None)
+check("only the mod c2mo2 left unplaced is redone", fixed == [("Packed", 2, 1)], str(fixed))
+check("  each listed file lands at its listed path, from wherever the archive keeps it",
+      io.open(os.path.join(inst, "mods", "Packed", "Packed.esp"), "rb").read() == ESP
+      and io.open(os.path.join(inst, "mods", "Packed", "meshes", "a.nif"), "rb").read() == NIF)
+check("  and nothing the list does not name", not os.path.exists(
+    os.path.join(inst, "mods", "Packed", "meshes", "b.nif")))
+rinstall = json.load(io.open(os.path.join(inst, "c2mo2", "r.install.json"), encoding="utf-8"))
+rentry = rinstall["entries"][0]
+check("its record says what was placed, and what matched nothing",
+      rentry["file_count"] == 2 and "placed by MD5" in rentry["warnings"][0]
+      and any("meshes/gone.nif" in w for w in rentry["warnings"]), str(rentry["warnings"]))
+check("  and the plugin it brought, for the profile", rentry["plugins"] == ["Packed.esp"])
+check("  in the ledger too", json.load(io.open(os.path.join(inst, "c2mo2-instance.json"),
+                                               encoding="utf-8"))["mods"]["Packed"]["plugins"]
+      == ["Packed.esp"])
+check("  the other mod's record is untouched", rinstall["entries"][1]["file_count"] == 1)
+check("  and the unpacked archive is cleared away",
+      not os.path.exists(os.path.join(inst, "c2mo2", "wj-replicate")))
+check("an instance with no such layer is left alone",
+      COL.replicate_by_md5(dict(rplan, info={"slug": "nope", "revision": 1}), say=lambda s: None)
+      == [])
+calls = []
+real_run = COL.run_c2mo2
+COL.run_c2mo2 = lambda args, env, cwd, on_line=None: calls.append(args) or 0
+try:
+    COL.rerender_profile(rplan, "k")
+    check("the profile is re-rendered by c2mo2's own profile-instance",
+          calls and calls[-1][-3:] == ["profile-instance", "--instance", inst], str(calls[-1:]))
+finally:
+    COL.run_c2mo2 = real_run
+
 srv.shutdown()
 sys.exit(summary())

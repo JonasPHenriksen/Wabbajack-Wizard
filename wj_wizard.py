@@ -2069,8 +2069,12 @@ def offer_collection_install(state, filename, st):
     # A game folder chosen for this list before - a copy at an older version -
     # is used again rather than the store's install.
     game_source = (state.get("game_source") or {}).get(stem)
+    # With a key, a missing file Nexus no longer serves is told apart from one
+    # not downloaded yet, and the build can go ahead without it.
+    key = A.WJ.resolve_api_key(None, A.HERE, prompt=False)
+    nexus = A.WJ.NexusClient(key) if key else None
     try:
-        plan = COL.install_plan(path, game_path=game_source)
+        plan = COL.install_plan(path, game_path=game_source, nexus=nexus)
         if not plan["c2"]:
             out("  collections2mo2 is not set up in this folder yet. It goes into")
             out("  .c2mo2 beside the scripts: a pinned release checked against a")
@@ -2079,7 +2083,7 @@ def offer_collection_install(state, filename, st):
                 out("  Skipped. Nothing installed.")
                 return False
             COL.setup_c2mo2(say=say)
-            plan = COL.install_plan(path, game_path=game_source)
+            plan = COL.install_plan(path, game_path=game_source, nexus=nexus)
     except COL.CollectionError as e:
         out(f"  {e}")
         return False
@@ -2137,6 +2141,8 @@ def offer_collection_install(state, filename, st):
              f"downloads  {plan['downloads']}",
              f"game       {plan['game']['path']}",
              f"instance   {plan['out']}"]
+    for name, why in plan["unavailable"]:
+        lines.append(f"left out   {name} ({why})")
     if os.path.isdir(plan["out"]) and os.listdir(plan["out"]):
         lines += ["", "That folder already has something in it. collections2mo2 keeps",
                   "an instance it built there and adds to it; anything else stays."]
