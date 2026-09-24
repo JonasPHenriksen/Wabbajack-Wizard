@@ -709,6 +709,15 @@ It also warns when archives are still outstanding — Wabbajack will try to fetc
 those itself, which on a free account means its own click-per-file flow rather
 than this tooling's.
 
+## Nexus collections
+
+Not supported here. They were tried on 2026-09-24: three collections were built
+into portable MO2 instances without Vortex, Stardew Valley VERY Expanded among
+them, and a survey of all 16,076 published collections found little that
+Wabbajack does not already serve. What was learned, and how to pick the work up
+again from the `nexus-collections` branch, is in
+[docs/nexus-collections.md](docs/nexus-collections.md).
+
 ## Download order
 
 Archives are fetched **smallest first** by default. On a free Nexus account,
