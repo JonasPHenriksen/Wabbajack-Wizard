@@ -28,6 +28,14 @@
   no sign-in of its own.
 - The downloader verifies an MD5 when an archive carries one, and the Nexus
   client can read one file's record and a collection's download link.
+- **A game folder of your choosing.** A collection built for an older game
+  version is built from a copy at that version: Prepare's panel has a Game
+  folder for collections, remembered per list, and the console stage asks for
+  one when the versions differ. `wj_collection.py assemble-game` lays the old
+  depots Steam's console downloads into a folder of their own and reads the
+  version back; never into a Steam library.
+- The report counts the mod rules that name two of the collection's own mods,
+  the only ones that decide a conflict, instead of every rule the curator had.
 
 ## 1.2.0 — 2026-09-19
 

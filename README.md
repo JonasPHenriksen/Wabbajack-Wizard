@@ -753,6 +753,39 @@ line matters.
 `install` is Prepare's hand-over from the command line, for a list already
 staged.
 
+Of a curator's mod rules, only those naming two mods of the collection can
+decide a conflict here - many name mods from the rest of their setup - so the
+report counts those, matched by MD5, and says so when there are none.
+
+### A collection built for an older game
+
+SKSE and its plugins are built for one executable, so a collection made for
+1.5.97 does not run on a 1.7.104 game. The instance copies a game folder into
+Stock Game, and that folder need not be the store's install: Prepare's panel
+has a **Game folder** for a collection, filled with the install the store scan
+found, remembered per list once changed, and the console stage asks for one
+when the versions differ. A copy at the older version comes from Steam itself.
+Its console (`steam://open/console`) downloads a depot at an old manifest into
+`steamapps\content\app_<app>\depot_<depot>`, beside the install rather than into
+it; for 1.5.97, one at a time:
+
+```
+download_depot 489830 489831 7848722008564294070
+download_depot 489830 489832 8702665189575304780
+download_depot 489830 489833 2289561010626853674
+```
+
+and then
+
+```
+.python\python.exe wj_collection.py assemble-game --out "D:\Modding\Games\Skyrim SE 1.5.97"
+```
+
+lays them over each other, in order, into a folder of their own, reads the
+executable's version back, and records what it was made from. It refuses a
+folder inside a Steam library and one holding anything but an earlier
+assembly, so the store's install can never be the target.
+
 ### Why the names come from the v1 API
 
 A collection records each file's display name, not the name it downloads
@@ -892,7 +925,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1114 checks across seventeen suites. None of them touch the live archive pools:
+environment instead). 1136 checks across seventeen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -917,7 +950,7 @@ exactly the failure they want to check.
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
 | `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, and the Start tab opening a second window from the first one's file without measuring anything |
 | `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
-| `t17_collection` | Nexus collections: every form of a collection's address, collection.json turned into Archives[] (a removed file, a bundled mod, another site's link), the list file read by the planner, the light cache and the sorter like a modlist, MD5 verification, a fetch end to end against a stub API with a later revision asking only about what changed, the staged folder checked file by file, the feeds never asked about a collection, and the collections2mo2 command, environment, instance-path checks and checksum refusal; `t15_gui` drives the fetch box and the Prepare hand-over |
+| `t17_collection` | Nexus collections: every form of a collection's address, collection.json turned into Archives[] (a removed file, a bundled mod, another site's link), the list file read by the planner, the light cache and the sorter like a modlist, MD5 verification, a fetch end to end against a stub API with a later revision asking only about what changed, the staged folder checked file by file, the feeds never asked about a collection, the collections2mo2 command, environment, instance-path checks and checksum refusal, which mod rules count, a chosen game folder, and a game folder assembled from Steam depots; `t15_gui` drives the fetch box and the Prepare hand-over |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the

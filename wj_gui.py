@@ -1657,12 +1657,23 @@ class App:
         self.install_info = tk.StringVar(value="Stage a list first.")
         ttk.Label(inst, textvariable=self.install_info, justify="left", wraplength=1000).grid(
             row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(inst, text="Install to:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        # A collection's instance copies a game folder, which need not be the
+        # store's install: a collection built for an older version wants a
+        # copy at that version. Shown only for a collection.
+        self.game_widgets = [ttk.Label(inst, text="Game folder:")]
+        self.game_path = tk.StringVar()
+        self.game_widgets.append(ttk.Entry(inst, textvariable=self.game_path))
+        self.game_widgets.append(ttk.Button(inst, text="Browse...", command=self._pick_game_dir))
+        for col, w in enumerate(self.game_widgets):
+            w.grid(row=1, column=col, sticky="ew" if col == 1 else "w", pady=(6, 0),
+                   padx=(4, 0) if col == 2 else 0)
+            w.grid_remove()
+        ttk.Label(inst, text="Install to:").grid(row=2, column=0, sticky="w", pady=(6, 0))
         self.install_path = tk.StringVar()
-        ttk.Entry(inst, textvariable=self.install_path).grid(row=1, column=1, sticky="ew", pady=(6, 0))
-        ttk.Button(inst, text="Browse...", command=self._pick_install_dir).grid(row=1, column=2, padx=(4, 0), pady=(6, 0))
+        ttk.Entry(inst, textvariable=self.install_path).grid(row=2, column=1, sticky="ew", pady=(6, 0))
+        ttk.Button(inst, text="Browse...", command=self._pick_install_dir).grid(row=2, column=2, padx=(4, 0), pady=(6, 0))
         self.install_button = self.action(inst, "Start the Wabbajack install", self.prepare_install)
-        self.install_button.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.install_button.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.install_button.configure(state="disabled")
 
     def _fill_prepare(self):
@@ -1679,6 +1690,15 @@ class App:
         d = filedialog.askdirectory(parent=self.root, title="Where should Wabbajack install this list?")
         if d:
             self.install_path.set(os.path.normpath(d))
+
+    def _pick_game_dir(self):
+        d = filedialog.askdirectory(parent=self.root, title="Which game folder should the instance copy?")
+        if d:
+            self.game_path.set(os.path.normpath(d))
+
+    def _show_game_row(self, show):
+        for w in self.game_widgets:
+            (w.grid if show else w.grid_remove)()
 
     def prepare_stage(self):
         sel = selected_indices(self.prepare_table.tree)
@@ -1755,6 +1775,7 @@ class App:
         stem = W.stem_of(fn)
         self.install_frame.configure(text="Hand it to Wabbajack")
         self.install_button.configure(text="Start the Wabbajack install")
+        self._show_game_row(False)
         if not wj:
             self.install_info.set("Wabbajack was not found. Set WABBAJACK_DIR in Settings if it is "
                                   "installed somewhere other than beside this folder.")
@@ -1847,10 +1868,11 @@ class App:
         read every staged archive for its MD5 - off the main thread, since
         that last part reads the whole list - then fill the panel."""
         path = os.path.join(A.MANIFESTS, fn)
+        game_source = (self.state.get("game_source") or {}).get(W.stem_of(fn))
 
         def job():
             try:
-                return {"plan": COL.install_plan(path)}
+                return {"plan": COL.install_plan(path, game_path=game_source)}
             except COL.CollectionError as e:
                 return {"error": str(e)}
         self.run_job("Checking the collection", job,
@@ -1869,14 +1891,19 @@ class App:
             lines.append("The button sets collections2mo2 up first: a pinned release into .c2mo2 "
                          "beside the scripts, checked against a checksum, nothing machine-wide.")
         if plan["game"]["matches"] is False:
-            lines.append("The game is not the version this collection was built for; its SKSE "
-                         "plugins will not load. Building asks before going ahead.")
+            lines.append("The game is not the version this collection was built for, so its SKSE "
+                         "plugins will not load. Give a game folder at the right version below "
+                         "(wj_collection.py assemble-game makes one from Steam's depots); "
+                         "building with this one asks first.")
         self.install_info.set("\n".join(lines))
         self.install_ctx = {"kind": "collection", "fn": fn, "plan": plan}
+        self._show_game_row(True)
+        self.game_path.set(plan["game"]["path"] or "")
         remembered = (self.state.get("install") or {}).get(W.stem_of(fn))
         if remembered:
             self.install_path.set(remembered)
-        # Only a missing c2mo2 is something the button itself can fix.
+        # Only a missing c2mo2 is something the button itself can fix, and a
+        # game folder is chosen in the panel, so neither holds the button.
         others = [b for b in plan["blockers"] if "collections2mo2 is not set up" not in b]
         self.install_button.configure(text="Set up collections2mo2, then build" if missing_c2
                                       else "Build the MO2 instance",
@@ -1890,14 +1917,21 @@ class App:
                                            "with room for a copy of the game.", parent=self.root)
             return
         target = os.path.abspath(os.path.expandvars(os.path.expanduser(target)))
+        game = self.game_path.get().strip().strip('"')
+        if game and os.path.normcase(os.path.abspath(game)) != os.path.normcase(
+                os.path.abspath(plan["game"]["path"] or "")):
+            COL.set_game(plan, os.path.abspath(os.path.expandvars(os.path.expanduser(game))))
         COL.set_instance(plan, target)
-        if plan["path_problems"]:
-            messagebox.showerror("Install", "Nothing started:\n\n" + "\n".join(plan["path_problems"]),
+        problems = plan["game_problems"] + plan["path_problems"]
+        if problems:
+            messagebox.showerror("Install", "Nothing started:\n\n" + "\n".join(problems),
                                  parent=self.root)
             return
         if plan["game"]["matches"] is False and not messagebox.askyesno(
-                "Game version", "The game is not the version this collection was built for, so "
-                                "its SKSE plugins will fail to load. Build it anyway?",
+                "Game version", f"The game at {plan['game']['path']} is "
+                                f"{plan['game']['version'] or 'of unknown version'}; this collection "
+                                f"was built for {', '.join(plan['wanted'])}, so its SKSE plugins "
+                                f"will fail to load. Build it anyway?",
                 icon="warning", parent=self.root):
             return
         key = A.WJ.resolve_api_key(None, A.HERE, prompt=False)
@@ -1916,7 +1950,11 @@ class App:
             return
         stem = W.stem_of(ctx["fn"])
         self.state.setdefault("install", {})[stem] = target
+        if plan["game"]["how"] == "chosen for this collection":
+            self.state.setdefault("game_source", {})[stem] = plan["game"]["path"]
         A.save_state(self.state)
+        chosen_game = plan["game"]["path"] if plan["game"]["how"] == "chosen for this collection" \
+            else None
 
         def job():
             say = lambda s: W.out(s)                 # noqa: E731
@@ -1924,7 +1962,7 @@ class App:
             try:
                 if not p["c2"]:
                     COL.setup_c2mo2(say=say)
-                    p = COL.set_instance(COL.install_plan(p["list"]), target)
+                    p = COL.set_instance(COL.install_plan(p["list"], game_path=chosen_game), target)
                 return COL.install(p, key, on_line=lambda l: W.out("  | " + l))
             except COL.CollectionError as e:
                 W.out(f"[ERROR] {e}")

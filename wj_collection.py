@@ -48,10 +48,16 @@ storage path, so each file's own v1 record is asked instead, the way c2mo2
 asks it. Its answers are kept in the list file, and a later revision asks only
 about the files that changed.
 
+A collection is built for one game version, and SKSE plugins load on no other.
+When the store's install is newer, `assemble-game` lays the older depots that
+Steam's console downloads into a game folder of their own, and the build copies
+that into Stock Game instead; the store's install is never touched.
+
 Commands:
     wj_collection.py fetch <collection URL or slug> [--revision N] [--force]
     wj_collection.py inspect <list name, URL or slug> [--md5] [--no-game]
     wj_collection.py setup-c2mo2
+    wj_collection.py assemble-game --out <new game folder> [--game GAMETYPE] [--depots A,B,C]
     wj_collection.py install <list name> --out <instance folder> [--game-path DIR] [--yes]
 """
 
@@ -639,6 +645,25 @@ def fetch(text, manifest_dir, nexus, revision=None, force=False, say=None):
 # ----------------------------------------------------------------------
 # What a collection asks of this machine
 # ----------------------------------------------------------------------
+def internal_rules(manifest):
+    """How many before/after rules name two mods of this collection.
+
+    A curator's rules are copied from their whole Vortex setup, so many name a
+    mod the collection does not include; only a rule whose two ends are both in
+    it can decide a conflict here, and those are the ones c2mo2 applies. Both
+    ends are matched by MD5, the one identity they carry reliably."""
+    md5s = {((m.get("source") or {}).get("md5") or "").lower()
+            for m in manifest.get("mods") or []} - {""}
+    n = 0
+    for r in manifest.get("modRules") or []:
+        if r.get("type") not in ("before", "after"):
+            continue
+        a = (((r.get("source") or {}).get("fileMD5")) or "").lower()
+        b = (((r.get("reference") or {}).get("fileMD5")) or "").lower()
+        n += a in md5s and b in md5s
+    return n
+
+
 def features(manifest):
     """What the collection's install uses, counted: the parts c2mo2 replays
     and the parts it cannot."""
@@ -652,6 +677,7 @@ def features(manifest):
         t = (m.get("details") or {}).get("type") or ""
         if t:
             typed[t] = typed.get(t, 0) + 1
+    rules = manifest.get("modRules") or []
     return {
         "mods": len(mods),
         "sources": kinds,
@@ -661,7 +687,8 @@ def features(manifest):
         "overrides": sum(1 for m in mods if m.get("fileOverrides")),
         "optional": sum(1 for m in mods if m.get("optional")),
         "types": typed,
-        "rules": len(manifest.get("modRules") or []),
+        "rules": len(rules),
+        "rules_internal": internal_rules(manifest),
         "plugins": len(manifest.get("plugins") or []),
         "plugin_rules": len(((manifest.get("pluginRules") or {}).get("plugins")) or []),
         "tools": len(manifest.get("tools") or []),
@@ -803,8 +830,12 @@ def report_lines(report):
     if feat["types"]:
         bits.append("game-root mods: " + ", ".join(f"{n} {t}" for t, n in sorted(feat["types"].items()))
                     + " (through Root Builder)")
-    if feat["rules"]:
-        bits.append(f"{feat['rules']} mod rule(s) deciding conflicts")
+    if feat["rules_internal"]:
+        bits.append(f"{feat['rules_internal']} mod rule(s) between its own mods deciding "
+                    f"conflicts")
+    elif feat["rules"]:
+        bits.append("no mod rule between its own mods (its " + str(feat["rules"])
+                    + " name mods it does not include)")
     if feat["plugins"]:
         bits.append(f"{feat['plugins']} plugin(s)" + (f", {feat['plugin_rules']} plugin rule(s)"
                                                      if feat["plugin_rules"] else ""))
@@ -902,6 +933,83 @@ def check_instance_path(list_path, downloads, out, game_path):
         problems.append("the instance is on a network drive; the game runs from it, so put "
                         "it on a local disk (the archives can stay on the share)")
     return problems
+
+
+# ----------------------------------------------------------------------
+# A game folder at another version, from Steam's depots
+# ----------------------------------------------------------------------
+# Steam's console downloads one depot at one manifest into
+# steamapps\content\app_<app>\depot_<depot>, beside the install rather than
+# into it. A game at an older version is those depots laid over each other in
+# order, and a folder of its own keeps it: the store's install stays current,
+# and every instance built for that version copies from the one folder.
+STEAM_APPS = {
+    "SkyrimSpecialEdition": ("489830", ("489831", "489832", "489833")),
+}
+ASSEMBLED_MARK = "wj_assembled.json"
+
+
+def steam_path():
+    """Where Steam is installed, from the registry; None when it cannot say."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
+            return os.path.normpath(winreg.QueryValueEx(k, "SteamPath")[0])
+    except (OSError, ImportError):
+        return None
+
+
+def depot_folders(app, depots, steam=None):
+    base = os.path.join(steam or steam_path() or "", "steamapps", "content", f"app_{app}")
+    return [os.path.join(base, f"depot_{d}") for d in depots]
+
+
+def assemble_game(gametype, out, depots=None, steam=None, say=None):
+    """Lay Steam's downloaded depots over each other, in order, into a game
+    folder of their own. Returns the version of the executable that results.
+
+    Never into a Steam library - that is the store's install, and overwriting
+    it is exactly what this exists to avoid - and never over a folder holding
+    anything but an earlier assembly of this kind."""
+    if gametype not in STEAM_APPS:
+        raise CollectionError(f"no Steam depots are known for {gametype}")
+    app, default = STEAM_APPS[gametype]
+    folders = depot_folders(app, depots or default, steam)
+    missing = [f for f in folders if not os.path.isdir(f) or not os.listdir(f)]
+    if missing:
+        raise CollectionError("not downloaded yet: " + ", ".join(missing))
+    out_abs = os.path.abspath(out)
+    if "steamapps" in [p.lower() for p in out_abs.replace("/", "\\").split("\\")]:
+        raise CollectionError(f"{out_abs} is inside a Steam library; give a folder of its own")
+    if os.path.isdir(out_abs) and os.listdir(out_abs) \
+            and not os.path.isfile(os.path.join(out_abs, ASSEMBLED_MARK)):
+        raise CollectionError(f"{out_abs} already holds something; give an empty or new folder")
+    os.makedirs(out_abs, exist_ok=True)
+    total = 0
+    for folder in folders:
+        count = size = 0
+        for root, _dirs, files in os.walk(folder):
+            rel = os.path.relpath(root, folder)
+            target = out_abs if rel == "." else os.path.join(out_abs, rel)
+            os.makedirs(target, exist_ok=True)
+            for name in files:
+                src = os.path.join(root, name)
+                shutil.copy2(src, os.path.join(target, name))
+                count += 1
+                size += os.path.getsize(src)
+        _say(say, f"  {os.path.basename(folder)}: {count} file(s), {WJ.human_bytes(size)}")
+        total += size
+    exe = os.path.join(out_abs, GAME_EXES.get(gametype, ""))
+    version = exe_version(exe)
+    if not version:
+        raise CollectionError(f"the depots laid down no readable {GAME_EXES.get(gametype)}; "
+                              f"check that each depot download finished")
+    with open(os.path.join(out_abs, ASSEMBLED_MARK), "w", encoding="utf-8") as f:
+        json.dump({"game": gametype, "app": app, "depots": list(depots or default),
+                   "version": version, "from": folders,
+                   "made": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}, f, indent=1)
+    _say(say, f"  {out_abs}: {WJ.human_bytes(total)}, {GAME_EXES[gametype]} {version}")
+    return version
 
 
 # ----------------------------------------------------------------------
@@ -1077,11 +1185,12 @@ def install_plan(list_path, out=None, game_path=None):
     """Everything the hand-over needs, and what stands in its way.
 
     Returns a dict: list, info (wizard.json), downloads, game (path, how,
-    version, matches), c2 (find_c2mo2()), staged (ok, problems), blockers -
-    the reasons it cannot start - and, once an instance folder is chosen
-    (here or with set_instance()), out and path_problems. Reading every staged
-    archive for its MD5 is the slow part, so a plan is made once and pointed at
-    a folder afterwards."""
+    version, wanted, matches), c2 (find_c2mo2()), staged (ok, problems),
+    blockers - the reasons it cannot start - game_problems, and, once an
+    instance folder is chosen (here or with set_instance()), out and
+    path_problems. Reading every staged archive for its MD5 is the slow part,
+    so a plan is made once, then pointed at a game folder (set_game()) and an
+    instance folder (set_instance()) as those are chosen."""
     data = read_list_file(list_path)
     wiz = data["wizard"]
     gametype = DOMAIN_GAMETYPE.get(wiz["domain"], wiz["domain"])
@@ -1095,16 +1204,6 @@ def install_plan(list_path, out=None, game_path=None):
         blockers.append("collections2mo2 needs Python; run this from the scripts, not a build")
     elif not c2["current"]:
         blockers.append("the collections2mo2 in .c2mo2 is not the pinned commit; set it up again")
-    how = "given on the command line"
-    if not game_path:
-        game_path, how = game_install(gametype)
-    exe = os.path.join(game_path, GAME_EXES.get(gametype, "")) if game_path else None
-    have = exe_version(exe) if exe else None
-    game = {"path": game_path, "how": how, "version": have,
-            "matches": version_matches(have, (data["collection"].get("info") or {})
-                                       .get("gameVersions"))}
-    if not game_path or not os.path.isdir(game_path):
-        blockers.append(f"the game install was not found ({how}); give it with --game-path")
     if not os.path.isdir(downloads):
         staged = (0, [("(folder)", "the list has not been staged yet")])
     else:
@@ -1112,10 +1211,39 @@ def install_plan(list_path, out=None, game_path=None):
     if staged[1]:
         blockers.append(f"{len(staged[1])} archive(s) are missing or wrong in the staged folder")
     plan = {"list": list_path, "info": wiz, "gametype": gametype, "downloads": downloads,
-            "game": game, "c2": c2, "staged": staged, "blockers": blockers,
-            "out": None, "path_problems": []}
+            "wanted": list((data["collection"].get("info") or {}).get("gameVersions") or []),
+            "c2": c2, "staged": staged, "blockers": blockers, "game": None,
+            "game_problems": [], "out": None, "path_problems": []}
+    set_game(plan, game_path)
     if out:
         set_instance(plan, out)
+    return plan
+
+
+def set_game(plan, game_path=None):
+    """Point a plan at the game folder the instance copies into Stock Game.
+
+    None means the install Wabbajack's store scan finds - the one Steam keeps
+    current. Anything else is a copy kept at another version: a collection
+    built for 1.5.97 wants a 1.5.97 game, which is exactly what a Stock Game
+    copy makes possible without touching the store's install."""
+    gametype = plan["gametype"]
+    how = "chosen for this collection"
+    if not game_path:
+        game_path, how = game_install(gametype)
+    exe = os.path.join(game_path, GAME_EXES.get(gametype, "")) if game_path else None
+    have = exe_version(exe) if exe else None
+    plan["game"] = {"path": game_path, "how": how, "version": have,
+                    "matches": version_matches(have, plan["wanted"])}
+    problems = []
+    if not game_path or not os.path.isdir(game_path):
+        problems.append(f"the game folder was not found ({how})")
+    elif exe and not os.path.isfile(exe):
+        problems.append(f"{game_path} holds no {GAME_EXES.get(gametype)}, so it is not a game "
+                        f"folder")
+    plan["game_problems"] = problems
+    if plan.get("out"):
+        set_instance(plan, plan["out"])
     return plan
 
 
@@ -1125,6 +1253,11 @@ def set_instance(plan, out):
     plan["path_problems"] = (check_instance_path(plan["list"], plan["downloads"], plan["out"],
                                                  plan["game"]["path"]) if out else [])
     return plan
+
+
+def stops(plan):
+    """Every reason the plan cannot start, in the order they are worth fixing."""
+    return plan["blockers"] + plan.get("game_problems", []) + plan.get("path_problems", [])
 
 
 def plan_lines(plan):
@@ -1138,11 +1271,12 @@ def plan_lines(plan):
         lines.append(f"              {name}: {why}")
     if len(problems) > 15:
         lines.append(f"              ... and {len(problems) - 15} more")
+    want = ", ".join(plan.get("wanted") or []) or "no particular version"
     if game["path"]:
         verdict = {True: "matches", False: "DIFFERS from", None: "cannot be compared with"}[
             game["matches"]]
         lines.append(f"Game        {game['path']}  (version {game['version'] or '?'}, "
-                     f"{verdict} what the collection wants)")
+                     f"{verdict} the {want} the collection wants)")
     else:
         lines.append(f"Game        not found: {game['how']}")
     c2 = plan["c2"]
@@ -1150,18 +1284,18 @@ def plan_lines(plan):
                                    if c2 else "collections2mo2 is not set up"))
     if plan.get("out"):
         lines.append(f"Instance    {plan['out']}  (portable MO2, the game copied into Stock Game)")
-    for b in plan["blockers"] + plan.get("path_problems", []):
+    for b in stops(plan):
         lines.append("[NO] " + b)
     return lines
 
 
 def install(plan, api_key, on_line=None):
     """Run c2mo2 for a plan with nothing in its way. Returns its exit code."""
-    stops = plan["blockers"] + plan.get("path_problems", [])
+    problems = stops(plan)
     if not plan.get("out"):
-        stops = stops + ["no instance folder was chosen"]
-    if stops:
-        raise CollectionError("; ".join(stops))
+        problems = problems + ["no instance folder was chosen"]
+    if problems:
+        raise CollectionError("; ".join(problems))
     wiz, c2 = plan["info"], plan["c2"]
     os.makedirs(plan["out"], exist_ok=True)
     args = c2mo2_args(c2, wiz["url"], wiz["revision"], plan["out"], plan["game"]["path"],
@@ -1224,6 +1358,15 @@ def cmd_setup(_args):
     return 0
 
 
+def cmd_assemble(args):
+    depots = [d.strip() for d in args.depots.split(",")] if args.depots else None
+    print(f"Laying Steam's depots into {args.out}...")
+    version = assemble_game(args.game, args.out, depots=depots, steam=args.steam)
+    print(f"A {args.game} {version} game folder is ready. Give it to a build with "
+          f"--game-path, or as the game folder in the window's Prepare tab.")
+    return 0
+
+
 def cmd_install(args):
     mdir = _manifest_dir()
     fn = resolve_list(mdir, args.ref)
@@ -1233,9 +1376,13 @@ def cmd_install(args):
     plan = install_plan(os.path.join(mdir, fn), out, game_path=args.game_path)
     for line in plan_lines(plan):
         print(line)
-    if plan["blockers"] or plan["path_problems"]:
+    if stops(plan):
         print("\nNothing started.")
         return 2
+    if plan["game"]["matches"] is False and not args.yes:
+        print("\nThe game is not the version this collection was built for: its SKSE plugins "
+              "will not load. Give a copy at the right version with --game-path "
+              "(assemble-game makes one from Steam's depots).")
     if not args.yes:
         try:
             if input("\nBuild the instance?  [y] yes  [n] no  ").strip().lower() != "y":
@@ -1267,6 +1414,13 @@ def main(argv=None):
     i.set_defaults(func=cmd_inspect)
     s = sub.add_parser("setup-c2mo2", help="put the pinned collections2mo2 into .c2mo2")
     s.set_defaults(func=cmd_setup)
+    g = sub.add_parser("assemble-game",
+                       help="lay Steam's downloaded depots into a game folder of their own")
+    g.add_argument("--out", required=True, help="the new game folder (not in a Steam library)")
+    g.add_argument("--game", default="SkyrimSpecialEdition", help="the GameType (default: %(default)s)")
+    g.add_argument("--depots", default=None, help="comma-separated depot ids (default: the game's)")
+    g.add_argument("--steam", default=None, help="Steam's folder (default: from the registry)")
+    g.set_defaults(func=cmd_assemble)
     n = sub.add_parser("install", help="build the MO2 instance from a staged collection")
     n.add_argument("ref", help="the list name, the collection's address, or its slug")
     n.add_argument("--out", required=True, help="where the instance goes (a local disk)")

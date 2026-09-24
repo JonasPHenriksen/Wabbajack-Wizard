@@ -2066,8 +2066,11 @@ def offer_collection_install(state, filename, st):
     out("  Build its Mod Organizer 2 instance with collections2mo2?")
     out("  Checking the staged archives against the collection's MD5s...")
     say = lambda s: out(s)                           # noqa: E731 - out is swapped by the window
+    # A game folder chosen for this list before - a copy at an older version -
+    # is used again rather than the store's install.
+    game_source = (state.get("game_source") or {}).get(stem)
     try:
-        plan = COL.install_plan(path)
+        plan = COL.install_plan(path, game_path=game_source)
         if not plan["c2"]:
             out("  collections2mo2 is not set up in this folder yet. It goes into")
             out("  .c2mo2 beside the scripts: a pinned release checked against a")
@@ -2076,7 +2079,7 @@ def offer_collection_install(state, filename, st):
                 out("  Skipped. Nothing installed.")
                 return False
             COL.setup_c2mo2(say=say)
-            plan = COL.install_plan(path)
+            plan = COL.install_plan(path, game_path=game_source)
     except COL.CollectionError as e:
         out(f"  {e}")
         return False
@@ -2086,13 +2089,35 @@ def offer_collection_install(state, filename, st):
         out()
         out("  Not offering to build: the checks above have to pass first.")
         return False
-    if plan["game"]["matches"] is False:
+    # The game: the version the collection was built for, from a folder that
+    # is a game. A copy at the right version is the answer to a mismatch, so
+    # it is asked for rather than only warned about.
+    while plan["game_problems"] or plan["game"]["matches"] is False:
         out()
-        out("  The game is not the version this collection was built for. Its SKSE")
-        out("  plugins are built for one version and fail to load on another.")
-        if ask("   [c] carry on anyway   [s] skip", ("c", "s")) == "s":
+        if plan["game_problems"]:
+            for p in plan["game_problems"]:
+                out("  [NO] " + p)
+        else:
+            out(f"  The game at {plan['game']['path']} is {plan['game']['version']}; the")
+            out(f"  collection was built for {', '.join(plan['wanted'])}. Its SKSE plugins")
+            out("  are built for one version and fail to load on another. A copy at the")
+            out("  right version can be made from Steam's depots: wj_collection.py")
+            out("  assemble-game --out <folder>, after Steam's console has downloaded them.")
+        choices = ("g", "s") if plan["game_problems"] else ("g", "c", "s")
+        a = ask("   [g] use another game folder   "
+                + ("" if plan["game_problems"] else "[c] carry on anyway   ") + "[s] skip",
+                choices)
+        if a == "s":
             out("  Skipped. Nothing installed.")
             return False
+        if a == "c":
+            break
+        where = ask_path("Which game folder should the instance copy?", game_source)
+        if not where:
+            continue
+        COL.set_game(plan, os.path.abspath(where))
+        game = plan["game"]
+        out(f"    Game        {game['path']}  (version {game['version'] or '?'})")
 
     remembered = (state.get("install") or {}).get(stem)
     target = ask_path("Where should the MO2 instance go? It holds a copy of the game, "
@@ -2136,6 +2161,8 @@ def offer_collection_install(state, filename, st):
         return False
 
     state.setdefault("install", {})[stem] = plan["out"]
+    if plan["game"]["how"] == "chosen for this collection":
+        state.setdefault("game_source", {})[stem] = plan["game"]["path"]
     A.save_state(state)
     out()
     out("  Running collections2mo2. Copying the game takes a while; its output follows.")

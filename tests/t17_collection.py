@@ -558,5 +558,87 @@ for label, target in (("an archive with no collection.json", os.path.join(TMP, "
     except COL.CollectionError:
         check("%s is refused" % label, True)
 
+# ---------------------------------------------------------------- 17.14
+print("\n 17.14  which rules count, and the game folder a build copies")
+ruled = json.loads(json.dumps(MANIFEST))
+ruled["modRules"] = [
+    {"type": "before", "source": {"fileMD5": md5(ALPHA)}, "reference": {"fileMD5": md5(BETA)}},
+    {"type": "after", "source": {"fileMD5": md5(ETA).upper()}, "reference": {"fileMD5": md5(ALPHA)}},
+    {"type": "after", "source": {"fileMD5": md5(ALPHA)}, "reference": {"fileMD5": "f" * 32}},
+    {"type": "conflicts", "source": {"fileMD5": md5(ALPHA)}, "reference": {"fileMD5": md5(BETA)}},
+    {"type": "before", "source": {"logicalFileName": "Alpha"}, "reference": {"logicalFileName": "Beta"}},
+]
+check("a rule counts when both of its mods are in the collection, by MD5",
+      COL.internal_rules(ruled) == 2, str(COL.internal_rules(ruled)))
+check("  and the features say how many of all its rules those are",
+      COL.features(ruled)["rules_internal"] == 2 and COL.features(ruled)["rules"] == 5)
+report = {"wizard": {"name": "F", "author": "A", "revision": 1, "url": "u", "members": {},
+                     "left_out": []},
+          "features": COL.features(MANIFEST), "latest": None, "game": None,
+          "pools": {"have": [], "need": [], "md5_wrong": [], "md5_checked": False}}
+text = "\n".join(COL.report_lines(report))
+check("a collection whose rules all name outside mods says so",
+      "no mod rule between its own mods" in text, text)
+report["features"] = COL.features(ruled)
+check("  and one with rules between its own mods counts those",
+      "2 mod rule(s) between its own mods" in "\n".join(COL.report_lines(report)))
+
+gdir = os.path.join(TMP, "Games", "SSE")
+os.makedirs(gdir)
+COL.set_game(plan, gdir)
+check("a game folder holding no game executable is refused",
+      any("holds no SkyrimSE.exe" in p for p in plan["game_problems"]), str(plan["game_problems"]))
+check("  and that stops the build", any("SkyrimSE.exe" in p for p in COL.stops(plan)))
+shutil.copy2(sys.executable, os.path.join(gdir, "SkyrimSE.exe"))
+COL.set_game(plan, gdir)
+check("a real one is accepted", plan["game_problems"] == [] and plan["game"]["path"] == gdir,
+      str(plan["game_problems"]))
+check("  and remembered as chosen, not found", plan["game"]["how"] == "chosen for this collection")
+check("  its version is read and compared with the collection's",
+      plan["game"]["version"] == COL.exe_version(sys.executable)
+      and plan["game"]["matches"] is False and plan["wanted"] == ["1.7.104.0"],
+      str(plan["game"]))
+check("  and an instance chosen before is checked against the new folder",
+      plan["out"] and plan["path_problems"] == [], str(plan["path_problems"]))
+
+print("\n      a game folder at another version, from Steam's depots")
+steam = os.path.join(TMP, "Steam")
+content = os.path.join(steam, "steamapps", "content", "app_489830")
+for depot, files in (("489831", {"Data/Skyrim - Textures0.bsa": b"t0", "Data/Skyrim.esm": b"old"}),
+                     ("489832", {"Data/Skyrim - Voices_en0.bsa": b"v"}),
+                     ("489833", {"Data/Skyrim.esm": b"newest"})):
+    for rel, body in files.items():
+        p = os.path.join(content, "depot_" + depot, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        io.open(p, "wb").write(body)
+shutil.copy2(sys.executable, os.path.join(content, "depot_489833", "SkyrimSE.exe"))
+out_game = os.path.join(TMP, "Games", "Skyrim 1.5.97")
+v = COL.assemble_game(G, out_game, steam=steam, say=lambda s: None)
+check("the depots are laid into one folder", sorted(os.listdir(os.path.join(out_game, "Data")))
+      == ["Skyrim - Textures0.bsa", "Skyrim - Voices_en0.bsa", "Skyrim.esm"])
+check("  in order, so a later depot's file wins",
+      io.open(os.path.join(out_game, "Data", "Skyrim.esm"), "rb").read() == b"newest")
+check("  and the executable's version is what it returns", v == COL.exe_version(sys.executable))
+check("  with a record of what it was made from",
+      json.load(io.open(os.path.join(out_game, COL.ASSEMBLED_MARK)))["depots"]
+      == ["489831", "489832", "489833"])
+check("the same folder can be assembled again",
+      COL.assemble_game(G, out_game, steam=steam, say=lambda s: None) == v)
+for label, target, words in (
+        ("a folder inside a Steam library", os.path.join(steam, "steamapps", "common", "X"),
+         "Steam library"),
+        ("a folder that holds something else", gdir, "already holds")):
+    try:
+        COL.assemble_game(G, target, steam=steam, say=lambda s: None)
+        check("%s is refused" % label, False)
+    except COL.CollectionError as e:
+        check("%s is refused" % label, words in str(e), str(e))
+shutil.rmtree(os.path.join(content, "depot_489832"))
+try:
+    COL.assemble_game(G, os.path.join(TMP, "Games", "other"), steam=steam, say=lambda s: None)
+    check("a depot not downloaded yet stops it, by name", False)
+except COL.CollectionError as e:
+    check("a depot not downloaded yet stops it, by name", "depot_489832" in str(e), str(e))
+
 srv.shutdown()
 sys.exit(summary())
