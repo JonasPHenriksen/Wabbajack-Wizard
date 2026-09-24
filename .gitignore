@@ -90,6 +90,10 @@ park_before.json
 .c2mo2.new/
 .c2mo2.new.zip*
 
+# Mod Organizer's release archive, pinned by SHA-256, which wj_mo2.py lays
+# into every instance the Wizard builds itself; fetched again when missing.
+.mo2cache/
+
 # Wabbajack's published validation reports, cached so the browse stage can
 # say how much of a list you already hold without downloading its
 # .wabbajack. ~45 MB, entirely re-fetchable: wj_autoupdate.py --gallery

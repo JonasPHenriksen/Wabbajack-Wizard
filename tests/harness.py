@@ -22,7 +22,7 @@ SCRIPTS = ("wj_autoupdate.py", "wj_wizard.py", "wj_config.py",
            "wj_downloader.py", "wj_paths.py", "wj_assistwin.py",
            "wj_sorter.py", "wj_cdn.py",
            "wj_wabbajack.py", "wj_gallery.py", "wj_merge_pool.py",
-           "wj_collection.py")
+           "wj_collection.py", "wj_mo2.py")
 
 
 class Sandbox:

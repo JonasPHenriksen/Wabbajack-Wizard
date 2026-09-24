@@ -36,6 +36,7 @@ SUITES = [
     ("t15_gui.py", "the desktop window, driven through its own buttons"),
     ("t16_pool.py", "laying out a pool for a game you keep nothing for"),
     ("t17_collection.py", "Nexus collections as lists, and the collections2mo2 hand-over"),
+    ("t18_mo2.py", "the Wizard's own MO2 build: patches, Stardew layout, SMAPI, order"),
 ]
 
 total_pass = total_fail = 0

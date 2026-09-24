@@ -205,10 +205,10 @@ check("a direct source is an HttpDownloader with its URL",
 why = {x["mod"]: x for x in left}
 check("a removed Nexus file is left out, and says so",
       "Gamma removed" in why and "no longer serves" in why["Gamma removed"]["why"])
-check("a bundled mod is noted as c2mo2's to unpack",
-      "Epsilon bundled" in why and "collections2mo2 unpacks it" in why["Epsilon bundled"]["why"])
+check("a bundled mod is noted as the build's to unpack",
+      "Epsilon bundled" in why and "unpacked by the build" in why["Epsilon bundled"]["why"])
 check("a browse source is noted as not installed yet",
-      "Zeta browse" in why and "does not install" in why["Zeta browse"]["why"])
+      "Zeta browse" in why and "no build here does yet" in why["Zeta browse"]["why"])
 check("Nexus was asked once per Nexus file", len(nx.asked) == 4, str(nx.asked))
 nx2 = FakeNexus()
 known = {(101, 1001): NAMES[(101, 1001)], (102, 1002): NAMES[(102, 1002)]}

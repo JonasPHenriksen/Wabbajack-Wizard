@@ -714,10 +714,11 @@ than this tooling's.
 
 Most lists published today are Nexus collections, which only Vortex installs,
 one dialog at a time and straight into the game folder. This tooling treats a
-collection as one more list, and hands its install to
-[collections2mo2](https://github.com/spooknik/collections2mo2), which builds
-what Wabbajack builds: a portable Mod Organizer 2 instance with the game copied
-into a Stock Game folder, so the real install is never touched.
+collection as one more list, and builds what Wabbajack builds from it: a
+portable Mod Organizer 2 instance with the game copied into a Stock Game
+folder, so the real install is never touched. A Bethesda game's collection is
+handed to [collections2mo2](https://github.com/spooknik/collections2mo2); for
+the other games (Stardew Valley so far) the Wizard builds the instance itself.
 
 ```
 run.bat --collection https://www.nexusmods.com/games/skyrimspecialedition/collections/mi01mo
@@ -852,6 +853,36 @@ Two more steps run after every build, because nothing else does them:
   beside every other setup's. The Wizard turns MO2's profile-specific saves on
   after each render, so an instance's saves live in `profiles\<name>\saves`.
 
+### Other games: the Wizard's own build
+
+collections2mo2 builds the Bethesda games only. For a collection of another
+game MO2 runs, the Wizard builds the instance itself (`wj_mo2.py`), in the
+shape a Wabbajack list for that game has. Stardew Valley is the first, the most
+collected game after the Bethesda ones:
+
+| step | what the build does |
+| --- | --- |
+| Mod Organizer | 2.5.2's release archive, refused unless it has the pinned SHA-256, cached in `.mo2cache` (collections2mo2's copy is taken when it has one) and unpacked portable |
+| Stock Game | the game copied in, less any `Mods` folder or SMAPI the store's install holds |
+| SMAPI | its installer's `internal\windows\install.dat` goes into Stock Game, with the game's `Stardew Valley.deps.json` copied as `StardewModdingAPI.deps.json`, as SMAPI's own installer does; its bundled mods (Console Commands, Save Backup) stay in its MO2 mod |
+| every other mod | laid out as Vortex's Stardew extension lays it: each folder holding a `manifest.json` kept at its path in the archive, anything outside one dropped, an archive with no manifest as it is |
+| order | the collection's before/after rules between its own mods, matched by MD5, decide which mod wins a conflict; a cycle of rules is broken, and said |
+| patches | the curator's binary patches (bsdiff 4) applied, each only to the file its CRC32 says it was made from |
+| bundled mods | laid out of the list file, which keeps what the collection archive carried besides `collection.json` |
+
+SMAPI goes into Stock Game rather than through Root Builder, which is how The
+Bustling Valley does it: Root Builder copies a mod's `Root` folder into the
+game at launch, but MO2 still maps the folder itself into `Mods`, where SMAPI
+would take it for a mod without a manifest. The build happens in a folder of
+its own beside the instance and is moved into place only when complete, and
+only into a new or empty folder; one that fails leaves nothing behind.
+
+What no MO2 instance keeps apart for Stardew is the saves: the game writes
+them to `%APPDATA%\StardewValley\Saves` wherever it runs from, and MO2's
+Stardew plugin has no profile saves to redirect them with. A modded farm sits
+beside the vanilla ones there, and Steam Cloud syncs that folder, so start a
+new farm for the instance and leave the vanilla farms to the vanilla game.
+
 The instance holds a copy of the game, so it belongs on a local disk; the
 archives stay on the share.
 
@@ -939,7 +970,8 @@ recognised (if unfetchable) source rather than "unknown".
 | `wj_gui.py` | the desktop window: a tab per stage, a log pane, a Settings tab |
 | `wj_wizard.py` | the console wizard, and the per-stage helpers both front ends share |
 | `wj_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
-| `wj_collection.py` | Nexus collections: fetching one into a `.collection` list, what it needs, and the hand-over to collections2mo2 |
+| `wj_collection.py` | Nexus collections: fetching one into a `.collection` list, what it needs, and the build: the hand-over to collections2mo2, or to `wj_mo2.py` |
+| `wj_mo2.py` | the MO2 instance the Wizard builds itself, for the games collections2mo2 does not know: Stardew's layout, SMAPI, the order the rules make, bsdiff patches |
 | `wj_assistwin.py` | the download window assist mode shows Nexus pages in: WebView2 through pywebview, one page at a time, its own login |
 | `wj_sorter.py` | moves archives between pools |
 | `wj_cdn.py` | the Wabbajack CDN's multi-part protocol |
@@ -955,7 +987,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1178 checks across seventeen suites. None of them touch the live archive pools:
+environment instead). 1288 checks across eighteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -980,6 +1012,7 @@ exactly the failure they want to check.
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
 | `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, and the Start tab opening a second window from the first one's file without measuring anything |
 | `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
+| `t18_mo2` | the Wizard's own build: bsdiff patches made by hand (inserts, backwards seeks, past the old file's end, corrupt ones refused), a patch kept off a file it was not made from, the Stardew layout (nested manifests, one at the top, a locale folder, none), SMAPI's payload split between Stock Game and its mod, rules ordering the build and a cycle broken, MO2's own files, the pinned MO2 archive fetched and refused, and a Stardew collection fetched, planned and built end to end, the store's install left byte for byte as it was |
 | `t17_collection` | Nexus collections: every form of a collection's address, collection.json turned into Archives[] (a removed file, a bundled mod, another site's link), the list file read by the planner, the light cache and the sorter like a modlist, MD5 verification, a fetch end to end against a stub API with a later revision asking only about what changed, the staged folder checked file by file, the feeds never asked about a collection, the collections2mo2 command, environment, instance-path checks and checksum refusal, which mod rules count, a chosen game folder, a game folder assembled from Steam depots, a replaced file left out, tags given to an untagged collection, a FOMOD-packed file-for-file mod placed by MD5, a step a mod's readme asks for, and saves kept per profile; `t15_gui` drives the fetch box and the Prepare hand-over |
 
 Seven real bugs were found this way and are covered by regression checks: a

@@ -72,7 +72,7 @@ a = Analysis(
     hiddenimports=[
         "wj_autoupdate", "wj_cdn", "wj_config", "wj_downloader", "wj_gallery",
         "wj_gui", "wj_merge_pool", "wj_paths", "wj_sorter", "wj_wabbajack",
-        "wj_wizard", "wj_assistwin", "wj_collection",
+        "wj_wizard", "wj_assistwin", "wj_collection", "wj_mo2",
         # Optional at run time, mandatory in a build: without it every
         # download silently falls back to being checked by size alone.
         "xxhash",

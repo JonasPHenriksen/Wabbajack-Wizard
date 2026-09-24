@@ -40,6 +40,14 @@ this MIT code. The Nexus API key reaches it through its environment for that
 one run, so it needs no sign-in of its own and stores nothing in Windows'
 credential store.
 
+c2mo2 builds the Bethesda games only. A collection for another game MO2 runs -
+Stardew Valley, so far - is built by the Wizard itself (wj_mo2), in the same
+shape: a portable MO2 with the game in Stock Game, each mod laid out as that
+game's Vortex extension lays it, the rules deciding the order, and the
+curator's binary patches applied. Its bundled mods and patches come from the
+collection archive, which is why a list file keeps what that archive carried
+besides collection.json.
+
 What the file names are, and why they come from the v1 API: a collection
 records each file's display name, not the name it downloads under, and the
 pools and c2mo2 both know an archive by that download name. The GraphQL API
@@ -73,6 +81,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -83,6 +92,7 @@ from datetime import datetime, timezone
 import wj_paths
 import wj_config as CFG
 import wj_downloader as WJ
+import wj_mo2 as MO2
 import wj_wabbajack as WB
 
 LOG = logging.getLogger("wj_collection")
@@ -91,13 +101,14 @@ API_BASE = "https://api.nexusmods.com"
 GRAPHQL_URL = API_BASE + "/v2/graphql"
 SITE_URL = "https://www.nexusmods.com"
 SEP = "_@@_"
-FORMAT = 1                       # of wizard.json inside a .collection
+FORMAT = 2                       # of wizard.json inside a .collection; 2 keeps the extras
 
 # A collection names its game by Nexus domain; the pools know it by the
-# GameType Wabbajack uses. These are the games c2mo2 can build an instance
-# for; a collection for any other game is refused at fetch rather than pooled
-# for an install that cannot happen.
-DOMAIN_GAMETYPE = {
+# GameType Wabbajack uses. These are the games c2mo2 can build an instance for;
+# wj_mo2.GAMES adds the ones the Wizard builds itself, and a collection for any
+# other game is refused at fetch rather than pooled for an install that cannot
+# happen.
+C2MO2_DOMAINS = {
     "skyrimspecialedition":  "SkyrimSpecialEdition",
     "skyrim":                "Skyrim",
     "skyrimvr":              "SkyrimVR",
@@ -112,9 +123,11 @@ DOMAIN_GAMETYPE = {
     "enderal":               "Enderal",
     "enderalspecialedition": "EnderalSpecialEdition",
 }
+DOMAIN_GAMETYPE = dict(C2MO2_DOMAINS, **{d: g["gametype"] for d, g in MO2.GAMES.items()})
 
 # The executable whose version a collection's gameVersions is compared with.
 GAME_EXES = {
+    "StardewValley":         "Stardew Valley.exe",
     "SkyrimSpecialEdition":  "SkyrimSE.exe",
     "Skyrim":                "TESV.exe",
     "SkyrimVR":              "SkyrimVR.exe",
@@ -324,27 +337,39 @@ def latest_revision(slug):
 # The collection archive
 # ----------------------------------------------------------------------
 SEVENZIP_MAGIC = b"7z\xbc\xaf\x27\x1c"
+seven_zip = MO2.seven_zip
+
+# What a collection archive carries besides collection.json, by top folder:
+# mods packed into the collection itself, binary patches, INI tweaks. A list
+# file keeps them under EXTRAS_PREFIX, unless together they are more than a
+# list file should carry; a build then fetches the archive again.
+EXTRA_TOPS = ("bundled", "patches", "ini tweaks")
+EXTRAS_PREFIX = "archive/"
+EXTRAS_CAP = 256 * 1024 * 1024
 
 
-def seven_zip():
-    """A 7-Zip console this tooling may run without installing one: the copy
-    Wabbajack ships inside its own install, else the one c2mo2 keeps."""
-    cands = []
-    wj = WB.find_wabbajack()
-    if wj and wj.get("version"):
-        base = os.path.join(wj["dir"], wj["version"])
-        cands += [os.path.join(base, "Extractors", "windows-x64", "7z.exe"),
-                  os.path.join(base, "cli", "Extractors", "windows-x64", "7z.exe")]
-    cands.append(os.path.join(c2mo2_dir(), "tools", "7za.exe"))
-    return next((c for c in cands if os.path.isfile(c)), None)
+def _slt_files(text):
+    """The files - not folders - of a `7z l -slt` listing. A folder says so in
+    its Attributes in a 7z, and with Folder = + in some other formats."""
+    out, cur = [], {}
+    for line in text.splitlines() + [""]:
+        if not line.strip():
+            if cur.get("Path") and cur.get("Folder") != "+" \
+                    and not cur.get("Attributes", "").startswith("D"):
+                out.append(cur["Path"])
+            cur = {}
+            continue
+        key, _sep, value = line.partition(" = ")
+        cur[key.strip()] = value.strip()
+    return out
 
 
 def read_archive(path):
     """(collection.json as a dict, member names) from a collection archive.
 
-    Only collection.json is extracted, and only into memory: bundled files,
-    patches and INI tweaks are c2mo2's to unpack, and it fetches the archive
-    itself. The member names are kept to say what the archive carries."""
+    Only collection.json is read here, and only into memory; read_extras()
+    takes the rest. The member names - files, not folders - say what the
+    archive carries."""
     with open(path, "rb") as f:
         head = f.read(6)
     if head.startswith(b"PK"):
@@ -364,7 +389,7 @@ def read_archive(path):
         listing = subprocess.run([exe, "l", "-ba", "-slt", path], capture_output=True,
                                  stdin=subprocess.DEVNULL, creationflags=flags)
         text = listing.stdout.decode("utf-8", "replace")
-        members = [line[7:].strip() for line in text.splitlines() if line.startswith("Path = ")]
+        members = _slt_files(text)
         if listing.returncode != 0 or not members:
             raise CollectionError("7-Zip could not list the collection archive")
         target = next((m for m in members if m.replace("\\", "/").lower() == "collection.json"),
@@ -385,6 +410,45 @@ def read_archive(path):
     if not isinstance(manifest, dict) or not isinstance(manifest.get("mods"), list):
         raise CollectionError("collection.json has no mods list")
     return manifest, [m.replace("\\", "/") for m in members]
+
+
+def _is_extra(rel):
+    parts = rel.split("/")
+    return len(parts) > 1 and parts[0].lower() in EXTRA_TOPS and bool(parts[-1])
+
+
+def read_extras(path):
+    """{member: bytes} of what a collection archive carries besides
+    collection.json, or None when that is more than EXTRAS_CAP."""
+    with open(path, "rb") as f:
+        head = f.read(6)
+    if head.startswith(b"PK"):
+        with zipfile.ZipFile(path) as z:
+            infos = [i for i in z.infolist()
+                     if not i.is_dir() and _is_extra(i.filename.replace("\\", "/"))]
+            if sum(i.file_size for i in infos) > EXTRAS_CAP:
+                return None
+            return {i.filename.replace("\\", "/"): z.read(i) for i in infos}
+    exe = seven_zip()
+    if not exe:
+        raise CollectionError("no 7-Zip was found to open the collection archive")
+    scratch = tempfile.mkdtemp(prefix="wj-collection-")
+    try:
+        got = subprocess.run([exe, "x", "-y", "-o" + scratch, path], capture_output=True,
+                             stdin=subprocess.DEVNULL,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if got.returncode not in (0, 1):
+            raise CollectionError("7-Zip could not unpack the collection archive")
+        found = [f for f in MO2.list_files(scratch) if _is_extra(f)]
+        if sum(os.path.getsize(os.path.join(scratch, *f.split("/"))) for f in found) > EXTRAS_CAP:
+            return None
+        out = {}
+        for f in found:
+            with open(os.path.join(scratch, *f.split("/")), "rb") as fh:
+                out[f] = fh.read()
+        return out
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def member_counts(members):
@@ -489,14 +553,13 @@ def archive_entries(nexus, manifest, known=None, say=None):
             entries.append(_http_entry(url, fname, src, mod))
         elif kind == "bundle":
             left_out.append({"mod": name, "source": kind,
-                             "why": "packed inside the collection itself; collections2mo2 "
-                                    "unpacks it, nothing to download"})
+                             "why": "packed inside the collection itself and unpacked by the "
+                                    "build; nothing to download"})
         else:
             where = src.get("url") or src.get("instructions") or mod.get("instructions") or ""
             left_out.append({"mod": name, "source": kind or "?",
-                             "why": "downloaded by hand from another site, which "
-                                    "collections2mo2 does not install yet"
-                                    + (f" ({where})" if where else "")})
+                             "why": "downloaded by hand from another site, which no build "
+                                    "here does yet" + (f" ({where})" if where else "")})
 
     def lookup(item):
         domain, mod_id, file_id, src, mod = item
@@ -527,9 +590,11 @@ def archive_entries(nexus, manifest, known=None, say=None):
     return entries, left_out
 
 
-def write_list_file(path, info, manifest, entries, left_out, members):
+def write_list_file(path, info, manifest, entries, left_out, members, extras=None):
     """Write the .collection: 'modlist' for every stage that reads a list,
-    collection.json as fetched, and wizard.json for this module."""
+    collection.json as fetched, wizard.json for this module, and under
+    archive/ what the collection archive carried besides collection.json
+    (`extras`, from read_extras(); None when it was not kept)."""
     domain = info["domain"]
     modlist = {
         "Name": info["name"],
@@ -557,14 +622,33 @@ def write_list_file(path, info, manifest, entries, left_out, members):
         "fetched": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "members": member_counts(members),
         "left_out": left_out,
+        "extras": extras is not None,
     }
     tmp = path + ".tmp"
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("modlist", json.dumps(modlist, indent=1, ensure_ascii=False))
         z.writestr("collection.json", json.dumps(manifest, indent=1, ensure_ascii=False))
         z.writestr("wizard.json", json.dumps(wizard, indent=1, ensure_ascii=False))
+        for member, data in sorted((extras or {}).items()):
+            z.writestr(EXTRAS_PREFIX + member, data)
     os.replace(tmp, path)
     return path
+
+
+def list_extras(path):
+    """What the collection archive carried besides collection.json, as the
+    list file keeps it: {member: bytes}. None when the list does not keep them
+    - fetched before lists did, or too big to keep."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = {n.lower(): n for n in z.namelist()}
+            wiz = json.loads(z.read(names["wizard.json"]).decode("utf-8-sig"))
+            if not wiz.get("extras"):
+                return None
+            return {n[len(EXTRAS_PREFIX):]: z.read(n) for n in z.namelist()
+                    if n.startswith(EXTRAS_PREFIX) and not n.endswith("/")}
+    except (OSError, KeyError, zipfile.BadZipFile, ValueError) as e:
+        raise CollectionError(f"{os.path.basename(path)} could not be read ({e})")
 
 
 def read_list_file(path):
@@ -598,7 +682,8 @@ def fetch(text, manifest_dir, nexus, revision=None, force=False, say=None):
     domain = info["domain"] or ref["game"]
     if domain not in DOMAIN_GAMETYPE:
         raise CollectionError(f"'{info['name']}' is a collection for '{domain}', which "
-                              f"collections2mo2 cannot build an instance for")
+                              f"neither collections2mo2 nor the Wizard's own build can make "
+                              f"an instance for yet")
     info["domain"] = domain
 
     existing = find_list_file(manifest_dir, info["slug"])
@@ -626,6 +711,7 @@ def fetch(text, manifest_dir, nexus, revision=None, force=False, say=None):
         if not WJ.stream_download(link, scratch, quiet=True):
             raise CollectionError("the collection archive did not download")
         manifest, members = read_archive(scratch)
+        extras = read_extras(scratch)
     finally:
         for p in (scratch, scratch + ".part"):
             try:
@@ -636,7 +722,7 @@ def fetch(text, manifest_dir, nexus, revision=None, force=False, say=None):
     entries, left_out = archive_entries(nexus, manifest, known=known, say=say)
     filename = existing or (list_stem(info["name"], info["slug"]) + CFG.COLLECTION_EXT)
     write_list_file(os.path.join(manifest_dir, filename), info, manifest, entries, left_out,
-                    members)
+                    members, extras=extras)
     _say(say, f"  Wrote {filename}: {len(entries)} archive(s) to pool"
               + (f", {len(left_out)} mod(s) not downloadable here" if left_out else "") + ".")
     return filename, True
@@ -840,9 +926,50 @@ def inspect(list_path, md5=False, look_up_game=True, look_up_latest=True, say=No
     return report
 
 
+def engine_for(domain):
+    """Who builds an instance for a game: "c2mo2" for the Bethesda games,
+    "wizard" for the ones wj_mo2 knows, None for any other."""
+    if domain in C2MO2_DOMAINS:
+        return "c2mo2"
+    if domain in MO2.GAMES:
+        return "wizard"
+    return None
+
+
+def installer_name(plan_or_domain):
+    """The installer, named for a message."""
+    engine = plan_or_domain.get("engine") if isinstance(plan_or_domain, dict) \
+        else engine_for(plan_or_domain)
+    return "collections2mo2" if engine == "c2mo2" else "the Wizard's own build"
+
+
+def version_note(plan_or_domain):
+    """Why a game version other than the collection's matters, for this game."""
+    domain = plan_or_domain["info"]["domain"] if isinstance(plan_or_domain, dict) \
+        else plan_or_domain
+    if engine_for(domain) == "wizard":
+        loader = MO2.GAMES[domain]["loader"]
+        return (f"{loader} and its mods are built against one game version; on another, "
+                f"some of them fail to load")
+    return "SKSE plugins are built for one game version; on a different one they fail to load"
+
+
+def needs_setup(plan):
+    """Is the installer itself still to be set up (only c2mo2 ever is)?"""
+    return plan.get("engine") == "c2mo2" and not plan.get("c2")
+
+
+def done_lines(plan):
+    """What to know about an instance the Wizard built, once it is built."""
+    if plan.get("engine") != "wizard":
+        return []
+    return list(MO2.GAMES[plan["info"]["domain"]].get("after_build") or ())
+
+
 def report_lines(report):
     """The report as the lines the console, the window and the CLI all show."""
     wiz, feat, pools = report["wizard"], report["features"], report["pools"]
+    wizard = engine_for(wiz.get("domain")) == "wizard"
     lines = [f"{wiz['name']} by {wiz.get('author') or '?'}  (revision {wiz['revision']}, "
              f"{wiz['url']})"]
     latest = report.get("latest")
@@ -869,7 +996,9 @@ def report_lines(report):
         bits.append(f"{feat['replicate']} installed file-for-file from recorded hashes")
     if feat["types"]:
         bits.append("game-root mods: " + ", ".join(f"{n} {t}" for t, n in sorted(feat["types"].items()))
-                    + " (through Root Builder)")
+                    + (" (into Stock Game)" if wizard else " (through Root Builder)"))
+    if wizard and feat["patches"]:
+        bits.append(f"{feat['patches']} mod(s) patched with the curator's binary patches")
     if feat["rules_internal"]:
         bits.append(f"{feat['rules_internal']} mod rule(s) between its own mods deciding "
                     f"conflicts")
@@ -884,7 +1013,7 @@ def report_lines(report):
     if members.get("ini_tweaks"):
         lines.append(f"             {members['ini_tweaks']} INI tweak file(s), merged by collections2mo2")
     gaps = []
-    if feat["patches"]:
+    if feat["patches"] and not wizard:
         gaps.append(f"{feat['patches']} mod(s) carry binary patches, which collections2mo2 does "
                     f"not apply yet: those files install unpatched")
     if feat["overrides"]:
@@ -904,8 +1033,7 @@ def report_lines(report):
             lines.append(f"             version {game['version'] or '?'}; the collection wants "
                          f"{want} [{verdict}]")
             if game["matches"] is False:
-                lines.append("             SKSE plugins are built for one game version; on a "
-                             "different one they fail to load.")
+                lines.append("             " + version_note(wiz.get("domain")) + ".")
     return lines
 
 
@@ -1274,8 +1402,15 @@ def install_plan(list_path, out=None, game_path=None, nexus=None):
     downloads = os.path.join(WJ.resolve_game_dirs(gametype)[0],
                              os.path.splitext(os.path.basename(list_path))[0])
     blockers = []
-    c2 = find_c2mo2()
-    if not c2:
+    engine = engine_for(wiz["domain"])
+    c2 = find_c2mo2() if engine == "c2mo2" else None
+    if engine == "wizard":
+        if not seven_zip():
+            blockers.append("no 7-Zip was found to unpack the mods with (the one inside "
+                            "Wabbajack's install is used)")
+    elif engine is None:
+        blockers.append(f"no build here makes an instance for '{wiz['domain']}'")
+    elif not c2:
         blockers.append("collections2mo2 is not set up here yet (wj_collection.py setup-c2mo2)")
     elif not c2["python"]:
         blockers.append("collections2mo2 needs Python; run this from the scripts, not a build")
@@ -1296,8 +1431,9 @@ def install_plan(list_path, out=None, game_path=None, nexus=None):
         blockers.append(f"{len(staged[1])} archive(s) are missing or wrong in the staged folder")
     plan = {"list": list_path, "info": wiz, "gametype": gametype, "downloads": downloads,
             "wanted": list((data["collection"].get("info") or {}).get("gameVersions") or []),
-            "c2": c2, "staged": staged, "unavailable": unavailable, "blockers": blockers,
-            "game": None, "game_problems": [], "out": None, "path_problems": []}
+            "engine": engine, "c2": c2, "staged": staged, "unavailable": unavailable,
+            "blockers": blockers, "game": None, "game_problems": [], "out": None,
+            "path_problems": []}
     set_game(plan, game_path)
     if out:
         set_instance(plan, out)
@@ -1332,10 +1468,17 @@ def set_game(plan, game_path=None):
 
 
 def set_instance(plan, out):
-    """Point a plan at an instance folder, and say what is wrong with it."""
+    """Point a plan at an instance folder, and say what is wrong with it.
+
+    c2mo2 adds to an instance it built before; the Wizard's own build only
+    ever makes a new one, so a folder with anything in it is refused."""
     plan["out"] = os.path.abspath(out) if out else None
     plan["path_problems"] = (check_instance_path(plan["list"], plan["downloads"], plan["out"],
                                                  plan["game"]["path"]) if out else [])
+    if out and plan.get("engine") == "wizard":
+        why = MO2.check_out(plan["out"])
+        if why:
+            plan["path_problems"].append(why)
     return plan
 
 
@@ -1366,8 +1509,15 @@ def plan_lines(plan):
     else:
         lines.append(f"Game        not found: {game['how']}")
     c2 = plan["c2"]
-    lines.append("Installer   " + (f"collections2mo2 {(c2['commit'] or '?')[:7]} in {c2['dir']}"
-                                   if c2 else "collections2mo2 is not set up"))
+    if plan.get("engine") == "wizard":
+        game_name = MO2.GAMES[wiz["domain"]]["mo2_name"]
+        lines.append(f"Installer   the Wizard's own build for {game_name}: Mod Organizer "
+                     f"{MO2.MO2_VERSION} portable"
+                     + ("" if MO2.mo2_cached() else
+                        f", downloaded first ({WJ.human_bytes(MO2.MO2_SIZE)}, pinned by SHA-256)"))
+    else:
+        lines.append("Installer   " + (f"collections2mo2 {(c2['commit'] or '?')[:7]} in {c2['dir']}"
+                                       if c2 else "collections2mo2 is not set up"))
     if plan.get("out"):
         lines.append(f"Instance    {plan['out']}  (portable MO2, the game copied into Stock Game)")
     for b in stops(plan):
@@ -1686,13 +1836,237 @@ def rerender_profile(plan, api_key, on_line=None):
     return run_c2mo2(args, c2mo2_env(c2, api_key), cwd=c2["dir"], on_line=on_line)
 
 
+# ----------------------------------------------------------------------
+# The Wizard's own build, for the games c2mo2 does not know
+# ----------------------------------------------------------------------
+def download_extras(wiz, nexus, say=None):
+    """What a collection archive carries besides collection.json, fetched
+    afresh: for a list file that does not keep it."""
+    _say(say, "fetching the collection archive for its bundled mods and patches...")
+    info = revision_info(wiz["slug"], wiz["revision"])
+    link, status = nexus.collection_archive_url(info["download_link"])
+    if not link:
+        raise CollectionError("Nexus would not hand out the collection archive: " + status)
+    scratch = tempfile.mkdtemp(prefix="wj-collection-")
+    blob = os.path.join(scratch, "collection.bin")
+    try:
+        if not WJ.stream_download(link, blob, quiet=True):
+            raise CollectionError("the collection archive did not download")
+        extras = read_extras(blob)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if extras is None:
+        raise CollectionError(f"the collection archive carries more than "
+                              f"{WJ.human_bytes(EXTRAS_CAP)} besides its collection.json")
+    return extras
+
+
+def bundled_source(extras, src, dest):
+    """Lay a bundled mod's files out of the collection archive into dest.
+    Returns what to install from - the folder, or the archive it was packed
+    as - or None when the archive does not carry it.
+
+    Vortex packs a bundled mod as the folder it had in the curator's staging
+    area, under bundled/<file expression>/, or as the archive it came in,
+    under bundled/<file name>."""
+    names = [n for n in (src.get("fileExpression"), src.get("logicalFilename"),
+                         posixpath.splitext(str(src.get("logicalFilename") or ""))[0]) if n]
+    lowered = {m.lower(): m for m in extras}
+    for name in names:
+        prefix = f"bundled/{name}/".lower()
+        files = {m[len(prefix):]: extras[m] for low, m in lowered.items() if low.startswith(prefix)}
+        if files:
+            for rel, data in files.items():
+                target = os.path.join(dest, *rel.split("/"))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "wb") as f:
+                    f.write(data)
+            return dest
+        member = lowered.get(f"bundled/{name}".lower())
+        if member is not None:
+            os.makedirs(dest, exist_ok=True)
+            target = os.path.join(dest, MO2.safe_name(posixpath.basename(member)))
+            with open(target, "wb") as f:
+                f.write(extras[member])
+            return target
+    return None
+
+
+def mod_patches(extras, mod):
+    """[(path in the mod, CRC32, BSDIFF40 bytes or None)] for a mod's binary
+    patches, which the collection archive keeps at
+    patches/<mod name>/<path>.diff."""
+    patches = mod.get("patches") or {}
+    if not patches:
+        return []
+    name = str(mod.get("name") or "")
+    folders = {m.split("/")[1] for m in extras if m.lower().startswith("patches/") and m.count("/") >= 2}
+    folder = name if name in folders else next(
+        (f for f in folders if f.strip().lower() == name.strip().lower()), name)
+    lowered = {m.lower(): m for m in extras}
+    out = []
+    for rel, crc in sorted(patches.items()):
+        rel = str(rel).replace("\\", "/").strip("/")
+        member = lowered.get(f"patches/{folder}/{rel}.diff".lower())
+        out.append((rel, str(crc or ""), extras[member] if member else None))
+    return out
+
+
+def rule_edges(manifest, jobs):
+    """The collection's before/after rules between two of the mods being
+    built, as (a, b) index pairs into jobs: a loads before b, so b wins.
+
+    Both ends are matched by MD5, as internal_rules() counts them; a bundled
+    mod, which has none, by its file expression or file name. A rule naming
+    an MD5 no mod has names a file the collection does not include."""
+    mods = manifest.get("mods") or []
+    by_md5, by_name = {}, {}
+    for i, job in enumerate(jobs):
+        src = mods[job["index"]].get("source") or {}
+        md5 = str(src.get("md5") or "").lower()
+        if md5:
+            by_md5.setdefault(md5, i)
+            continue
+        for key in ("fileExpression", "logicalFilename"):
+            if src.get(key):
+                by_name.setdefault(str(src[key]).lower(), i)
+
+    def find(ref):
+        ref = ref or {}
+        md5 = str(ref.get("fileMD5") or "").lower()
+        if md5:
+            return by_md5.get(md5)
+        for key in ("fileExpression", "logicalFileName"):
+            if ref.get(key) and str(ref[key]).lower() in by_name:
+                return by_name[str(ref[key]).lower()]
+        return None
+
+    edges = []
+    for rule in manifest.get("modRules") or []:
+        kind = rule.get("type")
+        if kind not in ("before", "after"):
+            continue
+        a, b = find(rule.get("source")), find(rule.get("reference"))
+        if a is None or b is None or a == b:
+            continue
+        edges.append((a, b) if kind == "before" else (b, a))
+    return edges
+
+
+def wizard_mods(plan, manifest, extras, scratch):
+    """The collection as wj_mo2's build takes it. Returns (mods, left_out,
+    set_aside): the mods lowest priority first, [(mod, why)] for those that
+    cannot be built, and the rules dropped to break a cycle, as name pairs."""
+    wiz = plan["info"]
+    game = MO2.GAMES[wiz["domain"]]
+    by_ids, by_url = {}, {}
+    for a in read_list_file(plan["list"])["modlist"].get("Archives") or []:
+        st = a.get("State") or {}
+        if st.get("ModID") and st.get("FileID"):
+            by_ids[(int(st["ModID"]), int(st["FileID"]))] = a
+        if st.get("Url"):
+            by_url[st["Url"]] = a
+    unavailable = {n for n, _w in plan.get("unavailable") or []}
+    jobs, left_out = [], []
+    for idx, mod in enumerate(manifest.get("mods") or []):
+        src = mod.get("source") or {}
+        kind = str(src.get("type") or "").lower()
+        name = str(mod.get("name") or "").strip() or f"mod {idx + 1}"
+        mtype = (mod.get("details") or {}).get("type") or ""
+        if mtype and mtype != game["loader"]:
+            left_out.append((name, f"a '{mtype}' mod, which goes somewhere this build does not "
+                                   f"put mods yet"))
+            continue
+        job = {"index": idx, "name": name, "enabled": not mod.get("optional"),
+               "kind": "loader" if mtype == game["loader"] else "mod",
+               "hashes": mod.get("hashes"),
+               "meta": {"version": mod.get("version"),
+                        "comments": f"collection:{wiz['slug']}@{wiz['revision']}"}}
+        entry = None
+        if kind == "nexus":
+            entry = by_ids.get((_int(src.get("modId")), _int(src.get("fileId"))))
+            if entry:
+                job["meta"].update(mod_id=_int(src.get("modId")), file_id=_int(src.get("fileId")))
+        elif kind == "direct":
+            entry = by_url.get(src.get("url"))
+        elif kind == "bundle":
+            job["source"] = bundled_source(extras, src, os.path.join(scratch, str(idx)))
+            if not job["source"]:
+                left_out.append((name, "the collection archive does not carry its files"))
+                continue
+            job["meta"]["archive"] = src.get("logicalFilename") or ""
+        else:
+            left_out.append((name, "downloaded by hand from another site, which this build "
+                                   "does not do yet"))
+            continue
+        if kind in ("nexus", "direct"):
+            if not entry:
+                left_out.append((name, "the list file names no archive for it"))
+                continue
+            if entry["Name"] in unavailable:
+                left_out.append((name, "Nexus no longer serves the file the collection pins"))
+                continue
+            job["source"] = os.path.join(plan["downloads"], entry["Name"])
+            job["meta"]["archive"] = entry["Name"]
+        job["patches"] = mod_patches(extras, mod)
+        jobs.append(job)
+    for job, folder in zip(jobs, MO2.unique_names([MO2.safe_name(j["name"]) for j in jobs])):
+        job["folder"] = folder
+    order, set_aside = MO2.order_by_rules(len(jobs), rule_edges(manifest, jobs))
+    return ([jobs[i] for i in order], left_out,
+            [(jobs[a]["name"], jobs[b]["name"]) for a, b in set_aside])
+
+
+def build_with_wizard(plan, api_key, on_line=None):
+    """Build the instance with wj_mo2. Returns what it recorded."""
+    wiz = plan["info"]
+    manifest = read_list_file(plan["list"])["collection"]
+    extras = list_extras(plan["list"])
+    if extras is None:
+        extras = download_extras(wiz, WJ.NexusClient(api_key), say=on_line)
+    scratch = tempfile.mkdtemp(prefix="wj-bundled-")
+    try:
+        mods, left_out, set_aside = wizard_mods(plan, manifest, extras, scratch)
+        for name, why in left_out:
+            _say(on_line, f"left out: {name} ({why})")
+        for a, b in set_aside:
+            _say(on_line, f"a rule set aside, to break a cycle of rules: {a} before {b}")
+        record = {"collection": {"slug": wiz["slug"], "revision": wiz["revision"],
+                                 "name": wiz["name"], "author": wiz.get("author"),
+                                 "url": wiz["url"]},
+                  "list": os.path.basename(plan["list"]),
+                  "left_out": [{"mod": n, "why": w} for n, w in left_out],
+                  "rules_set_aside": [{"before": a, "after": b} for a, b in set_aside]}
+        info = MO2.build(wiz["domain"], plan["out"], plan["game"]["path"],
+                         MO2.safe_profile(wiz["name"]), mods, downloads=plan["downloads"],
+                         record=record, say=on_line)
+    except (MO2.BuildError, OSError) as e:
+        raise CollectionError(str(e))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    patched = [p for m in info["mods"] for p in m["patches"]]
+    applied = sum(1 for p in patched if p["result"] == "applied")
+    _say(on_line, f"built: {len(info['mods'])} mod(s) in profile '{info['profile']}'"
+                  + (f", {applied} of {len(patched)} patch(es) applied" if patched else "")
+                  + (f", {len(left_out)} left out" if left_out else ""))
+    return info
+
+
 def install(plan, api_key, on_line=None):
-    """Run c2mo2 for a plan with nothing in its way. Returns its exit code."""
+    """Build the instance for a plan with nothing in its way: c2mo2 for a
+    Bethesda game, wj_mo2 for the rest. Returns the exit code, 0 when built."""
     problems = stops(plan)
     if not plan.get("out"):
         problems = problems + ["no instance folder was chosen"]
     if problems:
         raise CollectionError("; ".join(problems))
+    if plan.get("engine") == "wizard":
+        try:
+            build_with_wizard(plan, api_key, on_line=on_line)
+        except CollectionError as e:
+            _say(on_line, f"[ERROR] {e}")
+            return 1
+        return 0
     wiz, c2 = plan["info"], plan["c2"]
     os.makedirs(plan["out"], exist_ok=True)
     seed_c2mo2_manifest(plan, WJ.NexusClient(api_key), say=on_line)
@@ -1786,9 +2160,9 @@ def cmd_install(args):
         print("\nNothing started.")
         return 2
     if plan["game"]["matches"] is False and not args.yes:
-        print("\nThe game is not the version this collection was built for: its SKSE plugins "
-              "will not load. Give a copy at the right version with --game-path "
-              "(assemble-game makes one from Steam's depots).")
+        print(f"\nThe game is not the version this collection was built for: "
+              f"{version_note(plan)}. Give a copy at the right version with --game-path "
+              f"(assemble-game makes one from Steam's depots).")
     if not args.yes:
         try:
             if input("\nBuild the instance?  [y] yes  [n] no  ").strip().lower() != "y":
@@ -1798,14 +2172,16 @@ def cmd_install(args):
             print("Nothing started (no answer; pass --yes to run unattended).")
             return 0
     rc = install(plan, key, on_line=lambda l: print("  | " + l))
-    print(f"\ncollections2mo2 exited {rc}." + (f" The instance is in {out}." if rc == 0 else ""))
+    print(f"\n{installer_name(plan)[0].upper() + installer_name(plan)[1:]} exited {rc}."
+          + (f" The instance is in {out}." if rc == 0 else ""))
     return 0 if rc == 0 else 1
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Nexus collections as lists: fetch, inspect, and build a portable MO2 "
-                    "instance with collections2mo2.")
+                    "instance (collections2mo2 for the Bethesda games, the Wizard's own "
+                    "build for the rest).")
     sub = ap.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fetch", help="fetch a collection and write its list file")
     f.add_argument("ref", help="the collection's address, nxm:// link, or slug")

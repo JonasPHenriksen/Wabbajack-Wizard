@@ -1881,21 +1881,22 @@ class App:
                      lambda res: self._show_collection_offer(fn, res))
 
     def _show_collection_offer(self, fn, res):
-        self.install_frame.configure(text="Build its Mod Organizer 2 instance (collections2mo2)")
+        plan = res.get("plan")
+        self.install_frame.configure(text="Build its Mod Organizer 2 instance"
+                                          + (f" ({COL.installer_name(plan)})" if plan else ""))
         if res.get("error"):
             self.install_info.set(res["error"])
             self.install_button.configure(state="disabled")
             return
-        plan = res["plan"]
         lines = COL.plan_lines(plan)
-        missing_c2 = not plan["c2"]
+        missing_c2 = COL.needs_setup(plan)
         if missing_c2:
             lines.append("The button sets collections2mo2 up first: a pinned release into .c2mo2 "
                          "beside the scripts, checked against a checksum, nothing machine-wide.")
         if plan["game"]["matches"] is False:
-            lines.append("The game is not the version this collection was built for, so its SKSE "
-                         "plugins will not load. Give a game folder at the right version below "
-                         "(wj_collection.py assemble-game makes one from Steam's depots); "
+            lines.append("The game is not the version this collection was built for. "
+                         + COL.version_note(plan) + ". Give a game folder at the right version "
+                         "below (wj_collection.py assemble-game makes one from Steam's depots); "
                          "building with this one asks first.")
         self.install_info.set("\n".join(lines))
         self.install_ctx = {"kind": "collection", "fn": fn, "plan": plan}
@@ -1932,8 +1933,8 @@ class App:
         if plan["game"]["matches"] is False and not messagebox.askyesno(
                 "Game version", f"The game at {plan['game']['path']} is "
                                 f"{plan['game']['version'] or 'of unknown version'}; this collection "
-                                f"was built for {', '.join(plan['wanted'])}, so its SKSE plugins "
-                                f"will fail to load. Build it anyway?",
+                                f"was built for {', '.join(plan['wanted'])}. "
+                                f"{COL.version_note(plan)}. Build it anyway?",
                 icon="warning", parent=self.root):
             return
         key = A.WJ.resolve_api_key(None, A.HERE, prompt=False)
@@ -1945,7 +1946,7 @@ class App:
                  f"downloads  {plan['downloads']}", f"game       {plan['game']['path']}",
                  f"instance   {target}"]
         lines += [f"left out   {name} ({why})" for name, why in plan.get("unavailable") or []]
-        if not plan["c2"]:
+        if COL.needs_setup(plan):
             lines.append("\ncollections2mo2 is downloaded into .c2mo2 first.")
         if not self.confirm("Build a Mod Organizer 2 instance", lines,
                             undo="The game is copied into the instance, which takes a while; "
@@ -1959,11 +1960,13 @@ class App:
         chosen_game = plan["game"]["path"] if plan["game"]["how"] == "chosen for this collection" \
             else None
 
+        who = COL.installer_name(plan)
+
         def job():
             say = lambda s: W.out(s)                 # noqa: E731
             p = plan
             try:
-                if not p["c2"]:
+                if COL.needs_setup(p):
                     COL.setup_c2mo2(say=say)
                     p = COL.set_instance(COL.install_plan(p["list"], game_path=chosen_game,
                                                           nexus=A.WJ.NexusClient(key)), target)
@@ -1974,12 +1977,12 @@ class App:
 
         def done(rc):
             if rc == 0:
-                messagebox.showinfo("Install", f"{stem} is a Mod Organizer 2 instance at {target}. "
-                                               f"Start it with ModOrganizer.exe there.",
-                                    parent=self.root)
+                messagebox.showinfo("Install", " ".join(
+                    [f"{stem} is a Mod Organizer 2 instance at {target}. Start it with "
+                     f"ModOrganizer.exe there."] + COL.done_lines(plan)), parent=self.root)
             else:
-                messagebox.showwarning("Install", ("collections2mo2 did not start" if rc is None
-                                                   else f"collections2mo2 exited {rc}")
+                messagebox.showwarning("Install", (f"{who} did not start" if rc is None
+                                                   else f"{who} exited {rc}")
                                        + ". The log says why; the staged folder is untouched, "
                                          "so re-running is safe.", parent=self.root)
         self.run_job("Building the MO2 instance", job, done)

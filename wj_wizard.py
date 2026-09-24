@@ -1864,8 +1864,8 @@ def stage_prepare(records, state=None):
     out("  Wabbajack can install it. Only one at a time: staging a second")
     out("  list would pull the shared archives back out of the first.")
     if any(COL.CFG.is_collection(fn) for fn in records):
-        out("  A Nexus collection is built into a Mod Organizer 2 instance by")
-        out("  collections2mo2 instead.")
+        out("  A Nexus collection is built into a Mod Organizer 2 instance instead:")
+        out("  by collections2mo2 for a Bethesda game, by the Wizard itself for others.")
 
     rows = []
     for fn in sorted(records):
@@ -1896,8 +1896,8 @@ def stage_prepare(records, state=None):
     out(f"  Staging {stem_of(fn)} ({A.WJ.game_label(st['game'])}).")
     if st["missing"] and COL.CFG.is_collection(fn):
         out(f"  Note: {st['missing']} archive(s) are still missing. A collection")
-        out("  is only handed over complete: collections2mo2 cannot download")
-        out("  on a free account, so fetch them first (stage 3).")
+        out("  is only built complete: no build can download on a free")
+        out("  account, so fetch them first (stage 3).")
     elif st["missing"]:
         out(f"  Note: {st['missing']} archive(s) are still missing, so this")
         out("  prepares what you have. Wabbajack will ask for the rest.")
@@ -2050,11 +2050,13 @@ def offer_install(state, filename, st):
 
 
 def offer_collection_install(state, filename, st):
-    """Hand a freshly staged Nexus collection to collections2mo2.
+    """Build a freshly staged Nexus collection into an MO2 instance: with
+    collections2mo2 for a Bethesda game, with the Wizard's own build
+    (wj_mo2) for any other it knows.
 
     The Wabbajack hand-over's shape, and its rule: everything that can stop
-    the build is checked before the question is asked. That collections2mo2
-    is set up here; that the game is found, and is the version the collection
+    the build is checked before the question is asked. That the installer is
+    set up here; that the game is found, and is the version the collection
     was built for; and that every archive in the staged folder is the one the
     collection pins, by MD5 - collections2mo2 would otherwise ask Nexus for a
     file it finds wrong, and on a free account that fails with a Premium error
@@ -2063,7 +2065,7 @@ def offer_collection_install(state, filename, st):
     path = os.path.join(A.MANIFESTS, filename)
     out()
     rule()
-    out("  Build its Mod Organizer 2 instance with collections2mo2?")
+    out("  Build its Mod Organizer 2 instance?")
     out("  Checking the staged archives against the collection's MD5s...")
     say = lambda s: out(s)                           # noqa: E731 - out is swapped by the window
     # A game folder chosen for this list before - a copy at an older version -
@@ -2075,7 +2077,7 @@ def offer_collection_install(state, filename, st):
     nexus = A.WJ.NexusClient(key) if key else None
     try:
         plan = COL.install_plan(path, game_path=game_source, nexus=nexus)
-        if not plan["c2"]:
+        if COL.needs_setup(plan):
             out("  collections2mo2 is not set up in this folder yet. It goes into")
             out("  .c2mo2 beside the scripts: a pinned release checked against a")
             out("  checksum, its libraries in .c2mo2\\site, nothing machine-wide.")
@@ -2103,8 +2105,8 @@ def offer_collection_install(state, filename, st):
                 out("  [NO] " + p)
         else:
             out(f"  The game at {plan['game']['path']} is {plan['game']['version']}; the")
-            out(f"  collection was built for {', '.join(plan['wanted'])}. Its SKSE plugins")
-            out("  are built for one version and fail to load on another. A copy at the")
+            out(f"  collection was built for {', '.join(plan['wanted'])}.")
+            out(f"  {COL.version_note(plan)}. A copy at the")
             out("  right version can be made from Steam's depots: wj_collection.py")
             out("  assemble-game --out <folder>, after Steam's console has downloaded them.")
         choices = ("g", "s") if plan["game_problems"] else ("g", "c", "s")
@@ -2143,7 +2145,7 @@ def offer_collection_install(state, filename, st):
              f"instance   {plan['out']}"]
     for name, why in plan["unavailable"]:
         lines.append(f"left out   {name} ({why})")
-    if os.path.isdir(plan["out"]) and os.listdir(plan["out"]):
+    if os.path.isdir(plan["out"]) and os.listdir(plan["out"]) and plan.get("engine") == "c2mo2":
         lines += ["", "That folder already has something in it. collections2mo2 keeps",
                   "an instance it built there and adds to it; anything else stays."]
     try:
@@ -2163,24 +2165,27 @@ def offer_collection_install(state, filename, st):
         return False
     key = A.WJ.resolve_api_key(None, A.HERE, prompt=True)
     if not key:
-        out("  A Nexus API key is needed; collections2mo2 fetches the collection with it.")
+        out("  A Nexus API key is needed; the build fetches the collection with it.")
         return False
 
     state.setdefault("install", {})[stem] = plan["out"]
     if plan["game"]["how"] == "chosen for this collection":
         state.setdefault("game_source", {})[stem] = plan["game"]["path"]
     A.save_state(state)
+    who = COL.installer_name(plan)
     out()
-    out("  Running collections2mo2. Copying the game takes a while; its output follows.")
+    out(f"  Running {who}. Copying the game takes a while; its output follows.")
     rule()
     rc = COL.install(plan, key, on_line=lambda l: out("  | " + l))
     rule()
     if rc == 0:
         out(f"  Done. {stem} is a Mod Organizer 2 instance at {plan['out']};")
         out(f"  start it with {os.path.join(plan['out'], 'ModOrganizer.exe')}.")
+        for line in COL.done_lines(plan):
+            out("  " + line)
     else:
-        out(f"  collections2mo2 exited {rc}. Its output above says why; the staged")
-        out("  folder is untouched, so re-running is safe.")
+        out(f"  {who[0].upper() + who[1:]} exited {rc}. Its output above says why; the")
+        out("  staged folder is untouched, so re-running is safe.")
     return rc == 0
 
 

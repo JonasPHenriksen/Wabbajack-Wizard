@@ -49,6 +49,24 @@
   folder; without it SKSE stopped at "binkw64_.dll failed to load". Every
   profile is given its own saves after each render, since collections2mo2
   writes `LocalSaves=false` and so shared them with every other setup.
+- **Collections for games collections2mo2 does not build, built by the Wizard
+  itself** (`wj_mo2.py`), starting with Stardew Valley. The instance has the
+  shape of a Wabbajack Stardew list's: Mod Organizer 2.5.2 portable, from its
+  release archive pinned by SHA-256 and cached in `.mo2cache`; the game copied
+  into Stock Game; SMAPI's loader laid into Stock Game with its bundled mods
+  left in its MO2 mod; every other mod laid out as Vortex's Stardew extension
+  lays it, by its SMAPI manifests; the collection's rules between its own mods
+  ordering the build, a cycle broken and named; and the curator's bsdiff
+  patches applied, each only to the file its CRC32 names. A build happens in a
+  folder beside the instance and moves into place when complete, only ever
+  into a new or empty folder. Tried on *Stardew Valley VERY Expanded*: the
+  patches for Ridgeside Village and Eli and Dylan land on the files they were
+  made from.
+- A `.collection` keeps what the collection archive carried besides
+  `collection.json` - bundled mods, patches, INI tweaks - under `archive/`, so
+  a build needs nothing more from Nexus; a list fetched before fetches the
+  archive again. A 7z collection archive's folders are no longer counted as
+  its files.
 
 ## 1.2.0 — 2026-09-19
 
