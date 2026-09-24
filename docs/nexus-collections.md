@@ -8,18 +8,20 @@ across two games. It is parked, because a survey of every published collection
 found little that Wabbajack does not already serve (see [The market](#the-market)).
 This note keeps what was learned, and how to pick it up again.
 
-The code lives on the branch `nexus-collections` (commit `a9410fa`, five
-commits on top of `27b43d2`) and is not merged. Nothing of it is on `main`.
+The code was on the branch `nexus-collections` (commit `a9410fa`, five commits
+on top of `27b43d2`). It was never merged, and the branch was deleted once
+this note was written, so nothing of the code is kept: this note is the
+record, and a return to the idea starts from it.
 
 ## What was built, on the branch
 
-| piece | what it does |
+| piece | what it did |
 | --- | --- |
-| `wj_collection.py` | `fetch` turns a collection into `<name>_@@_<slug>.collection` in the manifest folder: a zip whose `modlist` member has the shape of a `.wabbajack`'s (a GameType, one Archives[] entry per file with its name, size, MD5 and a Nexus State), with `collection.json`, `wizard.json`, and the archive's bundled mods and patches under `archive/`. Also `inspect`, `install`, `setup-c2mo2` and `assemble-game`. |
-| downloader, sorter, Space, Prepare | read a `.collection` like any other list, so they needed almost no change. The downloader checks an MD5 when an archive carries one. |
-| Bethesda games | built by [collections2mo2](https://github.com/spooknik/collections2mo2) (c2mo2), pinned at commit `ca460c7` and refused unless GitHub's archive of it has the SHA-256 `1056d1b1242431946722f4bddc7477ae4f33fd24c013f26ea9585aa106805aae`; installed into `.c2mo2`, its libraries in `.c2mo2\site`, run as a program of its own (it is GPL-3). The branch works around its gaps; see below. |
+| `wj_collection.py` | `fetch` turned a collection into `<name>_@@_<slug>.collection` in the manifest folder: a zip whose `modlist` member had the shape of a `.wabbajack`'s (a GameType, one Archives[] entry per file with its name, size, MD5 and a Nexus State), with `collection.json`, `wizard.json`, and the archive's bundled mods and patches under `archive/`. Also `inspect`, `install`, `setup-c2mo2` and `assemble-game`. |
+| downloader, sorter, Space, Prepare | read a `.collection` like any other list, so they needed almost no change. The downloader checked an MD5 when an archive carried one. |
+| Bethesda games | built by [collections2mo2](https://github.com/spooknik/collections2mo2) (c2mo2), pinned at commit `ca460c7` and refused unless GitHub's archive of it had the SHA-256 `1056d1b1242431946722f4bddc7477ae4f33fd24c013f26ea9585aa106805aae`; installed into `.c2mo2`, its libraries in `.c2mo2\site`, run as a program of its own (it is GPL-3). The branch worked around its gaps; see below. |
 | other games | built by the Wizard itself, `wj_mo2.py`: Stardew Valley so far. |
-| the window and the console | a **Nexus collection** box on the Browse tab and `run.bat --collection <address>`; Prepare builds the instance, with a Game folder row for a collection. |
+| the window and the console | a **Nexus collection** box on the Browse tab and `run.bat --collection <address>`; Prepare built the instance, with a Game folder row for a collection. |
 | tests | `t17_collection` (182 checks), `t18_mo2` (110) and additions to `t15_gui`: 1288 checks on the branch. |
 
 ## The three test collections
@@ -71,7 +73,7 @@ The good ones, by game:
 A "current" Wabbajack list is listed, not NSFW, not marked down, passing
 Wabbajack's download checks, and updated within the last twelve months.
 
-So the branch can build 29 of the 37 good collections (25 Bethesda, 4
+So the branch could build 29 of the 37 good collections (25 Bethesda, 4
 Stardew). A Cyberpunk builder would add five more, among them the most-used
 good collection on Nexus. The two most-used collections of all are adult
 Skyrim ones, with 612k and 375k users. Collections also fill a niche Wabbajack
@@ -103,7 +105,7 @@ lists rarely do: small, modular setups of 5 to 30 mods.
   one and no account can download it any more. Two of the three test
   collections had one: eFPS in Basic Essential Mods, and "They Deserve It Too -
   Portraits for Vendors" in Stardew Valley VERY Expanded. Vortex stops there
-  too; the branch names the mod and builds without it.
+  too; the branch named the mod and built without it.
 
 ## The Nexus API
 
@@ -124,7 +126,7 @@ lists rarely do: small, modular setups of 5 to 30 mods.
 - On a free account every file is a click on the website. The assist window
   made 64 of them take about four minutes.
 
-## collections2mo2's gaps, and what the branch does about them
+## collections2mo2's gaps, and what the branch did about them
 
 c2mo2 builds a portable MO2 with a Stock Game copy, replays FOMOD answers,
 orders mods by the rules and plugins by the curator's order, and routes
@@ -133,17 +135,17 @@ each handled around it with its code left exactly as pinned:
 
 | gap | effect | the branch's answer |
 | --- | --- | --- |
-| a collection without per-mod tags | every mod installed into one folder, since it keys installs by tag | gives each mod a tag, in a copy of the manifest it reads |
-| file-for-file mods matched by path | a FOMOD-packed archive (SMIM) placed 0 of its 1,427 files | places each listed file by MD5, as Vortex does, then has it re-render the profile |
-| a pinned file Nexus no longer serves | a Premium error on a free account, naming no file | named, left out, built with `--allow-missing` |
-| `LocalSaves=false` written on every render | the instance's saves shared with every other setup | profile saves turned back on after each render |
-| its version check reads the numeric version field | warns "1.0.0" for 1.5.97; cosmetic | the Wizard reads the string table |
-| MO2 and Root Builder archives and bundled zips copied into its downloads folder, which is the pool | clutter in the pool | none; the sorter moves them to Master |
-| no binary patches, no free-account downloads, no mods from other sites | | the Wizard downloads everything first and checks every MD5 |
+| a collection without per-mod tags | every mod installed into one folder, since it keys installs by tag | gave each mod a tag, in a copy of the manifest it reads |
+| file-for-file mods matched by path | a FOMOD-packed archive (SMIM) placed 0 of its 1,427 files | placed each listed file by MD5, as Vortex does, then had it re-render the profile |
+| a pinned file Nexus no longer serves | a Premium error on a free account, naming no file | named it, left it out, built with `--allow-missing` |
+| `LocalSaves=false` written on every render | the instance's saves shared with every other setup | turned profile saves back on after each render |
+| its version check reads the numeric version field | warns "1.0.0" for 1.5.97; cosmetic | read the version from the string table |
+| MO2 and Root Builder archives and bundled zips copied into its downloads folder, which is the pool | clutter in the pool | none; the sorter moved them to Master |
+| no binary patches, no free-account downloads, no mods from other sites | | downloaded everything first and checked every MD5 |
 
 A mod's readme can ask for a step no installer does. DLL Plugin Loader needs
 the game's `binkw64.dll` beside it as `binkw64_.dll`, or SKSE stops at
-"binkw64_.dll failed to load"; the branch copies it into the mod's Root folder
+"binkw64_.dll failed to load"; the branch copied it into the mod's Root folder
 (`ROOT_FIXUPS`). None of these gaps has been reported upstream.
 
 ## A collection built for an older game
@@ -176,10 +178,10 @@ says 1.0.0.0 in its numeric version field; its string table says 1.5.97.0.
 - SMAPI's installer package carries the loader as
   `internal\windows\install.dat`, which belongs in the game folder, with the
   game's `Stardew Valley.deps.json` copied as `StardewModdingAPI.deps.json`; it
-  ships its own `steam_appid.txt`. The builder puts it into Stock Game
-  directly rather than through Root Builder, because MO2 would also map a Root
-  folder into `Mods`, where SMAPI would see a mod with no manifest. Its bundled
-  mods, Console Commands and Save Backup, stay in its MO2 mod.
+  ships its own `steam_appid.txt`. The builder put it into Stock Game directly
+  rather than through Root Builder, because MO2 would also map a Root folder
+  into `Mods`, where SMAPI would see a mod with no manifest. Its bundled mods,
+  Console Commands and Save Backup, stayed in its MO2 mod.
 - The game never asks Steam to relaunch it (it makes no `RestartAppIfNecessary`
   call), so a Stock Game copy runs from the copy.
 - Saves cannot be kept apart. Stardew writes them to
@@ -189,7 +191,7 @@ says 1.0.0.0 in its numeric version field; its string table says 1.5.97.0.
 - Mod Organizer 2.5.2's release archive, `Mod.Organizer-2.5.2.7z`, is
   149,660,212 bytes with the SHA-256
   `e6376efd87fd5ddd95aee959405e8f067afa526ea6c2c0c5aa03c5108bf4a815`. GitHub
-  lists no digest for assets that old, so the branch pins this one.
+  lists no digest for assets that old, so the branch pinned this one.
 - A Wabbajack list for the same game is a good blueprint: The Bustling Valley's
   directives showed how a list author lays Stardew out in MO2.
 - MO2 2.5.2 has game plugins for 75 games (15 compiled, 60 in basic_games),
@@ -197,26 +199,38 @@ says 1.0.0.0 in its numeric version field; its string table says 1.5.97.0.
 
 ## Picking it up again
 
-For Stardew Valley VERY Expanded:
+On the machine that made it, the branch can be brought back while git still
+holds its commits, which is until its reflog entries expire and `git gc`
+prunes them, some 30 days after 2026-09-24:
 
-1. `.\git.bat checkout nexus-collections`, and `.\git.bat merge main` if
-   `main` has moved on since.
-2. Fetch the collection:
+```
+.\git.bat branch nexus-collections a9410fa
+```
+
+Merge `main` into it if `main` has moved on since. After that, the work is
+redone from this note. The pieces are the ones in the table above: a
+`.collection` list file the rest of the suite reads as a modlist, a fetch that
+names every file through the v1 API, a hand-over to c2mo2 for the Bethesda
+games with the workarounds in the table of its gaps, and a builder of the
+Wizard's own for everything else, laid out as the game's Vortex extension lays
+a mod. For Stardew Valley VERY Expanded the steps were then:
+
+1. Fetch the collection:
    `run.bat --collection https://www.nexusmods.com/games/stardewvalley/collections/tckf0m`,
    or the **Nexus collection** box on the Browse tab.
-3. Download what is missing: the Incomplete stage in assist mode, or
+2. Download what is missing: the Incomplete stage in assist mode, or
    `.python\python.exe wj_downloader.py --game StardewValley --list "Stardew Valley VERY Expanded_@@_tckf0m" --yes --nxm-assist --order smallest`.
    The 63 archives downloaded on 2026-09-24 were left in
    `Z:\Mod Archive\StardewValley\Master`, so unless Master has been cleared
    since, only the files the curator has changed need a click.
-4. Prepare: stage it and build the instance into a new, empty folder on a
+3. Prepare: stage it and build the instance into a new, empty folder on a
    local disk (last time `D:\Modding\SVVE`). Mod Organizer is downloaded on the
    first build.
-5. Start `ModOrganizer.exe` there and run SMAPI, which is already chosen. Start
+4. Start `ModOrganizer.exe` there and run SMAPI, which is already chosen. Start
    a new farm.
 
-A Skyrim or Fallout collection needs c2mo2 as well:
-`wj_collection.py setup-c2mo2`, which Prepare also offers.
+A Skyrim or Fallout collection needed c2mo2 as well, set up with
+`wj_collection.py setup-c2mo2`, which Prepare also offered.
 
 ## Open ends
 
@@ -232,7 +246,9 @@ A Skyrim or Fallout collection needs c2mo2 as well:
 ## What was cleaned up afterwards
 
 Once the note was written, the session's changes were undone, apart from the
-branch and the Stardew archives kept in Master:
+Stardew archives kept in Master:
+
+- The `nexus-collections` branch was deleted; it had never been pushed.
 
 - The three `.collection` lists were deleted the Wizard's way (stage 5a), which
   emptied their pool folders into Master and rebuilt both pools. The Bustling

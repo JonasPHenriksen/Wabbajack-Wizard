@@ -714,9 +714,8 @@ than this tooling's.
 Not supported here. They were tried on 2026-09-24: three collections were built
 into portable MO2 instances without Vortex, Stardew Valley VERY Expanded among
 them, and a survey of all 16,076 published collections found little that
-Wabbajack does not already serve. What was learned, and how to pick the work up
-again from the `nexus-collections` branch, is in
-[docs/nexus-collections.md](docs/nexus-collections.md).
+Wabbajack does not already serve. What was learned, and what picking the work
+up again would take, is in [docs/nexus-collections.md](docs/nexus-collections.md).
 
 ## Download order
 
