@@ -44,6 +44,11 @@
   serves is named and left out (`--allow-missing`) rather than waited for.
 - A game's version is read from the executable's string table: Skyrim
   1.5.97's numeric version field says 1.0.0.0.
+- **Steps no installer performs.** DLL Plugin Loader gets the game's
+  `binkw64.dll` beside it as `binkw64_.dll`, as its readme asks, in its Root
+  folder; without it SKSE stopped at "binkw64_.dll failed to load". Every
+  profile is given its own saves after each render, since collections2mo2
+  writes `LocalSaves=false` and so shared them with every other setup.
 
 ## 1.2.0 — 2026-09-19
 

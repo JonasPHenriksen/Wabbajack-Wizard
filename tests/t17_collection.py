@@ -835,5 +835,62 @@ try:
 finally:
     COL.run_c2mo2 = real_run
 
+# ---------------------------------------------------------------- 17.18
+print("\n 17.18  a step a mod's own instructions ask for and no installer does")
+inst6 = os.path.join(TMP, "instance6")
+game6 = os.path.join(TMP, "game6")
+os.makedirs(os.path.join(inst6, "c2mo2"))
+os.makedirs(game6)
+BINK = b"the game's own bink"
+io.open(os.path.join(game6, "binkw64.dll"), "wb").write(BINK)
+json.dump({"mods_dir": os.path.join(inst6, "mods"), "entries": [
+    {"name": "DLL Plugin Loader v1", "folder": "DLL Plugin Loader v1", "mod_id": 10546,
+     "strategy": "root"},
+    {"name": "Something Else", "folder": "Something Else", "mod_id": 777, "strategy": "data"}]},
+    io.open(os.path.join(inst6, "c2mo2", "l.install.json"), "w"))
+json.dump({"layers": [{"slug": "dd1", "revision": 1, "manifest": "c2mo2/none.json",
+                       "files": {"install": "c2mo2/l.install.json", "downloads": "x"}}],
+           "mods": {}}, io.open(os.path.join(inst6, "c2mo2-instance.json"), "w"))
+fplan = {"info": {"slug": "dd1", "revision": 1, "domain": "skyrimspecialedition"}, "out": inst6,
+         "game": {"path": game6}}
+done = COL.apply_root_fixups(fplan, say=lambda s: None)
+landed = os.path.join(inst6, "mods", "DLL Plugin Loader v1", "Root", "binkw64_.dll")
+check("DLL Plugin Loader gets the game's binkw64.dll beside it as binkw64_.dll",
+      done == [("DLL Plugin Loader v1", "binkw64_.dll")] and os.path.isfile(landed)
+      and io.open(landed, "rb").read() == BINK, str(done))
+check("  in its Root folder, so the game folder itself is not touched",
+      sorted(os.listdir(game6)) == ["binkw64.dll"])
+check("  and no other mod gets anything", not os.path.exists(os.path.join(inst6, "mods",
+                                                                          "Something Else")))
+io.open(landed, "wb").write(b"changed by hand")
+check("a second run leaves an existing file alone",
+      COL.apply_root_fixups(fplan, say=lambda s: None) == []
+      and io.open(landed, "rb").read() == b"changed by hand")
+check("another game's mod of the same id is not touched",
+      COL.apply_root_fixups(dict(fplan, info=dict(fplan["info"], domain="fallout4")),
+                            say=lambda s: None) == [])
+
+print("\n      every profile keeps its own saves")
+for pname, body in (("P1", "[General]\r\nLocalSaves=false\r\nLocalSettings=true\r\n"),
+                    ("P2", "[General]\nLocalSettings=true\n"),
+                    ("P3", "LocalSettings=true\n"),
+                    ("P4", "[General]\nLocalSaves=true\n")):
+    os.makedirs(os.path.join(inst6, "profiles", pname))
+    io.open(os.path.join(inst6, "profiles", pname, "settings.ini"), "w", newline="").write(body)
+changed = COL.keep_saves_local(inst6, say=lambda s: None)
+check("the profiles that shared the game's saves are changed, not the one that did not",
+      changed == ["P1", "P2", "P3"], str(changed))
+texts = {p: io.open(os.path.join(inst6, "profiles", p, "settings.ini"), newline="").read()
+         for p in ("P1", "P2", "P3")}
+check("  a false becomes true, keeping the file's line endings",
+      texts["P1"] == "[General]\r\nLocalSaves=true\r\nLocalSettings=true\r\n", repr(texts["P1"]))
+check("  a missing key is added under [General]",
+      texts["P2"] == "[General]\nLocalSaves=true\nLocalSettings=true\n", repr(texts["P2"]))
+check("  and a file with no section gets one",
+      texts["P3"].startswith("[General]\nLocalSaves=true\n"), repr(texts["P3"]))
+check("  each with a saves folder", all(os.path.isdir(os.path.join(inst6, "profiles", p, "saves"))
+                                        for p in ("P1", "P2", "P3")))
+check("  and running it again changes nothing", COL.keep_saves_local(inst6, say=lambda s: None) == [])
+
 srv.shutdown()
 sys.exit(summary())

@@ -1594,6 +1594,89 @@ def replicate_by_md5(plan, say=None):
     return fixed
 
 
+# Mods whose own instructions ask for a step no installer performs: a file of
+# the game's, under another name, beside the mod's own. Keyed by Nexus domain
+# and mod id; each step copies <game>/<file> to <mod folder>/Root/<as>, so Root
+# Builder lays both into Stock Game at launch and takes both away at exit, and
+# the game folder itself stays as the store shipped it.
+ROOT_FIXUPS = {
+    # DLL Plugin Loader (meh321), what NetScriptFramework loads through: its
+    # binkw64.dll stands in for the game's and then loads the original as
+    # binkw64_.dll. Its readme: 'Rename "binkw64.dll" to "binkw64_.dll"'.
+    # Without it SKSE's launch stops at "binkw64_.dll failed to load".
+    ("skyrimspecialedition", 10546): [("binkw64.dll", "binkw64_.dll")],
+}
+
+
+def apply_root_fixups(plan, say=None):
+    """Carry out ROOT_FIXUPS for the mods this instance holds. Returns
+    [(mod name, file written)]; nothing is overwritten."""
+    wiz = plan["info"]
+    layer = c2mo2_layer(plan["out"], wiz["slug"], wiz["revision"])
+    game = (plan.get("game") or {}).get("path")
+    if layer is None or not game:
+        return []
+    with open(layer["install"], encoding="utf-8") as f:
+        install = json.load(f)
+    mods_dir = install.get("mods_dir") or os.path.join(plan["out"], "mods")
+    done = []
+    for entry in install.get("entries") or []:
+        steps = ROOT_FIXUPS.get((wiz.get("domain"), entry.get("mod_id")))
+        if not steps or entry.get("strategy") == "failed":
+            continue
+        for source, target_name in steps:
+            src = os.path.join(game, source)
+            target = os.path.join(mods_dir, entry["folder"], "Root", target_name)
+            if os.path.exists(target) or not os.path.isfile(src):
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(src, target)
+            done.append((entry["name"], target_name))
+            _say(say, f"{entry['name']}: put the game's {source} beside it as {target_name}, "
+                      f"as its own instructions ask")
+    return done
+
+
+def keep_saves_local(out, say=None):
+    """Give every profile of an instance its own saves. Returns the profiles
+    changed.
+
+    c2mo2 writes LocalSaves=false with every profile render, which sends the
+    instance's saves to Documents\\My Games beside those of every other setup
+    on the machine: a 1.5.97 game then lists 1.7.104 saves it cannot load,
+    and loading another list's save can wreck it. MO2's profile-specific saves
+    keep them in profiles/<name>/saves, inside the instance, like the rest of
+    it. Run after every render, since each render turns it off again."""
+    profiles = os.path.join(out, "profiles")
+    changed = []
+    try:
+        names = sorted(os.listdir(profiles))
+    except OSError:
+        return changed
+    for name in names:
+        ini = os.path.join(profiles, name, "settings.ini")
+        if not os.path.isfile(ini):
+            continue
+        with open(ini, encoding="utf-8", newline="") as f:
+            text = f.read()
+        if re.search(r"(?im)^LocalSaves[ \t]*=[ \t]*true[ \t]*\r?$", text):
+            continue
+        nl = "\r\n" if "\r\n" in text else "\n"
+        if re.search(r"(?im)^LocalSaves[ \t]*=", text):
+            text = re.sub(r"(?im)^LocalSaves[ \t]*=[^\r\n]*", "LocalSaves=true", text)
+        elif re.search(r"(?im)^\[General\][ \t]*(?=\r?$)", text):
+            text = re.sub(r"(?im)^\[General\][ \t]*(?=\r?$)", "[General]" + nl + "LocalSaves=true",
+                          text, count=1)
+        else:
+            text = "[General]" + nl + "LocalSaves=true" + nl + text
+        with open(ini, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        os.makedirs(os.path.join(profiles, name, "saves"), exist_ok=True)
+        changed.append(name)
+        _say(say, f"profile '{name}' keeps its own saves (profiles\\{name}\\saves)")
+    return changed
+
+
 def rerender_profile(plan, api_key, on_line=None):
     """c2mo2's own re-render of the instance's profile, after the files under
     it have changed. Returns its exit code."""
@@ -1618,8 +1701,10 @@ def install(plan, api_key, on_line=None):
     rc = run_c2mo2(args, c2mo2_env(c2, api_key), cwd=c2["dir"], on_line=on_line)
     if rc != 0:
         return rc
+    apply_root_fixups(plan, say=on_line)
     if replicate_by_md5(plan, say=on_line):
         rc = rerender_profile(plan, api_key, on_line=on_line)
+    keep_saves_local(plan["out"], say=on_line)
     return rc
 
 
