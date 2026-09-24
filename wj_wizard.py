@@ -68,6 +68,7 @@ from datetime import datetime, timezone
 import wj_autoupdate as A
 import wj_wabbajack as WB
 import wj_gallery as G
+import wj_collection as COL
 
 try:
     import wj_config as CFG
@@ -1862,6 +1863,9 @@ def stage_prepare(records, state=None):
     out("  Gathers everything one modlist needs into its own folder, so")
     out("  Wabbajack can install it. Only one at a time: staging a second")
     out("  list would pull the shared archives back out of the first.")
+    if any(COL.CFG.is_collection(fn) for fn in records):
+        out("  A Nexus collection is built into a Mod Organizer 2 instance by")
+        out("  collections2mo2 instead.")
 
     rows = []
     for fn in sorted(records):
@@ -1890,7 +1894,11 @@ def stage_prepare(records, state=None):
     fn, st = rows[picks[0]]
     out()
     out(f"  Staging {stem_of(fn)} ({A.WJ.game_label(st['game'])}).")
-    if st["missing"]:
+    if st["missing"] and COL.CFG.is_collection(fn):
+        out(f"  Note: {st['missing']} archive(s) are still missing. A collection")
+        out("  is only handed over complete: collections2mo2 cannot download")
+        out("  on a free account, so fetch them first (stage 3).")
+    elif st["missing"]:
         out(f"  Note: {st['missing']} archive(s) are still missing, so this")
         out("  prepares what you have. Wabbajack will ask for the rest.")
     wait_for_wabbajack("Staging")
@@ -1909,10 +1917,15 @@ def offer_install(state, filename, st):
     most happens before any of that: Wabbajack cannot install a list for a game
     it cannot find, because a modlist copies files out of the base game rather
     than downloading them, and finding that out after committing to an install
-    is a waste of an evening."""
+    is a waste of an evening.
+
+    A Nexus collection is not Wabbajack's to install; it goes to
+    offer_collection_install() instead."""
     mode = getattr(CFG, "INSTALL_MODE", "cli") if CFG else "cli"
     if mode == "off":
         return False
+    if COL.CFG.is_collection(filename):
+        return offer_collection_install(state, filename, st)
 
     stem = stem_of(filename)
     wj = WB.find_wabbajack()
@@ -2033,6 +2046,108 @@ def offer_install(state, filename, st):
     else:
         out(f"  Wabbajack exited {rc}. Its output above says why; the staged "
             f"folder is untouched, so re-running is safe.")
+    return rc == 0
+
+
+def offer_collection_install(state, filename, st):
+    """Hand a freshly staged Nexus collection to collections2mo2.
+
+    The Wabbajack hand-over's shape, and its rule: everything that can stop
+    the build is checked before the question is asked. That collections2mo2
+    is set up here; that the game is found, and is the version the collection
+    was built for; and that every archive in the staged folder is the one the
+    collection pins, by MD5 - collections2mo2 would otherwise ask Nexus for a
+    file it finds wrong, and on a free account that fails with a Premium error
+    that names no file."""
+    stem = stem_of(filename)
+    path = os.path.join(A.MANIFESTS, filename)
+    out()
+    rule()
+    out("  Build its Mod Organizer 2 instance with collections2mo2?")
+    out("  Checking the staged archives against the collection's MD5s...")
+    say = lambda s: out(s)                           # noqa: E731 - out is swapped by the window
+    try:
+        plan = COL.install_plan(path)
+        if not plan["c2"]:
+            out("  collections2mo2 is not set up in this folder yet. It goes into")
+            out("  .c2mo2 beside the scripts: a pinned release checked against a")
+            out("  checksum, its libraries in .c2mo2\\site, nothing machine-wide.")
+            if ask("   [i] set it up now   [s] skip", ("i", "s")) == "s":
+                out("  Skipped. Nothing installed.")
+                return False
+            COL.setup_c2mo2(say=say)
+            plan = COL.install_plan(path)
+    except COL.CollectionError as e:
+        out(f"  {e}")
+        return False
+    for line in COL.plan_lines(plan):
+        out("    " + line)
+    if plan["blockers"]:
+        out()
+        out("  Not offering to build: the checks above have to pass first.")
+        return False
+    if plan["game"]["matches"] is False:
+        out()
+        out("  The game is not the version this collection was built for. Its SKSE")
+        out("  plugins are built for one version and fail to load on another.")
+        if ask("   [c] carry on anyway   [s] skip", ("c", "s")) == "s":
+            out("  Skipped. Nothing installed.")
+            return False
+
+    remembered = (state.get("install") or {}).get(stem)
+    target = ask_path("Where should the MO2 instance go? It holds a copy of the game, "
+                      "so a local disk with room for it", remembered)
+    if not target:
+        out("  Skipped. Nothing installed.")
+        return False
+    COL.set_instance(plan, target)
+    if plan["path_problems"]:
+        out()
+        for p in plan["path_problems"]:
+            out("  [NO] " + p)
+        out("  Nothing started. Run the stage again with a different path.")
+        return False
+
+    lines = [f"collection {plan['info']['name']}, revision {plan['info']['revision']}",
+             f"downloads  {plan['downloads']}",
+             f"game       {plan['game']['path']}",
+             f"instance   {plan['out']}"]
+    if os.path.isdir(plan["out"]) and os.listdir(plan["out"]):
+        lines += ["", "That folder already has something in it. collections2mo2 keeps",
+                  "an instance it built there and adds to it; anything else stays."]
+    try:
+        free = shutil.disk_usage(os.path.splitdrive(plan["out"])[0] or plan["out"]).free
+        lines += ["", f"free on that drive: {human(free)}"]
+    except (OSError, ValueError):
+        pass
+    out()
+    rule("!")
+    out("  About to build a Mod Organizer 2 instance")
+    rule("!")
+    for line in lines:
+        out("   " + line)
+    out()
+    if ask("   Start it?  [y] yes  [n] no", ("y", "n")) == "n":
+        out("  Skipped. Nothing installed.")
+        return False
+    key = A.WJ.resolve_api_key(None, A.HERE, prompt=True)
+    if not key:
+        out("  A Nexus API key is needed; collections2mo2 fetches the collection with it.")
+        return False
+
+    state.setdefault("install", {})[stem] = plan["out"]
+    A.save_state(state)
+    out()
+    out("  Running collections2mo2. Copying the game takes a while; its output follows.")
+    rule()
+    rc = COL.install(plan, key, on_line=lambda l: out("  | " + l))
+    rule()
+    if rc == 0:
+        out(f"  Done. {stem} is a Mod Organizer 2 instance at {plan['out']};")
+        out(f"  start it with {os.path.join(plan['out'], 'ModOrganizer.exe')}.")
+    else:
+        out(f"  collections2mo2 exited {rc}. Its output above says why; the staged")
+        out("  folder is untouched, so re-running is safe.")
     return rc == 0
 
 

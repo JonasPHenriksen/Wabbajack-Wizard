@@ -34,7 +34,7 @@ import wj_paths
 # downloader and the sorter; the rest are here because on a machine with no
 # Python, a build is the only way left to run them by hand.
 STAGES = ("wj_autoupdate", "wj_downloader", "wj_sorter", "wj_merge_pool",
-          "wj_gui")
+          "wj_gui", "wj_collection")
 
 
 class _Sink:

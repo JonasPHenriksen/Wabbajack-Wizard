@@ -82,6 +82,14 @@ park_before.json
 # cookies, kept here so the whole arrangement stays inside the folder.
 .webview/
 
+# collections2mo2, which builds a Nexus collection's MO2 instance: a pinned
+# commit checked against a checksum, its libraries in site/, and the 7-Zip,
+# MO2 and Root Builder downloads it caches in tools/. wj_collection.py
+# setup-c2mo2 rebuilds all of it.
+.c2mo2/
+.c2mo2.new/
+.c2mo2.new.zip*
+
 # Wabbajack's published validation reports, cached so the browse stage can
 # say how much of a list you already hold without downloading its
 # .wabbajack. ~45 MB, entirely re-fetchable: wj_autoupdate.py --gallery

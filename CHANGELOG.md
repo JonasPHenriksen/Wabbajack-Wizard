@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased (branch `nexus-collections`)
+
+### Added
+
+- **Nexus collections, as lists.** `run.bat --collection <address>`, or the
+  **Nexus collection** box on the Browse tab, fetches a collection and writes
+  it into the manifest folder as a `.collection`: a zip whose `modlist` member
+  has the shape of a `.wabbajack`'s, one entry per file with its name, size,
+  MD5 and a Nexus State. Every stage that plans, downloads, pools, protects or
+  stages archives reads it unchanged, so the Incomplete stage downloads it -
+  through the assist window on a free account - the sorter pools it beside the
+  Wabbajack lists, Space protects it and Prepare stages it. The report after a
+  fetch says how much the pools already hold, how many Nexus clicks the rest
+  is, which install features it uses, and whether the game is the version it
+  was built for. `wj_collection.py inspect` repeats it, with `--md5` to read
+  every pooled hit.
+- **Its install goes to collections2mo2.** Prepare hands a staged collection to
+  collections2mo2 instead of Wabbajack. It builds a portable Mod Organizer 2
+  instance with the game copied into a Stock Game folder, replaying the
+  curator's FOMOD answers, mod rules and plugin order, with game-root files
+  through Root Builder. It cannot download on a free account, so every staged
+  archive is first checked against the collection's MD5 here, and it is only
+  started when nothing is missing. It lives in `.c2mo2` beside the scripts: a
+  pinned commit checked against a SHA-256, its libraries in `.c2mo2\site`,
+  nothing machine-wide, and the API key handed to it for the run so it needs
+  no sign-in of its own.
+- The downloader verifies an MD5 when an archive carries one, and the Nexus
+  client can read one file's record and a collection's download link.
+
 ## 1.2.0 — 2026-09-19
 
 ### Added

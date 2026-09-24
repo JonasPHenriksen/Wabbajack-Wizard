@@ -42,6 +42,7 @@ import wj_autoupdate as A
 import wj_wizard as W
 import wj_gallery as G
 import wj_wabbajack as WB
+import wj_collection as COL
 import wj_config as CFG
 
 APP_TITLE = f"Wabbajack Wizard {CFG.__version__}"
@@ -1002,6 +1003,16 @@ class App:
         self.browse_hide = self.action(side, "Hide this list", self.browse_toggle_hidden)
         self.browse_hide.pack(fill="x", pady=(4, 0))
 
+        # A Nexus collection is not in Wabbajack's gallery, so it is asked for
+        # by its address. Once fetched it is a list like the others: the
+        # Incomplete tab downloads it and Prepare builds its MO2 instance.
+        coll = ttk.LabelFrame(side, text="Nexus collection", padding=6)
+        coll.pack(fill="x", pady=(10, 0))
+        ttk.Label(coll, text="Its address, or its slug:").pack(anchor="w")
+        self.collection_ref = tk.StringVar()
+        ttk.Entry(coll, textvariable=self.collection_ref, width=34).pack(fill="x", pady=(2, 4))
+        self.action(coll, "Fetch it and track it as a list", self.collection_fetch).pack(fill="x")
+
     def browse_load(self):
         # Read on this thread: the worker must not touch a tk variable.
         show_all = bool(self.browse_all.get())
@@ -1404,6 +1415,49 @@ class App:
                 self.browse_detail()
         self.run_job(f"Downloading {r['title']}", lambda: W.adopt_gallery_list(self.state, r), done)
 
+    def collection_fetch(self):
+        """Fetch a Nexus collection into a list file, then say what it asks
+        for: how much the pools already hold, how many clicks the rest is,
+        and whether the game is the version it was built for."""
+        text = self.collection_ref.get().strip()
+        if not COL.parse_ref(text):
+            messagebox.showinfo("Nexus collection", "Paste the collection's address from its "
+                                "Nexus page (…nexusmods.com/games/<game>/collections/<slug>), "
+                                "or just its slug.", parent=self.root)
+            return
+        key = A.WJ.resolve_api_key(None, A.HERE, prompt=False)
+        if not key:
+            messagebox.showerror("Nexus collection", "A Nexus API key is needed: put it in "
+                                 "nexus_api_key.txt beside the scripts.", parent=self.root)
+            return
+
+        def job():
+            say = lambda s: W.out(s)                 # noqa: E731
+            try:
+                fn, _changed = COL.fetch(text, A.MANIFESTS, A.WJ.NexusClient(key), say=say)
+                A.WJ.invalidate_existing_cache()
+                W.refresh_known_dirs()
+                report = COL.inspect(os.path.join(A.MANIFESTS, fn), look_up_latest=False,
+                                     say=say)
+            except COL.CollectionError as e:
+                return {"error": str(e)}
+            for line in COL.report_lines(report):
+                W.out(line)
+            return {"fn": fn}
+
+        def done(res):
+            if res.get("error"):
+                messagebox.showerror("Nexus collection", res["error"], parent=self.root)
+                return
+            self.reload_records()
+            self.data_changed("records")
+            messagebox.showinfo("Nexus collection",
+                                f"{W.stem_of(res['fn'])} is now a list here; its report is in "
+                                f"the log. The Incomplete tab downloads what is missing, and "
+                                f"Prepare stages it and builds its Mod Organizer 2 instance.",
+                                parent=self.root)
+        self.run_job("Fetching the collection", job, done)
+
     def _set_text(self, widget, text):
         widget.configure(state="normal")
         widget.delete("1.0", "end")
@@ -1598,6 +1652,7 @@ class App:
 
         inst = ttk.LabelFrame(f, text="Hand it to Wabbajack", padding=8)
         inst.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.install_frame = inst
         inst.columnconfigure(1, weight=1)
         self.install_info = tk.StringVar(value="Stage a list first.")
         ttk.Label(inst, textvariable=self.install_info, justify="left", wraplength=1000).grid(
@@ -1657,6 +1712,8 @@ class App:
         if mode == "off" or st is None:
             self.install_info.set("Installing is switched off (INSTALL_MODE).")
             return
+        if CFG.is_collection(fn):
+            return self._offer_collection_install(fn)
         game = st["game"]
 
         def job():
@@ -1696,6 +1753,8 @@ class App:
         wj, update = res["wj"], res["update"]
         self._note_wabbajack(update)
         stem = W.stem_of(fn)
+        self.install_frame.configure(text="Hand it to Wabbajack")
+        self.install_button.configure(text="Start the Wabbajack install")
         if not wj:
             self.install_info.set("Wabbajack was not found. Set WABBAJACK_DIR in Settings if it is "
                                   "installed somewhere other than beside this folder.")
@@ -1735,6 +1794,8 @@ class App:
         ctx = getattr(self, "install_ctx", None)
         if not ctx:
             return
+        if ctx.get("kind") == "collection":
+            return self._collection_install(ctx)
         upd = ctx.get("update") or {}
         if upd.get("outdated") and not messagebox.askyesno(
                 "Wabbajack is out of date",
@@ -1779,6 +1840,107 @@ class App:
                                                   f"folder is untouched, so re-running is safe.",
                                        parent=self.root)
         self.run_job("Installing with Wabbajack", job, done)
+
+    # -- a Nexus collection goes to collections2mo2 instead ----------------
+    def _offer_collection_install(self, fn):
+        """After staging a collection: find collections2mo2 and the game, and
+        read every staged archive for its MD5 - off the main thread, since
+        that last part reads the whole list - then fill the panel."""
+        path = os.path.join(A.MANIFESTS, fn)
+
+        def job():
+            try:
+                return {"plan": COL.install_plan(path)}
+            except COL.CollectionError as e:
+                return {"error": str(e)}
+        self.run_job("Checking the collection", job,
+                     lambda res: self._show_collection_offer(fn, res))
+
+    def _show_collection_offer(self, fn, res):
+        self.install_frame.configure(text="Build its Mod Organizer 2 instance (collections2mo2)")
+        if res.get("error"):
+            self.install_info.set(res["error"])
+            self.install_button.configure(state="disabled")
+            return
+        plan = res["plan"]
+        lines = COL.plan_lines(plan)
+        missing_c2 = not plan["c2"]
+        if missing_c2:
+            lines.append("The button sets collections2mo2 up first: a pinned release into .c2mo2 "
+                         "beside the scripts, checked against a checksum, nothing machine-wide.")
+        if plan["game"]["matches"] is False:
+            lines.append("The game is not the version this collection was built for; its SKSE "
+                         "plugins will not load. Building asks before going ahead.")
+        self.install_info.set("\n".join(lines))
+        self.install_ctx = {"kind": "collection", "fn": fn, "plan": plan}
+        remembered = (self.state.get("install") or {}).get(W.stem_of(fn))
+        if remembered:
+            self.install_path.set(remembered)
+        # Only a missing c2mo2 is something the button itself can fix.
+        others = [b for b in plan["blockers"] if "collections2mo2 is not set up" not in b]
+        self.install_button.configure(text="Set up collections2mo2, then build" if missing_c2
+                                      else "Build the MO2 instance",
+                                      state="disabled" if others else "normal")
+
+    def _collection_install(self, ctx):
+        plan = ctx["plan"]
+        target = self.install_path.get().strip().strip('"')
+        if not target:
+            messagebox.showinfo("Install", "Choose where the MO2 instance should go: a local disk "
+                                           "with room for a copy of the game.", parent=self.root)
+            return
+        target = os.path.abspath(os.path.expandvars(os.path.expanduser(target)))
+        COL.set_instance(plan, target)
+        if plan["path_problems"]:
+            messagebox.showerror("Install", "Nothing started:\n\n" + "\n".join(plan["path_problems"]),
+                                 parent=self.root)
+            return
+        if plan["game"]["matches"] is False and not messagebox.askyesno(
+                "Game version", "The game is not the version this collection was built for, so "
+                                "its SKSE plugins will fail to load. Build it anyway?",
+                icon="warning", parent=self.root):
+            return
+        key = A.WJ.resolve_api_key(None, A.HERE, prompt=False)
+        if not key:
+            messagebox.showerror("Install", "A Nexus API key is needed: put it in nexus_api_key.txt "
+                                            "beside the scripts.", parent=self.root)
+            return
+        lines = [f"collection {plan['info']['name']}, revision {plan['info']['revision']}",
+                 f"downloads  {plan['downloads']}", f"game       {plan['game']['path']}",
+                 f"instance   {target}"]
+        if not plan["c2"]:
+            lines.append("\ncollections2mo2 is downloaded into .c2mo2 first.")
+        if not self.confirm("Build a Mod Organizer 2 instance", lines,
+                            undo="The game is copied into the instance, which takes a while; "
+                                 "the output follows in the log."):
+            return
+        stem = W.stem_of(ctx["fn"])
+        self.state.setdefault("install", {})[stem] = target
+        A.save_state(self.state)
+
+        def job():
+            say = lambda s: W.out(s)                 # noqa: E731
+            p = plan
+            try:
+                if not p["c2"]:
+                    COL.setup_c2mo2(say=say)
+                    p = COL.set_instance(COL.install_plan(p["list"]), target)
+                return COL.install(p, key, on_line=lambda l: W.out("  | " + l))
+            except COL.CollectionError as e:
+                W.out(f"[ERROR] {e}")
+                return None
+
+        def done(rc):
+            if rc == 0:
+                messagebox.showinfo("Install", f"{stem} is a Mod Organizer 2 instance at {target}. "
+                                               f"Start it with ModOrganizer.exe there.",
+                                    parent=self.root)
+            else:
+                messagebox.showwarning("Install", ("collections2mo2 did not start" if rc is None
+                                                   else f"collections2mo2 exited {rc}")
+                                       + ". The log says why; the staged folder is untouched, "
+                                         "so re-running is safe.", parent=self.root)
+        self.run_job("Building the MO2 instance", job, done)
 
     # ==================================================================
     # Space

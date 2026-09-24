@@ -515,6 +515,7 @@ run.bat --rediscover                  re-match local manifests against the feeds
 run.bat --nexus-mode skip             leave Nexus files to Wabbajack
 run.bat --selftest                    check upstream formats still read as expected
 run.bat --order largest               fetch the big files first for one run
+run.bat --collection <address>        fetch a Nexus collection and keep it as a list
 ```
 
 Exit codes: `0` clean, `1` finished with problems, `2` could not start,
@@ -709,6 +710,88 @@ It also warns when archives are still outstanding — Wabbajack will try to fetc
 those itself, which on a free account means its own click-per-file flow rather
 than this tooling's.
 
+## Nexus collections
+
+Most lists published today are Nexus collections, which only Vortex installs,
+one dialog at a time and straight into the game folder. This tooling treats a
+collection as one more list, and hands its install to
+[collections2mo2](https://github.com/spooknik/collections2mo2), which builds
+what Wabbajack builds: a portable Mod Organizer 2 instance with the game copied
+into a Stock Game folder, so the real install is never touched.
+
+```
+run.bat --collection https://www.nexusmods.com/games/skyrimspecialedition/collections/mi01mo
+```
+
+or the **Nexus collection** box on the Browse tab. That fetches the collection
+and writes it into the manifest folder as `<name>_@@_<slug>.collection`: a zip
+whose `modlist` member has the shape of a `.wabbajack`'s, one entry per file
+with its name, size, MD5 and a Nexus State. From there it is a list like the
+others, and nothing downstream needs to know otherwise:
+
+| stage | what it does with a collection |
+| --- | --- |
+| Incomplete | downloads what the pools lack, a Nexus click each on a free account |
+| sorter | pools its archives beside every Wabbajack list's |
+| Space | protects them, and deletes the list like any other |
+| Prepare | stages it into one folder, checks every archive's MD5, and offers to build the instance |
+
+The pools pay off at once: `SkyUI-12604-6-11-1778020881.zip` is the same bytes
+whichever installer asked for it. The report after a fetch says how much is
+already held, how many clicks the rest is, what the install replays - FOMOD
+answers, game-root mods, mod rules, plugins - and whether the game is the
+version the collection was built for, read from the executable Wabbajack's own
+store scan finds. SKSE plugins are built for one game version, so that last
+line matters.
+
+```
+.python\python.exe wj_collection.py inspect <list name, address or slug> [--md5]
+.python\python.exe wj_collection.py install <list name> --out D:\Modding\<name>
+```
+
+`inspect` repeats the report, and `--md5` reads every pooled hit in full.
+`install` is Prepare's hand-over from the command line, for a list already
+staged.
+
+### Why the names come from the v1 API
+
+A collection records each file's display name, not the name it downloads
+under, and both the pools and collections2mo2 know an archive by the download
+name. The GraphQL API has a `uri` field that looks like it, but for files
+uploaded since 2026 it is a storage path, so each file's own v1 record is
+asked, the way collections2mo2 asks it: one request per file at fetch time,
+four at a time, and only the files that changed on a later revision.
+
+### collections2mo2
+
+It lives in `.c2mo2` beside the scripts: commit `ca460c7` of its repository,
+refused unless GitHub's archive of it has the pinned SHA-256, with the four
+libraries its command line needs installed into `.c2mo2\site` at the versions
+its lock file pins. Its window (PySide6) is left out; this is the window.
+Nothing is installed machine-wide, pip runs without a cache, and the folder
+moves with the rest. Prepare offers to set it up the first time, or run
+
+```
+.python\python.exe wj_collection.py setup-c2mo2
+```
+
+It runs as a program of its own, which also keeps its GPL-3 licence apart
+from this MIT code. The Nexus API key is handed to it in its environment for
+the one run, so it needs no sign-in of its own and writes nothing to Windows'
+credential store. On first use it fetches its own 7-Zip, and the MO2 and Root
+Builder releases, into `.c2mo2\tools`.
+
+What it does not do yet, and the report names when a collection needs it:
+Vortex's binary patches (those files install unpatched), and files the curator
+links on other sites (those mods are left out). It cannot download on a free
+account either, which is why the Wizard checks every staged archive's MD5
+itself and only starts it when nothing is missing: a file it found wrong it
+would ask Nexus for, and that request fails with a Premium error naming no
+file.
+
+The instance holds a copy of the game, so it belongs on a local disk; the
+archives stay on the share.
+
 ## Download order
 
 Archives are fetched **smallest first** by default. On a free Nexus account,
@@ -793,6 +876,7 @@ recognised (if unfetchable) source rather than "unknown".
 | `wj_gui.py` | the desktop window: a tab per stage, a log pane, a Settings tab |
 | `wj_wizard.py` | the console wizard, and the per-stage helpers both front ends share |
 | `wj_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
+| `wj_collection.py` | Nexus collections: fetching one into a `.collection` list, what it needs, and the hand-over to collections2mo2 |
 | `wj_assistwin.py` | the download window assist mode shows Nexus pages in: WebView2 through pywebview, one page at a time, its own login |
 | `wj_sorter.py` | moves archives between pools |
 | `wj_cdn.py` | the Wabbajack CDN's multi-part protocol |
@@ -808,7 +892,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 976 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 1114 checks across seventeen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -833,6 +917,7 @@ exactly the failure they want to check.
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
 | `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, and the Start tab opening a second window from the first one's file without measuring anything |
 | `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
+| `t17_collection` | Nexus collections: every form of a collection's address, collection.json turned into Archives[] (a removed file, a bundled mod, another site's link), the list file read by the planner, the light cache and the sorter like a modlist, MD5 verification, a fetch end to end against a stub API with a later revision asking only about what changed, the staged folder checked file by file, the feeds never asked about a collection, and the collections2mo2 command, environment, instance-path checks and checksum refusal; `t15_gui` drives the fetch box and the Prepare hand-over |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the

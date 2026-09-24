@@ -16,6 +16,7 @@ REM      run.bat --dry-run       plan everything, change nothing
 REM      run.bat --rediscover    re-match local manifests against the feeds
 REM      run.bat --only <list>   do the archive work for one list only
 REM      run.bat --selftest      check upstream formats still read as expected
+REM      run.bat --collection <address>   fetch a Nexus collection as a list
 REM
 REM  Exit codes: 0 clean, 1 finished with problems, 2 could not start,
 REM              3 another run holds the lock, 4 unhandled error.

@@ -1525,7 +1525,7 @@ def cmd_discover():
         return 1
     idx = index_feeds(feeds)
 
-    files = WJ.list_manifest_files(MANIFESTS)
+    files = [f for f in WJ.list_manifest_files(MANIFESTS) if not CFG.is_collection(f)]
     if not files:
         LOG.warning("No .wabbajack files found in %s", MANIFESTS)
 
@@ -1667,8 +1667,12 @@ def resolve_tracking(state, rediscover=False):
     Results are cached in state["map"], keyed by filename, so the expensive
     all-feeds scan runs only when something new shows up. An empty string in
     the cache is a remembered "no match", which stops a private or renamed
-    list from triggering a full scan on every single run."""
-    files = WJ.list_manifest_files(MANIFESTS)
+    list from triggering a full scan on every single run.
+
+    A Nexus collection's .collection is never matched: no Wabbajack feed
+    publishes it, so trying would only record it as a list that matches
+    nothing. wj_collection.py follows its revisions instead."""
+    files = [f for f in WJ.list_manifest_files(MANIFESTS) if not CFG.is_collection(f)]
     cache = state.setdefault("map", {})
     if rediscover:
         LOG.info("--rediscover: clearing the cached list mapping.")
@@ -2176,6 +2180,12 @@ def main():
                          "interruption.")
     ap.add_argument("--allow-size-only", action="store_true",
                     help="Proceed without xxhash, checking sizes only.")
+    ap.add_argument("--collection", metavar="URL",
+                    help="Fetch a Nexus collection (its address, nxm:// link or slug) "
+                         "and keep it as a list: the Incomplete stage then downloads "
+                         "it and Prepare builds its MO2 instance. See wj_collection.py.")
+    ap.add_argument("--revision", type=int, default=None,
+                    help="With --collection, a revision other than the latest.")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -2189,7 +2199,11 @@ def main():
     # exactly the sort of surprise a scheduled run should never spring.
     actions = (args.check, args.discover, args.only, args.force, args.dry_run,
                args.no_download, args.no_sort, args.rediscover, args.selftest,
-               args.gallery, args.sync_reports)
+               args.gallery, args.sync_reports, args.collection)
+    if args.collection:
+        import wj_collection
+        return wj_collection.main(["fetch", args.collection]
+                                  + (["--revision", str(args.revision)] if args.revision else []))
     if args.gui:
         import wj_gui
         return wj_gui.main(nexus_mode=args.nexus_mode,

@@ -78,6 +78,7 @@ import csv
 import json
 import time
 import base64
+import hashlib
 import struct
 import socket
 import zipfile
@@ -339,14 +340,17 @@ def is_junk_name(name):
 
 
 def list_manifest_files(directory):
-    """Sorted .wabbajack filenames in `directory`, junk excluded."""
+    """Sorted list filenames in `directory` - .wabbajack and .collection - junk
+    excluded. A .collection is read exactly like a .wabbajack (see
+    wj_config.COLLECTION_EXT); the few places that must tell them apart ask
+    CFG.is_collection()."""
     try:
         names = os.listdir(directory)
     except OSError as e:
         LOG.error("[ERROR] Cannot read manifest folder %s: %s", directory, e)
         return []
     return sorted(f for f in names
-                  if f.lower().endswith(".wabbajack") and not is_junk_name(f))
+                  if CFG.is_manifest_name(f) and not is_junk_name(f))
 
 
 def resolve_manifest_dir(script_dir):
@@ -441,10 +445,14 @@ def parse_manifest(wj_path):
             if not name:
                 continue
             meta_text = a.get("Meta") or ""
+            md5 = a.get("MD5")
             record["archives"].append({
                 "name":      str(name),
                 "size":      a.get("Size") if isinstance(a.get("Size"), int) else None,
                 "hash":      a.get("Hash"),
+                # Wabbajack pins an archive by xxHash64; a Nexus collection pins
+                # it by MD5, which is all a .collection can carry.
+                "md5":       md5.lower() if isinstance(md5, str) and md5 else None,
                 "meta_text": meta_text,
                 "meta":      parse_meta(meta_text),
                 "state":     a.get("State") or {},
@@ -842,7 +850,20 @@ def wabbajack_hash(path):
         return None
 
 
-def verify_file(path, expected_size, expected_hash):
+def file_md5(path):
+    """Hex MD5 of a file, the identity a Nexus collection pins its archives by.
+    None when the file cannot be read."""
+    try:
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(DOWNLOAD_CHUNK), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def verify_file(path, expected_size, expected_hash, expected_md5=None):
     try:
         actual = os.path.getsize(path)
     except OSError as e:
@@ -853,6 +874,13 @@ def verify_file(path, expected_size, expected_hash):
         got = wabbajack_hash(path)
         if got and got != expected_hash:
             return False, "hash mismatch"
+    if expected_md5:
+        # hashlib is always there, so unlike xxHash this check never degrades:
+        # a file that cannot be read is a failure, not a pass.
+        got = file_md5(path)
+        if got != expected_md5.lower():
+            return False, ("md5 %s != expected %s" % (got, expected_md5.lower())
+                           if got else "md5 could not be read")
     return True, "ok"
 
 
@@ -965,6 +993,45 @@ class NexusClient:
         files = payload.get("files") if isinstance(payload, dict) else None
         self._files_cache[key] = ((files if isinstance(files, list) else []), "ok")
         return self._files_cache[key]
+
+    def file_info(self, domain, mod_id, file_id):
+        """One file's own record. Returns (record, status), status 'ok' /
+        'notfound' / 'error:<msg>'. Unlike the files.json listing, this also
+        answers for a file the author has since archived, which a collection
+        pinned before it was superseded is often enough. Its `file_name` is the
+        name the file downloads under, the name the pools know it by."""
+        url = f"{NEXUS_API_BASE}/games/{domain}/mods/{mod_id}/files/{file_id}.json"
+        payload, err = self._get_json(url)
+        if err is not None:
+            code = getattr(err, "code", None)
+            if code in (404, 410):
+                return None, "notfound"
+            return None, f"error:{err}"
+        return (payload if isinstance(payload, dict) else {}), "ok"
+
+    def collection_archive_url(self, link_path):
+        """Where a collection revision's archive downloads from. Returns
+        (url, status), status 'ok' / 'unauthorised' / 'notfound' /
+        'error:<msg>'.
+
+        `link_path` is the revision's downloadLink from the GraphQL API, a
+        path on this host ('/v2/collections/<id>/revisions/<id>/download_link')
+        that the key exchanges for a signed CDN address. Collections are not a
+        Premium feature, only the mods in them are, so a free account is
+        answered here as well."""
+        url = NEXUS_API_BASE.rsplit("/v1", 1)[0] + link_path
+        payload, err = self._get_json(url)
+        if err is not None:
+            code = getattr(err, "code", None)
+            if code in (401, 403):
+                return None, "unauthorised (HTTP %d): check the API key" % code
+            if code in (404, 410):
+                return None, "notfound"
+            return None, f"error:{err}"
+        links = payload.get("download_links") if isinstance(payload, dict) else None
+        if isinstance(links, list) and links and isinstance(links[0], dict) and links[0].get("URI"):
+            return links[0]["URI"], "ok"
+        return None, "error:the answer carried no download link"
 
     def mod_info(self, domain, mod_id):
         """The mod's own record. Returns (record, status), status 'ok' /
@@ -1660,7 +1727,8 @@ def download_one(url, archive, dest_dir, results, quiet=False):
             good, reason = False, "hash %s != manifest %s" % (got, archive["hash"])
         else:
             good, reason = verify_file(dest, archive["size"],
-                                       None if got else archive["hash"])
+                                       None if got else archive["hash"],
+                                       archive.get("md5"))
         if not good:
             LOG.error("  [ERROR] %s failed verification: %s - discarding.", name, reason)
             try:
@@ -1683,7 +1751,7 @@ def download_one(url, archive, dest_dir, results, quiet=False):
     if not stream_download(url, dest, expected_size=archive["size"], quiet=quiet):
         _tally(results, False, name, "download failed")
         return False
-    good, reason = verify_file(dest, archive["size"], archive["hash"])
+    good, reason = verify_file(dest, archive["size"], archive["hash"], archive.get("md5"))
     if not good:
         # Previously this still counted as done and wrote a .meta, which left a
         # junk file in the pool for the sorter to shuffle around. Discard it.

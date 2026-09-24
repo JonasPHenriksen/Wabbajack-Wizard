@@ -223,13 +223,15 @@ def is_junk_name(name):
 
 
 def list_manifest_files(directory):
+    """The same set wj_downloader.list_manifest_files() lists: a Nexus
+    collection's .collection pools, protects and stages like any modlist."""
     try:
         names = os.listdir(directory)
     except OSError as e:
         LOG.error("[ERROR] Cannot read manifest folder %s: %s", directory, e)
         return []
     return sorted(f for f in names
-                  if f.lower().endswith(".wabbajack") and not is_junk_name(f))
+                  if CFG.is_manifest_name(f) and not is_junk_name(f))
 
 
 def resolve_manifest_dir(script_dir):

@@ -139,6 +139,17 @@ TRASH_KEEP_DAYS = 30
 # WJ_MANIFEST_DIR is not set.
 MANIFEST_SUBDIR = "modlists"
 
+# The two kinds of list file the manifest folder holds. A .wabbajack is
+# Wabbajack's own. A .collection is this tooling's: a Nexus collection turned
+# into a zip whose 'modlist' member has the same shape as a .wabbajack's, so
+# that every stage which plans, downloads, pools, protects or stages archives
+# reads it unchanged. wj_collection.py writes them. What differs is only what
+# happens around the archives: a collection has no Wabbajack feed to follow,
+# and it is installed by collections2mo2 rather than by Wabbajack.
+WABBAJACK_EXT = ".wabbajack"
+COLLECTION_EXT = ".collection"
+MANIFEST_EXTS = (WABBAJACK_EXT, COLLECTION_EXT)
+
 # Where Wabbajack itself is installed. None auto-detects: a sibling of the
 # tools folder first (the arrangement on this share), then the per-user
 # install location. Set it explicitly if yours is somewhere else.
@@ -427,6 +438,16 @@ def excluded_dirs():
 def trash_dir(game):
     """Where a game's reclaimed archives wait out TRASH_KEEP_DAYS."""
     return os.path.join(resolved_archive_root(), game_folder(game), TRASH_FOLDER)
+
+
+def is_manifest_name(name):
+    """Is this filename one of the list files the manifest folder holds?"""
+    return str(name or "").lower().endswith(MANIFEST_EXTS)
+
+
+def is_collection(name):
+    """Is this list file a Nexus collection rather than a Wabbajack list?"""
+    return str(name or "").lower().endswith(COLLECTION_EXT)
 
 
 def reserved_list_names():

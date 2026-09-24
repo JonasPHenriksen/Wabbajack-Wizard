@@ -843,6 +843,122 @@ check("a tracked list is shown whatever its state",
       "Dead And Missing" in [r[2] for r in rows(app.browse_table)], str([r[2] for r in rows(app.browse_table)]))
 del app.tracked["r/deadmissing"]
 
+# ---------------------------------------------------------------- 15.18
+print("\n 15.18  a Nexus collection: fetched from the Browse tab, built from Prepare")
+import hashlib
+import wj_collection as COL
+body = b"c" * 7
+COL.WJ.ARCHIVE_ROOT = box.archives            # the collection code's own copy of the downloader
+cmanifest = {"info": {"name": "Coll", "author": "T", "domainName": "fallout4",
+                      "gameVersions": ["1.10.163.0"]},
+             "mods": [{"name": "C", "version": "1", "domainName": "fallout4",
+                       "source": {"type": "nexus", "modId": 5, "fileId": 50,
+                                  "md5": hashlib.md5(body).hexdigest(), "fileSize": 7}}]}
+centries = [COL._nexus_entry("fallout4", 5, 50, "c.7z", 7, cmanifest["mods"][0]["source"],
+                             cmanifest["mods"][0])]
+cinfo = {"slug": "zz9", "name": "Coll", "domain": "fallout4", "author": "T", "revision": 2,
+         "latest": 2, "mod_count": 1, "total_size": 7}
+cfn = COL.list_stem("Coll", "zz9") + CFG.COLLECTION_EXT
+game_dir = os.path.join(box.root, "Fallout 4")
+os.makedirs(game_dir, exist_ok=True)
+saved_col = {k: getattr(COL, k) for k in ("c2mo2_dir", "game_install", "setup_c2mo2",
+                                          "install", "fetch", "inspect")}
+COL.c2mo2_dir = lambda: os.path.join(box.tools, ".c2mo2")
+COL.game_install = lambda gametype, cli=None: (game_dir, "stubbed")
+saved_key = os.environ.pop("NEXUS_API_KEY", None)     # the sandbox's key file must be the one read
+calls = []
+try:
+    DLG.calls.clear()
+    app.collection_ref.set("this is not a collection")
+    app.collection_fetch()
+    check("the fetch box explains what it wants", DLG.shown("collection's address"), str(DLG.calls))
+    io.open(os.path.join(box.tools, "nexus_api_key.txt"), "w").write("dummy-key")
+
+    def fake_fetch(text, manifest_dir, nexus, revision=None, force=False, say=None):
+        calls.append(("fetch", text, manifest_dir))
+        COL.write_list_file(os.path.join(manifest_dir, cfn), cinfo, cmanifest, centries, [],
+                            ["collection.json"])
+        return cfn, True
+    COL.fetch = fake_fetch
+    app.collection_ref.set("https://www.nexusmods.com/games/fallout4/collections/zz9")
+    DLG.calls.clear()
+    app.collection_fetch()
+    settle()
+    check("fetching writes the list into the manifest folder",
+          calls and calls[0][2] == A.MANIFESTS and os.path.isfile(os.path.join(A.MANIFESTS, cfn)),
+          str(calls))
+    check("  the window then reads it as a list", cfn in app.records, str(sorted(app.records)))
+    check("  and the report goes to the log", "Coll by T" in log_text(), log_text()[-400:])
+    check("  and a dialog says what comes next", DLG.shown("is now a list here"), str(DLG.calls))
+
+    app.status_refresh()
+    settle()
+    check("Incomplete measures it like a modlist",
+          COL.list_stem("Coll", "zz9") in [r[0] for r in rows(app.incomplete_table)],
+          str(rows(app.incomplete_table)))
+    app._offer_install(cfn)
+    settle()
+    check("Prepare offers collections2mo2 rather than Wabbajack",
+          "collections2mo2" in str(app.install_frame.cget("text")), str(app.install_frame.cget("text")))
+    check("  and holds the button while the archive is not staged",
+          str(app.install_button.cget("state")) == "disabled"
+          and "missing or wrong" in app.install_info.get(), app.install_info.get()[:400])
+    staged = os.path.join(box.archives, GAME, COL.list_stem("Coll", "zz9"))
+    os.makedirs(staged, exist_ok=True)
+    io.open(os.path.join(staged, "c.7z"), "wb").write(body)
+    app._offer_install(cfn)
+    settle()
+    check("a staged, MD5-checked collection can be built",
+          str(app.install_button.cget("state")) == "normal"
+          and "1 archive(s) match" in app.install_info.get(), app.install_info.get()[:400])
+    check("  and the button says it sets collections2mo2 up first",
+          "Set up collections2mo2" in str(app.install_button.cget("text")))
+
+    DLG.calls.clear()
+    app.install_path.set(os.path.join(game_dir, "inside"))
+    app.prepare_install()
+    check("an instance inside the game folder is refused", DLG.shown("Nothing started"),
+          str(DLG.calls))
+
+    def fake_setup(say=None):
+        os.makedirs(os.path.join(box.tools, ".c2mo2", "src", "collections2mo2"), exist_ok=True)
+        io.open(os.path.join(box.tools, ".c2mo2", "src", "collections2mo2", "cli.py"), "w").write("")
+        io.open(os.path.join(box.tools, ".c2mo2", COL.C2MO2_STAMP), "w").write(
+            json.dumps({"commit": COL.C2MO2_COMMIT}))
+        calls.append(("setup",))
+    COL.setup_c2mo2 = fake_setup
+    COL.install = lambda plan, key, on_line=None: calls.append(("install", plan["out"], key)) or 0
+    target = os.path.join(box.root, "Instances", "Coll")
+    app.install_path.set(target)
+    DLG.calls.clear()
+    app.prepare_install()
+    settle()
+    check("building asks first", any(k == "ask" and "Mod Organizer 2" in t
+                                     for k, t, _x in DLG.calls), str(DLG.calls))
+    check("  sets collections2mo2 up, then builds, with the key",
+          ("setup",) in calls and ("install", target, "dummy-key") in calls, str(calls))
+    check("  remembers where it went",
+          (app.state.get("install") or {}).get(COL.list_stem("Coll", "zz9")) == target)
+    check("  and says it is done", DLG.shown("is a Mod Organizer 2 instance"), str(DLG.calls))
+    real_find = WB.find_wabbajack
+    WB.find_wabbajack = lambda hint=None: None
+    try:
+        app._offer_install("Keep.wabbajack")
+        settle()
+    finally:
+        WB.find_wabbajack = real_find
+    check("a Wabbajack list afterwards gets the Wabbajack panel back",
+          str(app.install_frame.cget("text")) == "Hand it to Wabbajack"
+          and str(app.install_button.cget("text")) == "Start the Wabbajack install",
+          "%s / %s" % (app.install_frame.cget("text"), app.install_button.cget("text")))
+finally:
+    for k, v in saved_col.items():
+        setattr(COL, k, v)
+    COL.WJ.ARCHIVE_ROOT = CFG.resolved_archive_root()
+    if saved_key is not None:
+        os.environ["NEXUS_API_KEY"] = saved_key
+    DLG.answer = True
+
 # ---- put everything back ---------------------------------------------------
 root.destroy()
 W.out = REAL_WOUT

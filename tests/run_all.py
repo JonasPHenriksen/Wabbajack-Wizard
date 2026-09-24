@@ -35,6 +35,7 @@ SUITES = [
     ("t14_merge.py", "folding one game folder into another"),
     ("t15_gui.py", "the desktop window, driven through its own buttons"),
     ("t16_pool.py", "laying out a pool for a game you keep nothing for"),
+    ("t17_collection.py", "Nexus collections as lists, and the collections2mo2 hand-over"),
 ]
 
 total_pass = total_fail = 0
