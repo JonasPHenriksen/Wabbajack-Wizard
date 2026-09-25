@@ -68,6 +68,15 @@ on the 20th. They are recorded here, under the release that carries them.
   name or size, the hash check after the download says whether it was the
   same bytes, and a file nothing matches is recorded and passed over too.
   The listing is asked for once per mod and remembered for the run.
+- **A runtime folder.** What the tools write as they run - the logs, the
+  state file, the manifest cache, the lock, the files an assist session
+  shares with the `nxm://` handler, and the records of what stage 5 took -
+  now lives in `runtime\` beside the scripts or the exe, rather than as a
+  dozen files beside the source. The settings, the API key file, the
+  manifests, and the caches that are folders already stay where they are.
+  The files an older version left beside the scripts are moved into
+  `runtime\` the first time a tool starts; one already there is not
+  overwritten, and nothing is deleted.
 - `tests\run_all.py` removes its sandboxes from `%TEMP%` when every suite
   passes, some 10 MB left behind by each run until now, and keeps them, and
   says where, when one fails.
@@ -138,8 +147,12 @@ on the 20th. They are recorded here, under the release that carries them.
   window measured still looked in Fallout4VR, until the next start. Every
   copy now follows at once. Only `ARCHIVE_ROOT` and `MANIFEST_DIR` still wait
   for a restart, as the Settings tab says.
+- The test suites that import the scripts from the checkout set up logging
+  there, so their warnings - an unreadable test manifest, a stray test
+  folder - were appended to the real `wj_autoupdate.log`. They now log into a
+  scratch folder the run removes.
 
-Tests: 1081 checks across 17 sandbox suites, up from 895 across 16.
+Tests: 1089 checks across 17 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 

@@ -13,8 +13,9 @@ nothing.
 What comes out is a folder, not a single file, and WabbajackWizard.spec says
 at length why. Two binaries sit in it beside an `_internal` folder they
 share: the window, and its console twin. Everything the tool writes - your
-settings, the manifests, the logs, the state file - lands beside those two,
-which is the same place it lands beside the scripts today.
+settings and the manifests beside those two, the logs and the state file in
+the runtime folder beside them - lands exactly where it lands beside the
+scripts.
 
 PyInstaller is a tool for building this, not a thing this needs to run, so it
 is not in requirements.txt. With the interpreter kept inside the project it
@@ -145,7 +146,7 @@ def main():
 
     # Same check release.py makes, for the same reason: this is the one place
     # worth looking twice before something leaves the machine.
-    bad = [m for m in members if any(f in m for f in release.FORBIDDEN)]
+    bad = [m for m in members if release.forbidden(m)]
     if bad:
         os.remove(zip_path)
         print("[REFUSED] These must never ship, and were in the bundle:")

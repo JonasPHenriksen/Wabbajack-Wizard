@@ -36,8 +36,9 @@ The rules it moves under:
     (wj_manifest_cache.json, keyed by each file's mtime and size), so a run
     opens no manifest it already knows.
 
-Logs: a timestamped wj_sorter_*.log beside this script; only the previous
-and current run's are kept. --dry-run previews every move and performs none.
+Logs: a timestamped wj_sorter_*.log in the runtime folder beside this script;
+only the previous and current run's are kept. --dry-run previews every move
+and performs none.
 """
 
 import os
@@ -995,13 +996,16 @@ def main():
     args = parser.parse_args()
 
     current_dir = wj_paths.app_dir(__file__)
-    log_path = setup_logging(current_dir, verbose=args.verbose)
+    # The log, the lock and the manifest cache: see wj_paths.RUNTIME_DIR.
+    wj_paths.adopt_runtime(current_dir)
+    run_dir = wj_paths.runtime_dir(__file__)
+    log_path = setup_logging(run_dir, verbose=args.verbose)
 
     # Nothing below may run concurrently with a download into the same pools.
-    acquire_pool_lock(current_dir)
+    acquire_pool_lock(run_dir)
 
-    # Manifests may live elsewhere (see change 3 in the docstring). Logs stay
-    # beside this script regardless.
+    # Manifests may live elsewhere (see change 3 in the docstring). The log
+    # stays in the runtime folder beside this script regardless.
     manifest_dir = resolve_manifest_dir(current_dir)
 
     banner("ENVIRONMENT CHECK")
@@ -1020,7 +1024,7 @@ def main():
 
     # ---- Step 1: read every manifest, from the cache where it is current --
     banner("STEP 1: SCANNING MANIFESTS")
-    records = load_records(manifest_dir, current_dir, wj_files)
+    records = load_records(manifest_dir, run_dir, wj_files)
     empty_lists = [r["name"] for r in records if not r["names"]]
 
     # A manifest that failed to READ yields an empty demand set, which is

@@ -30,6 +30,18 @@ import wj_config as CFG
 FORBIDDEN = ("wj_settings.json", "nexus_api_key", ".log", "wj_autoupdate_state",
              "wj_manifest_cache", ".gallery-cache/", "modlists/", "manifest_backups/",
              "deleted_", "purged_trash_", "merged_", ".venv", "__pycache__")
+# Folders of ours that must never ship either - what the tools write as they
+# run, and the download window's browser profile with its Nexus login - but
+# matched only at the top of the tree: a bundled package may have a folder of
+# the same name, and pythonnet has a runtime/.
+FORBIDDEN_DIRS = ("runtime/", ".webview/")
+
+
+def forbidden(member, prefix=""):
+    """Must this archive member never ship? `prefix` is the folder every
+    member of the archive sits in, if any."""
+    rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
+    return any(f in member for f in FORBIDDEN) or rel.startswith(FORBIDDEN_DIRS)
 
 
 def top_changelog_entry(text):
@@ -66,7 +78,7 @@ def main():
 
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
-    bad = [n for n in names if any(f in n for f in FORBIDDEN)]
+    bad = [n for n in names if forbidden(n, f"{name}/")]
     if bad:
         os.remove(zip_path)
         print("[REFUSED] These must never ship, and were in the archive:")

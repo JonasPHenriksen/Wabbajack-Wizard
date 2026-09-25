@@ -14,13 +14,12 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import Sandbox, check, summary
+from harness import Sandbox, check, summary, quiet_logging
 
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 A.WJ = A.load_downloader_module()
 
 BOX = os.path.join(BOXROOT, "sb6")
@@ -101,7 +100,7 @@ print("\n 6.4  the manifest cache must notice a changed manifest")
 A.MANIFESTS = box.manifests
 A.HERE = box.tools
 A.WJ.ARCHIVE_ROOT = box.archives
-cache_file = os.path.join(box.tools, A.MANIFEST_CACHE_FILE)
+cache_file = os.path.join(box.runtime, A.MANIFEST_CACHE_FILE)
 try:
     os.remove(cache_file)
 except OSError:

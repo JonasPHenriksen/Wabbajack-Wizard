@@ -21,13 +21,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import Sandbox, check, summary
+from harness import Sandbox, check, summary, quiet_logging
 
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 A.WJ = A.load_downloader_module()
 import wj_config as CFG
 import wj_gallery as G
@@ -295,7 +294,7 @@ check("Master is not offered for clearing",
 check("  so nothing in Master was deleted, junk included",
       m.get("junk.7z") == 999 and len(m) == 3, str(m))
 check("  and no deletion record was written",
-      not [f for f in os.listdir(box.tools) if f.startswith("deleted_")])
+      not [f for f in box.runtime_files() + os.listdir(box.tools) if f.startswith("deleted_")])
 
 # ---------------------------------------------------------------- 13.7
 print("\n 13.7  a manifest whose demand cannot be trusted disarms 5c")
@@ -724,13 +723,14 @@ box.manifest("Done", GAME, [("d.7z", 1, "nexus")])
 box.manifest("Busy", GAME, [("b.7z", 2, "nexus")])
 box.pool_file(GAME, "Done", "d.7z", 1)                     # complete
 wire(box)
+os.makedirs(box.runtime, exist_ok=True)
 for n in ("nexus_todo_Done.csv", "nexus_pages_Done.csv",
           "download_failures_Done.csv", "nexus_todo_Busy.csv",
           "nexus_todo_Gone.csv", "deleted_Fallout4_20260101_000000.csv"):
-    io.open(os.path.join(box.tools, n), "w").write("x")
+    io.open(os.path.join(box.runtime, n), "w").write("x")
 records = A.load_plan_records()
 (res, text) = drive(W.stage_incomplete, ["s"], records, False)
-left = sorted(n for n in os.listdir(box.tools) if n.endswith(".csv"))
+left = sorted(n for n in box.runtime_files() if n.endswith(".csv"))
 check("CSVs for a complete list and a vanished list are gone; a record stays",
       left == ["deleted_Fallout4_20260101_000000.csv", "nexus_todo_Busy.csv"],
       str(left))

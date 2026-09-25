@@ -98,9 +98,14 @@ because files on a share read as foreign-owned; its token goes to Windows
 Credential Manager, so the folder itself holds no secret. Both folders and the
 wrapper are gitignored.
 
-Either way, everything the tool writes - your settings, `modlists/`, the logs,
-the state file - lands in the folder you started it from, so a build can be
-dropped straight into an existing setup and pick up what is already there.
+Either way, everything the tool writes lands in the folder you started it
+from: your settings and `modlists/` in it, and what the tools write as they
+run - the logs, the state file, the manifest cache, the lock, and the records
+of what stage 5 took - in its `runtime\` folder, so the folder itself holds
+the source and your own files and little else. A build can be dropped
+straight into an existing setup and pick up what is already there, and the
+runtime files an older version left beside the scripts move into `runtime\`
+the first time a tool starts; nothing is overwritten or deleted on the way.
 
 Settings are optional: copy `wj_settings.example.json` to `wj_settings.json`
 and change what differs, or use the window's Settings tab. Without it the
@@ -120,8 +125,8 @@ The window opens on a **Start** tab: an overview of your modlists, pending
 updates, incomplete lists, the pools and the trash, the gallery and the
 settings, each card showing what the last session measured and when. Opening
 the window reads the manifests and nothing else; a tab measures when you open
-it, and what it finds is written to `wj_overview.json` beside the scripts so the
-next start shows it again at once. **Refresh everything** runs the three
+it, and what it finds is written to `runtime\wj_overview.json` so the next
+start shows it again at once. **Refresh everything** runs the three
 measurements in a row. **Dark mode**, beside the progress bar, switches the
 window's colours, title bar included on Windows 10 and 11, and is remembered
 as `THEME`.
@@ -349,8 +354,8 @@ protection is per archive, not per list.
 
 Name **and** size must match, every file is re-checked at the moment it goes
 rather than trusted from the table, and every file is recorded in
-`deleted_<game>_<timestamp>.csv`, one row as it goes, with the reason, where it
-went, the folder and the rule used.
+`runtime\deleted_<game>_<timestamp>.csv`, one row as it goes, with the reason,
+where it went, the folder and the rule used.
 
 **Nothing is deleted outright.** What stage 5c reclaims moves into that game's
 `Trash` folder, stamped with the moment it arrived, and is purged
@@ -482,7 +487,7 @@ The pools are then rebuilt, which pulls anything still wanted back out of
 Master. Only after that is Master offered for clearing, and every candidate is
 re-checked against the surviving lists' demands before it is removed. A file any
 remaining modlist needs is never deleted, whatever you select. Every deletion is
-recorded in `deleted_<game>_<timestamp>.csv`.
+recorded in `runtime\deleted_<game>_<timestamp>.csv`.
 
 That rebuild re-sorts the whole game folder, which un-stages whatever stage 4
 arranged there: the shared archives go back to Shared. The confirmation says so
@@ -495,7 +500,7 @@ to close it. A scheduled run skips its sort instead and says so.
 ### What a run reads, and what it does not
 
 The share is where the time goes, so a run rereads only what can have changed.
-The manifests are read once per change: `wj_manifest_cache.json` holds each
+The manifests are read once per change: `runtime\wj_manifest_cache.json` holds each
 list's archive names, sizes and source kinds, keyed by the manifest's mtime and
 size, and the wizard, the updater *and* the sorter all plan from it, so a sort
 no longer opens 22 multi-gigabyte zips to learn what it already knew. The
@@ -819,7 +824,7 @@ recognised (if unfetchable) source rather than "unknown".
 | --- | --- |
 | `wj_config.py` | every setting's default, the archive layout, and the naming rules the rest share: reserved names, the `~N` suffix, which GameTypes share a folder |
 | `wj_settings.json` | your settings; `wj_settings.example.json` documents every key |
-| `wj_overview.json` | what the Start tab shows: each tab's last answer and when it was measured; rewritten as tabs are used |
+| `runtime\` | what the tools write as they run: `wj_autoupdate.log` and the sorter's and downloader's logs; the state file and the manifest cache; `wj_overview.json`, what the Start tab shows; the lock; the files an assist session shares with the `nxm://` handler; and the `deleted_`, `purged_trash_` and `merged_` records of what stage 5 took |
 | `wj_wabbajack.py` | finding Wabbajack, whether it is the newest release, the game preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_gallery.py` | the published gallery and its validation reports: what exists, and how much of it you hold |
@@ -841,7 +846,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1081 checks across seventeen suites. None of them touch the live archive pools:
+environment instead). 1089 checks across seventeen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

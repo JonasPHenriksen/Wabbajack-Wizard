@@ -8,7 +8,7 @@ so the two front ends cannot drift apart. This module only decides what to
 show and what to ask.
 
 It opens on a Start tab: an overview built from what this session and the
-last one measured, kept in wj_overview.json beside the scripts. Opening the
+last one measured, kept in wj_overview.json in the runtime folder. Opening the
 window therefore costs nothing but reading the manifests; the gallery, the
 feeds and the pools are read when their tab is opened, and what they find is
 remembered for the next start.
@@ -197,7 +197,7 @@ def disk_free(path):
 
 
 def overview_path():
-    return os.path.join(A.HERE, OVERVIEW_FILE)
+    return A.runtime_path(OVERVIEW_FILE)
 
 
 def load_overview():
@@ -484,7 +484,7 @@ class App:
         self.log.configure(state="disabled")
 
     def _open_log_file(self):
-        path = os.path.join(A.HERE, "wj_autoupdate.log")
+        path = A.runtime_path("wj_autoupdate.log")
         try:
             os.startfile(path)
         except OSError as e:
@@ -2138,9 +2138,9 @@ class App:
         self.run_job("Emptying the trash", lambda: A.purge_trash(days=0), done)
 
     def space_leftovers(self):
-        """Debris no other step reaches: OS metadata, bytecode folders, a
-        captured run's output, a sidecar whose modlist is gone. Never an
-        archive, and never live state a running session owns."""
+        """Debris no other step reaches: OS metadata, and a sidecar whose
+        modlist is gone. Never an archive, and never live state a running
+        session owns."""
         def scan():
             return W.leftover_report()
 
@@ -2349,12 +2349,13 @@ def main(nexus_mode=None, allow_size_only=False, no_lock=False, verbose=False):
     rc = A.bootstrap(verbose=verbose, nexus_mode=nexus_mode, allow_size_only=allow_size_only)
     if rc:
         _fatal("Wabbajack Wizard could not start",
-               f"Start-up failed (exit {rc}). wj_autoupdate.log in {A.HERE} says why - usually the "
-               f"archive share is not connected, or xxhash is missing from the environment.")
+               f"Start-up failed (exit {rc}). wj_autoupdate.log in {A.runtime_path()} says why - "
+               f"usually the archive share is not connected, or xxhash is missing from the "
+               f"environment.")
         return rc
     lock_fd = None
     if not no_lock:
-        lock_fd = A.acquire_lock(os.path.join(A.HERE, A.LOCK_FILE))
+        lock_fd = A.acquire_lock(A.runtime_path(A.LOCK_FILE))
         if lock_fd is A.HELD:
             _fatal("Wabbajack Wizard", "Another run holds the lock - a scheduled run or another window. "
                                        "Nothing was done.")

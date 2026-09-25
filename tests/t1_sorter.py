@@ -224,8 +224,8 @@ rc, out1 = s.run("wj_sorter.py",
                  ["--game", G, "--cleanup-only", "--yes", "--dry-run"], expect=0)
 check("the first run parses every manifest", "2 manifest(s); 0 read from the cache" in out1,
       str([l for l in out1.split(chr(10)) if "manifest(s);" in l]))
-check("  and writes the cache beside the scripts",
-      os.path.isfile(os.path.join(s.tools, "wj_manifest_cache.json")))
+check("  and writes the cache in the runtime folder beside the scripts",
+      os.path.isfile(os.path.join(s.runtime, "wj_manifest_cache.json")))
 rc, out2 = s.run("wj_sorter.py",
                  ["--game", G, "--cleanup-only", "--yes", "--dry-run"], expect=0)
 check("the second run opens no manifest at all", "2 manifest(s); 2 read from the cache" in out2,

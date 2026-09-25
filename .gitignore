@@ -35,8 +35,11 @@ wj_settings.json
 nexus_api_key.txt
 
 # ---------------------------------------------------------------------
-# Runtime state and output, regenerated on every run.
+# Runtime state and output, regenerated on every run. It all lives in
+# runtime/ now; the names below are what older versions left beside the
+# scripts, which the tools move into runtime/ the first time they start.
 # ---------------------------------------------------------------------
+runtime/
 wj_autoupdate_state.json
 wj_manifest_cache.json
 wj_overview.json

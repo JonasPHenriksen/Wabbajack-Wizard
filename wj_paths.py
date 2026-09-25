@@ -4,9 +4,9 @@ Where the tool's own folder is, from source and from a build
 ============================================================
 
 Every script here anchors its work to `os.path.dirname(__file__)`: the
-settings file, the manifests, the logs, the state file, the lock, the pool
-root when it is written as a relative path. That is exactly right while the
-scripts are scripts.
+settings file, the manifests, the pool root when it is written as a relative
+path, and the runtime folder beside them holding the logs, the state file and
+the lock. That is exactly right while the scripts are scripts.
 
 Inside a PyInstaller build it is exactly wrong. `__file__` then points into
 the bundle's `_internal` folder, which is read-only in spirit, replaced on
@@ -37,6 +37,27 @@ STAGE_FLAG = "--wj-stage="
 GUI_EXE = "WabbajackWizard.exe"
 CONSOLE_EXE = "WabbajackWizard-console.exe"
 
+# The folder beside the scripts, or beside the exe, holding what the tools
+# write as they run: the logs, the records of what stage 5 took, the state
+# and the manifest cache, the lock, and the files a running assist session
+# owns. They used to sit in the folder itself, a dozen or so beside the
+# source, and they move here the first time a tool starts (adopt_runtime).
+# The settings, the API key file, the manifests and the caches that are
+# folders of their own stay where they are.
+RUNTIME_DIR = "runtime"
+
+# What adopt_runtime() moves: these names, and names with these prefix and
+# suffix pairs - every file the tools write beside themselves as they run.
+RUNTIME_NAMES = ("wj_autoupdate.log", "wj_autoupdate.log.1", "wj_autoupdate.log.2",
+                 "wj_autoupdate_state.json", "wj_manifest_cache.json", "wj_overview.json",
+                 ".wj_autoupdate.lock", ".nxm_listener_port", ".nxm_prev_handler",
+                 "nxm_captured.txt")
+RUNTIME_PATTERNS = (("wj_sorter_", ".log"), ("wj_downloader_", ".log"),
+                    ("wj_autoupdate_", ".out"), ("deleted_", ".csv"),
+                    ("purged_trash_", ".csv"), ("merged_", ".csv"),
+                    ("download_failures_", ".csv"), ("nexus_todo_", ".csv"),
+                    ("nexus_pages_", ".csv"))
+
 
 def frozen():
     """True when running from a build rather than from the .py files."""
@@ -53,6 +74,58 @@ def app_dir(module_file):
     if frozen():
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(module_file))
+
+
+def runtime_dir(module_file):
+    """The folder this tool writes its runtime files in - RUNTIME_DIR in the
+    folder app_dir() names - made if it is not there yet. Pass `__file__`."""
+    d = os.path.join(app_dir(module_file), RUNTIME_DIR)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass            # the caller's own open() then says what is wrong
+    return d
+
+
+def is_runtime_file(name):
+    """Is `name` one of the runtime files adopt_runtime() moves?"""
+    low = name.lower()
+    return (low in RUNTIME_NAMES
+            or any(low.startswith(p) and low.endswith(s) for p, s in RUNTIME_PATTERNS))
+
+
+def adopt_runtime(here):
+    """Move the runtime files an older version left in the folder `here`
+    (the tool's own, as app_dir() says) into its runtime folder. Returns the
+    names moved.
+
+    Cheap enough to run at every start - one listing of the folder - and a
+    no-op once the move is done. A file that is already in the runtime
+    folder is left where it is rather than overwritten, and so is one that
+    will not move, being open in another process: the lock held by a run of
+    the older version, say. Nothing is ever deleted."""
+    dest = os.path.join(here, RUNTIME_DIR)
+    moved = []
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError:
+        return moved
+    try:
+        names = os.listdir(here)
+    except OSError:
+        return moved
+    for n in names:
+        if not is_runtime_file(n):
+            continue
+        src, dst = os.path.join(here, n), os.path.join(dest, n)
+        if not os.path.isfile(src) or os.path.exists(dst):
+            continue
+        try:
+            os.replace(src, dst)
+            moved.append(n)
+        except OSError:
+            pass
+    return moved
 
 
 def console_exe():

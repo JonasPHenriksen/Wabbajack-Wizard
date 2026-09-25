@@ -102,7 +102,8 @@ class Record:
     def __init__(self, src_name, dst_name, dry):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.path = os.path.join(
-            HERE, f"merged_{src_name}_into_{dst_name}_{stamp}.csv")
+            wj_paths.runtime_dir(__file__),
+            f"merged_{src_name}_into_{dst_name}_{stamp}.csv")
         self.rows = 0
         self._fh = self._w = None
         if dry:
@@ -358,7 +359,8 @@ def main():
 
     lock_fd = None
     if not os.environ.get("WJ_LOCK_HELD"):
-        lock_fd = A.acquire_lock(os.path.join(HERE, A.LOCK_FILE))
+        wj_paths.adopt_runtime(HERE)
+        lock_fd = A.acquire_lock(os.path.join(wj_paths.runtime_dir(__file__), A.LOCK_FILE))
         if lock_fd is A.HELD:
             say("[SKIPPED] Another archive job holds the lock. Nothing was done.")
             return 3

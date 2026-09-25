@@ -13,13 +13,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import Sandbox, check, summary
+from harness import Sandbox, check, summary, quiet_logging
 
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 A.WJ = A.load_downloader_module()
 import wj_wizard as W
 

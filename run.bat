@@ -63,7 +63,7 @@ goto launch
 if not "%~1"=="" goto console
 
 REM The window. pythonw has no console, so everything the tool says goes to
-REM the window's log pane and to wj_autoupdate.log; a failure before the
+REM the window's log pane and to runtime\wj_autoupdate.log; a failure before the
 REM window exists is shown in a dialog. Falls back to a console Python if
 REM there is no pythonw, which only means a console window sits behind it.
 if not defined PYW set PYW=%PY%
@@ -78,10 +78,10 @@ echo.
 set RC=%ERRORLEVEL%
 echo.
 if "%RC%"=="0" echo [OK]       Finished cleanly.
-if "%RC%"=="1" echo [PARTIAL]  Finished, but something failed. See wj_autoupdate.log.
-if "%RC%"=="2" echo [STOPPED]  Could not start. See wj_autoupdate.log.
+if "%RC%"=="1" echo [PARTIAL]  Finished, but something failed. See runtime\wj_autoupdate.log.
+if "%RC%"=="2" echo [STOPPED]  Could not start. See runtime\wj_autoupdate.log.
 if "%RC%"=="3" echo [SKIPPED]  Another run holds the lock; nothing was done.
-if "%RC%"=="4" echo [CRASH]    Unhandled error. See wj_autoupdate.log.
+if "%RC%"=="4" echo [CRASH]    Unhandled error. See runtime\wj_autoupdate.log.
 goto end
 
 :nopython

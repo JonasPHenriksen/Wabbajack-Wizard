@@ -16,13 +16,12 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import Sandbox, check, summary
+from harness import Sandbox, check, summary, quiet_logging
 
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 A.WJ = A.load_downloader_module()
 
 BOX = os.path.join(BOXROOT, "sb4")
@@ -85,19 +84,22 @@ check("falls back to the title when the key is not a legal filename",
 # ---------------------------------------------------------------- 4.4
 print("\n 4.4  a damaged state file must not stop a run")
 box = Sandbox(BOX)
+os.makedirs(box.runtime, exist_ok=True)
 for bad, label in (("{ not json at all", "invalid JSON"),
                    ("[1,2,3]", "a list instead of an object"),
                    ("null", "null"),
                    ("", "empty file")):
-    sf = os.path.join(box.tools, A.STATE_FILE)
+    sf = os.path.join(box.runtime, A.STATE_FILE)
     io.open(sf, "w", encoding="utf-8").write(bad)
     saved_here, A.HERE = A.HERE, box.tools
     try:
+        read_from = A.runtime_path(A.STATE_FILE)
         st = A.load_state()
     finally:
         A.HERE = saved_here
     check("recovers from %-28s" % label,
-          isinstance(st, dict) and isinstance(st.get("lists"), dict), str(st)[:60])
+          os.path.normcase(read_from) == os.path.normcase(sf)
+          and isinstance(st, dict) and isinstance(st.get("lists"), dict), str(st)[:60])
 
 # ---------------------------------------------------------------- 4.5
 print("\n 4.5  verify_manifest reuses a hash instead of re-reading the file")
@@ -209,5 +211,42 @@ proc = subprocess.run(nohash + [os.path.join(box.tools, "wj_autoupdate.py"),
                       stdin=subprocess.DEVNULL)
 check("  --allow-size-only is a deliberate way past it",
       proc.returncode != 2, "exit %d" % proc.returncode)
+
+# ---------------------------------------------------------------- 4.8
+print("\n 4.8  what an older version left beside the scripts moves into runtime")
+import wj_paths as WP
+box = Sandbox(BOX)
+old = {"wj_autoupdate.log": b"old log\n", "wj_autoupdate_state.json": b'{"lists": {}}',
+       "deleted_Skyrim_20260924_210617.csv": b"archive,size_bytes\n",
+       "wj_sorter_20260924_210445.log": b"sorter\n", "wj_autoupdate_sorter.out": b"out\n",
+       ".nxm_prev_handler": b"", ".wj_autoupdate.lock": b"1234 then\n"}
+for name, data in old.items():
+    io.open(os.path.join(box.tools, name), "wb").write(data)
+os.makedirs(box.runtime)
+io.open(os.path.join(box.runtime, "wj_overview.json"), "w", encoding="utf-8").write("{}")
+io.open(os.path.join(box.tools, "wj_overview.json"), "w", encoding="utf-8").write('{"old": 1}')
+io.open(os.path.join(box.tools, "notes.csv"), "w", encoding="utf-8").write("mine")
+moved = WP.adopt_runtime(box.tools)
+check("every runtime file is moved", sorted(moved) == sorted(old), str(sorted(moved)))
+check("  and arrives intact", all(
+    io.open(os.path.join(box.runtime, n), "rb").read() == d for n, d in old.items()))
+check("  none of them is left beside the scripts",
+      not any(os.path.exists(os.path.join(box.tools, n)) for n in old))
+check("one already in the runtime folder is not overwritten, and the old copy is kept",
+      io.open(os.path.join(box.runtime, "wj_overview.json"), encoding="utf-8").read() == "{}"
+      and os.path.isfile(os.path.join(box.tools, "wj_overview.json")))
+check("anything else beside the scripts is left alone",
+      os.path.isfile(os.path.join(box.tools, "notes.csv"))
+      and os.path.isfile(os.path.join(box.tools, "wj_config.py")))
+check("a second pass moves nothing", WP.adopt_runtime(box.tools) == [])
+io.open(os.path.join(box.tools, "wj_downloader_20260101_000000.log"), "w").write("x")
+rc, out = box.run("wj_sorter.py", ["--game", G, "--yes", "--dry-run"])
+check("a tool moves them itself as it starts",
+      "wj_downloader_20260101_000000.log" in box.runtime_files()
+      and not os.path.exists(os.path.join(box.tools, "wj_downloader_20260101_000000.log")),
+      str(box.runtime_files()))
+check("  and writes its own log in the runtime folder",
+      len([n for n in box.runtime_files() if n.startswith("wj_sorter_")]) == 2,
+      str(box.runtime_files()))
 
 sys.exit(summary())

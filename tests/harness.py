@@ -29,12 +29,21 @@ class Sandbox:
         self.root = root
         self.tools = os.path.join(root, "tools")
         self.manifests = os.path.join(self.tools, "modlists")
+        # Where the scripts write their logs, state and records as they run.
+        self.runtime = os.path.join(self.tools, "runtime")
         self.archives = os.path.join(root, "Mod Archive")
         shutil.rmtree(root, ignore_errors=True)
         os.makedirs(self.manifests)
         os.makedirs(self.archives)
         for s in SCRIPTS:
             shutil.copy2(os.path.join(REAL, s), os.path.join(self.tools, s))
+
+    def runtime_files(self):
+        """Sorted names in the runtime folder; [] before anything wrote one."""
+        try:
+            return sorted(os.listdir(self.runtime))
+        except OSError:
+            return []
 
     # -- fixture building --------------------------------------------
     def manifest(self, name, game, archives, corrupt=None):
@@ -135,6 +144,24 @@ class Sandbox:
                 if name in files:
                     hits.append((folder, files[name]))
         return sorted(hits)
+
+
+def quiet_logging(A):
+    """wj_autoupdate's logging, for a suite that imports it from the checkout.
+
+    setup_logging() opens runtime/wj_autoupdate.log under A.HERE, and for an
+    import from the checkout that is the real project: the suites used to
+    append their warnings - an unreadable test manifest, a stray test folder
+    - to the real log, the downloader's included. This opens it in a scratch
+    folder that run_all removes instead, and puts HERE back."""
+    import logging
+    saved = A.HERE
+    A.HERE = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests", "logs")
+    try:
+        A.setup_logging(False)
+    finally:
+        A.HERE = saved
+    A.LOG.setLevel(logging.CRITICAL)
 
 
 PASS = []

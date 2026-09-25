@@ -67,8 +67,9 @@ Notes:
     definition.json.gz + parts/N protocol; a plain GET on such a URL returns
     a ~1 KB error page.
   * WJ_MANIFEST_DIR, when set to a real directory, says where .wabbajack files
-    are; the orchestrator sets it for the children it launches. Logs, the API
-    key file and the CSV reports live beside this script regardless.
+    are; the orchestrator sets it for the children it launches. The API key
+    file lives beside this script, and the logs and CSV reports in the runtime
+    folder beside it, regardless.
 """
 
 import os
@@ -234,7 +235,9 @@ NEXUS_DOMAIN_FALLBACKS = {
 
 # Free-account nxm capture --------------------------------------------
 NXM_LISTEN_HOST   = "127.0.0.1"
-NXM_PORT_FILE     = ".nxm_listener_port"   # written next to the script
+# These three live in the runtime folder (wj_paths.RUNTIME_DIR), where the
+# run and the nxm:// handler it registered both find them.
+NXM_PORT_FILE     = ".nxm_listener_port"   # the listener's port, for the handler
 NXM_PREV_HANDLER  = ".nxm_prev_handler"    # saved previous nxm:// command
 NXM_FALLBACK_FILE = "nxm_captured.txt"     # forwarder appends here if no listener
 # The download window's Skip button is an nxm:// link under this host, so it
@@ -1220,7 +1223,7 @@ def nxm_handler_command():
     return f'"{exe}" "{script}" --nxm "%1"'
 
 
-def register_nxm(script_dir):
+def register_nxm(run_dir):
     """Register this script as the nxm:// handler under HKCU, saving whatever
     was there before (e.g. Wabbajack) so --unregister-nxm can restore it."""
     if not _HAVE_WINREG:
@@ -1244,7 +1247,7 @@ def register_nxm(script_dir):
         LOG.debug("nxm handler is already ours; keeping the saved previous handler.")
     else:
         try:
-            with open(os.path.join(script_dir, NXM_PREV_HANDLER), "w", encoding="utf-8") as f:
+            with open(os.path.join(run_dir, NXM_PREV_HANDLER), "w", encoding="utf-8") as f:
                 f.write(prev or "")
         except OSError:
             pass
@@ -1300,7 +1303,7 @@ def _delete_key_tree(root, path):
         pass
 
 
-def unregister_nxm(script_dir):
+def unregister_nxm(run_dir):
     """Restore the previously-saved nxm:// handler (or remove ours)."""
     if not _HAVE_WINREG:
         LOG.error("[ERROR] nxm registration is Windows-only.")
@@ -1308,7 +1311,7 @@ def unregister_nxm(script_dir):
     cmd_key = r"Software\Classes\nxm\shell\open\command"
     prev = None
     try:
-        with open(os.path.join(script_dir, NXM_PREV_HANDLER), encoding="utf-8") as f:
+        with open(os.path.join(run_dir, NXM_PREV_HANDLER), encoding="utf-8") as f:
             prev = f.read().strip()
     except OSError:
         prev = None
@@ -1334,12 +1337,12 @@ def unregister_nxm(script_dir):
     return True
 
 
-def forward_nxm(url, script_dir):
+def forward_nxm(url, run_dir):
     """Handler-invocation entry point: hand the nxm URL to a running listener,
     or append it to the fallback file if no listener is up."""
     port = None
     try:
-        with open(os.path.join(script_dir, NXM_PORT_FILE), encoding="utf-8") as f:
+        with open(os.path.join(run_dir, NXM_PORT_FILE), encoding="utf-8") as f:
             port = int(f.read().strip())
     except (OSError, ValueError):
         port = None
@@ -1352,7 +1355,7 @@ def forward_nxm(url, script_dir):
             pass
     # No listener: persist it so a later --nxm-file run can use it.
     try:
-        with open(os.path.join(script_dir, NXM_FALLBACK_FILE), "a", encoding="utf-8") as f:
+        with open(os.path.join(run_dir, NXM_FALLBACK_FILE), "a", encoding="utf-8") as f:
             f.write(url.strip() + "\n")
     except OSError:
         pass
@@ -1360,14 +1363,14 @@ def forward_nxm(url, script_dir):
 
 class NxmListener:
     """Tiny localhost listener that the handler forwards captured links to."""
-    def __init__(self, script_dir):
-        self.script_dir = script_dir
+    def __init__(self, run_dir):
+        self.run_dir = run_dir
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((NXM_LISTEN_HOST, 0))
         self.sock.listen(8)
         self.port = self.sock.getsockname()[1]
-        with open(os.path.join(script_dir, NXM_PORT_FILE), "w", encoding="utf-8") as f:
+        with open(os.path.join(run_dir, NXM_PORT_FILE), "w", encoding="utf-8") as f:
             f.write(str(self.port))
 
     def wait(self, timeout):
@@ -1395,7 +1398,7 @@ class NxmListener:
             self.sock.close()
         finally:
             try:
-                os.remove(os.path.join(self.script_dir, NXM_PORT_FILE))
+                os.remove(os.path.join(self.run_dir, NXM_PORT_FILE))
             except OSError:
                 pass
 
@@ -2315,7 +2318,7 @@ def _wait_click(listener, timeout, stop=None, skip=None):
             return url
 
 
-def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args, opener=None):
+def download_nexus_assist(items, nexus, dest_dir, results, run_dir, args, opener=None):
     """Interactive free-account capture: show each page, catch the nxm click.
 
     Where the pages are shown: `opener` if given; else a window of our own
@@ -2330,30 +2333,30 @@ def download_nexus_assist(items, nexus, dest_dir, results, script_dir, args, ope
             LOG.info("The Nexus pages open in a window of their own. Sign in to Nexus there "
                      "if it asks - once; the window keeps its login. Closing it ends the run.")
             win = _ASSISTWIN.AssistWindow()
-            win.run(lambda w: _assist_loop(items, nexus, dest_dir, results, script_dir, args, w))
+            win.run(lambda w: _assist_loop(items, nexus, dest_dir, results, run_dir, args, w))
             return
         if ASSIST_WINDOW:
             LOG.info("The Nexus pages open in your browser (%s).",
                      _ASSISTWIN.why_not() if _ASSISTWIN is not None else "wj_assistwin is missing")
         opener = _BrowserOpener()
-    _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener)
+    _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener)
 
 
-def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
+def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
     by_ids = {nexus_ids(a): a for a in items}
     fetched = set()
     learned_domains = {}
 
     # Make sure we are the nxm handler (so clicks reach us).
-    if not register_nxm(script_dir):
+    if not register_nxm(run_dir):
         LOG.error("[ERROR] Could not register the nxm handler; aborting assist mode.")
         return
 
-    listener = NxmListener(script_dir)
+    listener = NxmListener(run_dir)
     if hasattr(opener, "on_link"):
         # The window catches the nxm:// link itself and hands it here; the
         # registered handler above is only the fallback should it not.
-        opener.on_link = lambda uri: forward_nxm(uri, script_dir)
+        opener.on_link = lambda uri: forward_nxm(uri, run_dir)
     LOG.info("Capture listener on %s:%d. For each file, the Nexus download page opens - "
              "click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
     LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
@@ -2474,7 +2477,7 @@ def _assist_loop(items, nexus, dest_dir, results, script_dir, args, opener):
         # Wabbajack). Without this, every "download with manager" click on
         # Nexus keeps landing on this script until you notice and fix it by
         # hand - including the clicks Wabbajack itself is waiting for.
-        unregister_nxm(script_dir)
+        unregister_nxm(run_dir)
 
 
 # ----------------------------------------------------------------------
@@ -2529,10 +2532,13 @@ def main():
     args = parser.parse_args()
 
     script_dir = wj_paths.app_dir(__file__)
+    # Logs, the CSV reports and the files an assist session shares with the
+    # nxm:// handler all live here; see wj_paths.RUNTIME_DIR.
+    run_dir = wj_paths.runtime_dir(__file__)
 
     # --- Handler-invocation entry point: forward the URL and exit immediately.
     if args.nxm:
-        forward_nxm(args.nxm, script_dir)
+        forward_nxm(args.nxm, run_dir)
         return
 
     if args.check_window:
@@ -2554,20 +2560,21 @@ def main():
               f"{_ASSISTWIN.storage_dir()}")
         return
 
-    log_path = setup_logging(script_dir, verbose=args.verbose)
+    wj_paths.adopt_runtime(script_dir)
+    log_path = setup_logging(run_dir, verbose=args.verbose)
 
     # --- Standalone handler (un)registration.
     if args.register_nxm:
-        register_nxm(script_dir)
+        register_nxm(run_dir)
         return
     if args.unregister_nxm:
-        unregister_nxm(script_dir)
+        unregister_nxm(run_dir)
         return
 
     # The .wabbajack manifests need not live beside this script (wj_autoupdate.py
     # sets WJ_MANIFEST_DIR so the tooling can sit in its own folder, and this
-    # script otherwise looks in ./modlists). Logs, the API key file and the CSV
-    # reports stay in script_dir either way.
+    # script otherwise looks in ./modlists). The API key file stays in
+    # script_dir, and the logs and CSV reports in run_dir, either way.
     manifest_dir = resolve_manifest_dir(script_dir)
     if manifest_dir:
         # Tell the index which subfolders are modlist folders, so one that is
@@ -2766,7 +2773,7 @@ def main():
                                      args.nxm_file, limit=args.limit)
         elif args.nxm_assist:
             banner("STEP 6: DOWNLOADING (NEXUS, CLICK-CAPTURE)")
-            download_nexus_assist(nexus_items, nexus, dest_dir, results, script_dir, args)
+            download_nexus_assist(nexus_items, nexus, dest_dir, results, run_dir, args)
         else:
             # Free account, no capture method chosen: explain and write a helper file.
             banner("STEP 6: NEXUS (FREE ACCOUNT) - ACTION NEEDED")
@@ -2777,7 +2784,7 @@ def main():
             LOG.info("  * Re-run with --nxm-file <links.txt> to replay nxm:// links you saved.")
             LOG.info("  * Or just let Wabbajack download the Nexus files (it handles the free "
                      "click flow itself).")
-            pages = os.path.join(script_dir, f"nexus_pages_{target}.csv")
+            pages = os.path.join(run_dir, f"nexus_pages_{target}.csv")
             try:
                 with open(pages, "w", newline="", encoding="utf-8") as f:
                     w = csv.writer(f)
@@ -2801,7 +2808,7 @@ def main():
     if nexus and nexus.daily_remaining is not None:
         LOG.info("-> Nexus daily reqs left: %s", nexus.daily_remaining)
     if results["failures"]:
-        report = os.path.join(script_dir, f"download_failures_{target}.csv")
+        report = os.path.join(run_dir, f"download_failures_{target}.csv")
         try:
             with open(report, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)

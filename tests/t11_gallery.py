@@ -17,13 +17,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import check, summary
+from harness import check, summary, quiet_logging
 
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 WJ = A.load_downloader_module()
 import wj_config as CFG
 import wj_gallery as G

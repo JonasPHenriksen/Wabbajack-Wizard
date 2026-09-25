@@ -10,7 +10,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import check, summary
+from harness import check, summary, quiet_logging
 
 sys.path.insert(0, REPO)
 os.chdir(REPO)
@@ -136,8 +136,7 @@ check("an empty install path is refused",
 print("\n 9.6  the wizard refuses to offer an install it cannot do")
 import logging
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 A.WJ = A.load_downloader_module()
 A.resolve_dirs()
 import wj_wizard as W

@@ -51,7 +51,7 @@ def build():
 
 
 def records(s):
-    return sorted(glob.glob(os.path.join(s.tools, "merged_GameA_into_GameB_*.csv")))
+    return sorted(glob.glob(os.path.join(s.runtime, "merged_GameA_into_GameB_*.csv")))
 
 
 # ---------------------------------------------------------------- 14.1

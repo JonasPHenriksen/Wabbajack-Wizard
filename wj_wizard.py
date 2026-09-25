@@ -2434,8 +2434,7 @@ class DeletionRecord:
 
     def __init__(self, game, rule, master):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.path = os.path.join(
-            A.HERE, f"deleted_{A.WJ.game_folder(game)}_{stamp}.csv")
+        self.path = A.runtime_path(f"deleted_{A.WJ.game_folder(game)}_{stamp}.csv")
         self.rule, self.master, self.rows = rule, master, 0
         self._fh = self._w = None
         try:
@@ -2633,9 +2632,8 @@ def leftover_step():
     rule()
     out("  5e. Leftovers")
     out("      Debris beside the archives that nothing else here ever removes:")
-    out("      operating-system metadata, compiled-bytecode folders, a captured")
-    out("      run's output, and Wabbajack's .metadata sidecar for a modlist")
-    out("      that is gone. No archive is ever in this list.")
+    out("      operating-system metadata, and Wabbajack's .metadata sidecar for")
+    out("      a modlist that is gone. No archive is ever in this list.")
     out()
     by_cat = {}
     for cat, _p, b in rows:
@@ -2715,8 +2713,9 @@ def prune_stale_csvs(records, statuses):
     stems = {stem_of(fn) for fn in records}
     busy = {stem_of(fn) for fn, st in statuses.items() if st and st.get("missing")}
     removed = []
+    folder = A.runtime_path()
     try:
-        names = os.listdir(A.HERE)
+        names = os.listdir(folder)
     except OSError:
         return removed
     for n in names:
@@ -2728,7 +2727,7 @@ def prune_stale_csvs(records, statuses):
                 stem = n[len(prefix):-4]
                 if stem not in stems or stem not in busy:
                     try:
-                        os.remove(os.path.join(A.HERE, n))
+                        os.remove(os.path.join(folder, n))
                         removed.append(n)
                     except OSError:
                         pass
@@ -3071,7 +3070,7 @@ def run(verbose=False, nexus_mode=None, allow_size_only=False, no_lock=False):
 
     lock_fd = None
     if not no_lock:
-        lock_fd = A.acquire_lock(os.path.join(A.HERE, A.LOCK_FILE))
+        lock_fd = A.acquire_lock(A.runtime_path(A.LOCK_FILE))
         if lock_fd is A.HELD:
             out("Another run holds the lock. Nothing was done.")
             return 3

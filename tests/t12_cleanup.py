@@ -20,13 +20,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import Sandbox, check, summary
+from harness import Sandbox, check, summary, quiet_logging
 
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 A.WJ = A.load_downloader_module()
 import wj_config as CFG
 import wj_gallery as G
@@ -502,15 +501,21 @@ def put(path, body=b"x"):
 
 
 junk = [put(".DS_Store"), put("._run.bat"), put("Thumbs.db"),
+        put(os.path.join("runtime", "Thumbs.db")),
         put(os.path.join(box.manifests, "Gone_@@_gone.wabbajack.metadata"), b"{}"),
         put(os.path.join(box.archives, GAME, "Live", ".DS_Store"))]
 
-# Live state, records and managed content. None of this may ever be swept.
+# Live state, records and managed content. None of this may ever be swept -
+# in the runtime folder where it lives now, or beside the scripts where an
+# older version left it.
 keep = [put("nexus_api_key.txt", b"secret"), put("wj_settings.json", b"{}"),
         put(".wj_autoupdate.lock", b"pid"), put(".nxm_listener_port", b"53443"),
         put(".nxm_prev_handler", b""), put("wj_autoupdate_state.json", b"{}"),
         put("deleted_Fallout4_20260903_165237.csv", b"a,b"),
         put("purged_trash_20260903_165352.csv", b"a,b"),
+        put(os.path.join("runtime", ".wj_autoupdate.lock"), b"pid"),
+        put(os.path.join("runtime", "wj_autoupdate_state.json"), b"{}"),
+        put(os.path.join("runtime", "deleted_Fallout4_20260925_000000.csv"), b"a,b"),
         put(os.path.join("manifest_backups", "Live.wabbajack.bak"), b"z" * 20),
         put(os.path.join(".gallery-cache", "summary.json"), b"[]"),
         put(os.path.join(".venv-win", "Scripts", "._python.exe")),

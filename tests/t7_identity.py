@@ -12,7 +12,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import Sandbox, check, summary
+from harness import Sandbox, check, summary, quiet_logging
 
 BOX = os.path.join(BOXROOT, "sb7")
 G = "Fallout4"
@@ -100,8 +100,7 @@ sys.path.insert(0, REPO)
 os.chdir(REPO)
 import logging
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 A.WJ = A.load_downloader_module()
 A.MANIFESTS = s.manifests
 A.HERE = s.tools

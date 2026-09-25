@@ -130,6 +130,19 @@ NEWLINE = chr(10)
 HERE = wj_paths.app_dir(__file__)
 LOG = logging.getLogger("wj_autoupdate")
 
+
+def runtime_path(name=None):
+    """Where one of the files this tooling writes as it runs lives - the
+    runtime folder beside the scripts, see wj_paths.RUNTIME_DIR - or that
+    folder itself. Worked out from HERE at the moment of asking, so that
+    moving HERE, as every sandbox test does, moves these with it."""
+    d = os.path.join(HERE, wj_paths.RUNTIME_DIR)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass            # the caller's own open() then says what is wrong
+    return os.path.join(d, name) if name else d
+
 # Filled in by resolve_dirs() during startup.
 MANIFESTS = HERE          # where the .wabbajack files are
 BACKUPS = HERE            # where superseded/rejected manifests are parked
@@ -163,7 +176,7 @@ def setup_logging(verbose=False):
         # scripts keep only their previous and current logs, while this one
         # had grown without limit. 5 MB is a few hundred runs.
         fh = logging.handlers.RotatingFileHandler(
-            os.path.join(HERE, "wj_autoupdate.log"), encoding="utf-8",
+            runtime_path("wj_autoupdate.log"), encoding="utf-8",
             maxBytes=5 * 1024 * 1024, backupCount=2)
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
@@ -666,7 +679,7 @@ def manifest_name(path):
 
 
 def load_state():
-    p = os.path.join(HERE, STATE_FILE)
+    p = runtime_path(STATE_FILE)
     try:
         with open(p, encoding="utf-8") as f:
             s = json.load(f)
@@ -676,7 +689,7 @@ def load_state():
 
 
 def save_state(state):
-    p = os.path.join(HERE, STATE_FILE)
+    p = runtime_path(STATE_FILE)
     tmp = p + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -884,7 +897,7 @@ def load_plan_records(progress=None, files=None):
     The cache itself lives in the downloader module now, so the sorter reads
     the same file instead of opening every manifest zip on each run; see
     load_light_records() there for what is cached and how it is invalidated."""
-    return WJ.load_light_records(MANIFESTS, os.path.join(HERE, MANIFEST_CACHE_FILE),
+    return WJ.load_light_records(MANIFESTS, runtime_path(MANIFEST_CACHE_FILE),
                                  progress=progress, files=files)
 
 
@@ -971,7 +984,7 @@ def purge_trash(days=None):
                 continue
             if record is None:
                 stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                path = os.path.join(HERE, f"purged_trash_{stamp}.csv")
+                path = runtime_path(f"purged_trash_{stamp}.csv")
                 try:
                     record = open(path, "w", newline="", encoding="utf-8")
                     writer = csv.writer(record)
@@ -1063,7 +1076,7 @@ def write_nexus_todo(record, nexus_items):
 
     Removed again once nothing is outstanding: a to-do list for a finished
     list is clutter, and ten of them had accumulated here."""
-    path = os.path.join(HERE, f"nexus_todo_{record['name']}.csv")
+    path = runtime_path(f"nexus_todo_{record['name']}.csv")
     if not nexus_items:
         try:
             os.remove(path)
@@ -1173,7 +1186,7 @@ def run_script(script, args, label, interactive=False):
     # this tells them to look where we actually keep them.
     env = dict(os.environ, PYTHONUNBUFFERED="1", WJ_MANIFEST_DIR=MANIFESTS,
                WJ_LOCK_HELD="1")
-    cap = os.path.join(HERE, f"wj_autoupdate_{label}.out")
+    cap = runtime_path(f"wj_autoupdate_{label}.out")
     if OUTPUT_HOOK is not None:
         # The window has no console to give away, and frozen the child is the
         # console binary, which Windows would otherwise hand a console window
@@ -1229,6 +1242,8 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
     run without hash verification. Keeping it in one place means the wizard
     cannot quietly start up under weaker checks than the flag interface."""
     global WJ, NEXUS_MODE
+    # Before the log opens: the log is one of the files that moves.
+    moved = wj_paths.adopt_runtime(HERE)
     setup_logging(verbose)
     WJ = load_downloader_module()
     if nexus_mode:
@@ -1236,6 +1251,9 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
 
     LOG.info("Wabbajack Wizard %s  %s", CFG.__version__,
              datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if moved:
+        LOG.info("Moved %d runtime file(s) from beside the scripts into %s: %s",
+                 len(moved), runtime_path(), ", ".join(sorted(moved)))
     LOG.info("Settings:       %s",
              ("%s (%d override(s))" % (CFG.SETTINGS_FILE, len(CFG._LOADED)))
              if CFG._LOADED else "defaults (no %s)" % CFG.SETTINGS_FILE)
@@ -1246,6 +1264,7 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
     if not resolve_dirs():
         return 1
     LOG.info("Script dir:     %s", HERE)
+    LOG.info("Runtime dir:    %s", runtime_path())
     LOG.info("Manifest dir:   %s", MANIFESTS)
     LOG.info("Archive root:   %s", WJ.ARCHIVE_ROOT)
     have_hash = bool(getattr(WJ, "_HAVE_XXHASH", False))
@@ -2280,7 +2299,7 @@ def main():
     # Everything past here touches the pools, so serialise it.
     lock_fd = None
     if not args.no_lock:
-        lock_fd = acquire_lock(os.path.join(HERE, LOCK_FILE))
+        lock_fd = acquire_lock(runtime_path(LOCK_FILE))
         if lock_fd is HELD:
             LOG.info("[SKIPPED] Another run holds the lock. Exiting without "
                      "doing anything. (If nothing else is running, use "
@@ -2313,7 +2332,7 @@ def main():
         # exactly backwards for a run you are not watching.
         if rc >= 2 and not args.check and not args.dry_run:
             notify("Wabbajack updater failed (exit %d)" % rc,
-                   "The run stopped early. See wj_autoupdate.log on the share.")
+                   "The run stopped early. See runtime\\wj_autoupdate.log on the share.")
 
 
 if __name__ == "__main__":

@@ -21,14 +21,13 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from harness import Sandbox, check, summary
+from harness import Sandbox, check, summary, quiet_logging
 
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 import tkinter as tk
 import wj_autoupdate as A
-A.setup_logging(False)
-A.LOG.setLevel(logging.CRITICAL)
+quiet_logging(A)
 A.WJ = A.load_downloader_module()
 import wj_config as CFG
 import wj_gallery as G
@@ -163,7 +162,7 @@ check("  the expensive cards say they have not measured yet",
       "Not checked yet" in app.cards["updates"]["body"].get()
       and "not measured yet" in app.cards["space"]["body"].get(), app.cards["space"]["body"].get())
 check("  and the session was stamped in the sandbox",
-      os.path.isfile(os.path.join(box.tools, GUI.OVERVIEW_FILE))
+      os.path.isfile(os.path.join(box.runtime, GUI.OVERVIEW_FILE))
       and GUI.load_overview().get("session"), str(GUI.load_overview()))
 check("no dialog was needed to start", not any(k == "show" for k, _t, _x in DLG.calls),
       str(DLG.calls))
@@ -260,7 +259,7 @@ app.space_empty_trash()
 settle()
 check("emptying the trash removes everything in it", os.listdir(trash) == [], str(os.listdir(trash)))
 check("  and a purge record was written",
-      any(f.startswith("purged_trash_") for f in os.listdir(box.tools)), str(os.listdir(box.tools)))
+      any(f.startswith("purged_trash_") for f in box.runtime_files()), str(box.runtime_files()))
 
 # refusals still hold in the window
 DLG.calls.clear()
