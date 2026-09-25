@@ -289,6 +289,66 @@ CHOICES = {
     "THEME": ("light", "dark"),
 }
 
+# The text settings that may be null, each of which says what null means:
+# auto-detect, the most recently updated list, no notifications. Every other
+# text setting has to name something, and a null or empty one keeps its
+# default. The Settings tab writes an emptied field as null, and an emptied
+# TRASH_FOLDER used to stop every tool from starting.
+OPTIONAL = ("WABBAJACK_DIR", "STAGE_LIST", "NOTIFY_URL")
+
+# The folders laid out inside every game's pool beside Master and Shared. Each
+# is a folder NAME, and a wrong one is not a typo but a hazard: the purge
+# deletes, for good, whatever has sat in <game>\<TRASH_FOLDER> for
+# TRASH_KEEP_DAYS, so a trash folder called Master would have emptied Master
+# at the next start. They are checked on the way in, like every other
+# setting, and a bad one keeps its default.
+FOLDER_SETTINGS = ("UNMANAGED_FOLDER", "TRASH_FOLDER")
+
+# Characters Windows refuses in a file or folder name - the path separators
+# and the drive colon among them - and the control characters.
+_BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Names Windows keeps for devices, with or without an extension: a folder
+# called NUL is no folder at all.
+_DEVICE_NAMES = ({"con", "prn", "aux", "nul"}
+                 | {f"{p}{n}" for p in ("com", "lpt") for n in range(1, 10)})
+
+
+def plain_name_problem(name):
+    """Why `name` is not one plain file or folder name, or None if it is.
+
+    Names read from outside this tooling become paths here: an archive's name
+    in a manifest, a folder name in the settings, a list's key in a feed. A
+    name carrying a separator, or one made only of dots, reaches a different
+    folder than the one it is joined to - '..\\..\\x' as an archive name in a
+    manifest wrote its download two folders above the pool. And Windows drops
+    a trailing dot or space, so 'Master.' would open Master while every check
+    compared 'Master.'."""
+    if not isinstance(name, str) or not name:
+        return "it is empty"
+    if not name.strip(" ."):
+        return "it names no folder of its own"
+    if _BAD_NAME_CHARS.search(name):
+        return ("it holds a path separator, a colon, or another character "
+                "Windows does not allow in a name")
+    if name != name.rstrip(" ."):
+        return ("it ends in a dot or a space, which Windows drops, so it would "
+                "name a different folder")
+    return None
+
+
+def folder_setting_problem(name):
+    """Why `name` cannot be a folder this tooling lays out and manages, or
+    None if it can: a plain name, not a device, and not Master or Shared."""
+    why = plain_name_problem(name)
+    if why:
+        return why
+    if name.split(".")[0].lower() in _DEVICE_NAMES:
+        return "it is a name Windows keeps for a device"
+    if name.lower() in {p.lower() for p in POOL_FOLDERS}:
+        return f"it is the {name} pool itself"
+    return None
+
 
 def settings_path():
     return os.path.join(wj_paths.app_dir(__file__), SETTINGS_FILE)
@@ -306,7 +366,12 @@ def current_settings():
 
 def apply_settings(values):
     """Set the module's settings from a dict. Returns a list of problems;
-    a setting with a problem keeps its current value."""
+    a setting with a problem keeps its current value.
+
+    Every value is checked for its type, and the folder settings for what
+    they would name: a folder that is not a plain name, or that is a pool,
+    is refused here, and so is a combination of folders that would make one
+    folder two things at once (see _check_layout)."""
     problems = []
     g = globals()
     for key, value in values.items():
@@ -319,13 +384,33 @@ def apply_settings(values):
                 problems.append(f"{key}: expected an object, kept the default")
                 continue
             merged = dict(default)
-            merged.update({str(k): str(v) for k, v in value.items()})
+            for k, v in value.items():
+                if key == "GAME_FOLDERS":
+                    # Each value is a folder under the archive root, and a
+                    # game's whole pool goes wherever it points.
+                    why = (folder_setting_problem(v) if isinstance(v, str)
+                           else "it is not a folder name")
+                    if why:
+                        problems.append(f"{key}: {k} -> {v!r} cannot be used: {why}; "
+                                        f"entry ignored")
+                        continue
+                merged[str(k)] = str(v)
             g[key] = merged
         elif isinstance(default, (set, frozenset)):
             if not isinstance(value, (list, tuple, set)):
                 problems.append(f"{key}: expected a list, kept the default")
                 continue
-            g[key] = {str(v).lower() for v in value}
+            # EXCLUDE_POOL_DIRS: folders under a game root to leave alone.
+            # Master or Shared there would hide a pool from every tool.
+            names = set()
+            for v in value:
+                why = folder_setting_problem(str(v))
+                if why:
+                    problems.append(f"{key}: {str(v)!r} cannot be used: {why}; "
+                                    f"entry ignored")
+                    continue
+                names.add(str(v).lower())
+            g[key] = names
         elif isinstance(default, list):
             if not isinstance(value, list):
                 problems.append(f"{key}: expected a list, kept the default")
@@ -349,7 +434,53 @@ def apply_settings(values):
                 problems.append(f"{key}: must be one of {', '.join(CHOICES[key])}, "
                                 f"kept the default")
                 continue
+            if key not in OPTIONAL and (value is None or not value.strip()):
+                problems.append(f"{key}: must not be empty, kept the default")
+                continue
+            if key in FOLDER_SETTINGS:
+                why = folder_setting_problem(value)
+                if why:
+                    problems.append(f"{key}: {value!r} cannot be used: {why}; "
+                                    f"kept the default")
+                    continue
             g[key] = value
+    return problems + _check_layout()
+
+
+def _check_layout():
+    """The folder settings against each other, once each has passed alone.
+
+    Each rule is one a folder would otherwise break by being two things at
+    once. The trash is emptied on a timer, so it may not also be the store
+    that holds what the user parked, nor a folder declared to be another
+    installer's. Whichever setting was moved off its default is the one put
+    back, the trash first when both were. Returns the problems, and leaves
+    the settings consistent."""
+    g = globals()
+    problems = []
+    for _ in range(5):
+        trash, unmanaged = g["TRASH_FOLDER"], g["UNMANAGED_FOLDER"]
+        if trash.lower() in g["EXCLUDE_POOL_DIRS"]:
+            if trash != _DEFAULTS["TRASH_FOLDER"]:
+                g["TRASH_FOLDER"] = _DEFAULTS["TRASH_FOLDER"]
+                problems.append(f"TRASH_FOLDER: {trash!r} is in EXCLUDE_POOL_DIRS as "
+                                f"another installer's folder; kept the default")
+            else:
+                g["EXCLUDE_POOL_DIRS"] = set(g["EXCLUDE_POOL_DIRS"]) - {trash.lower()}
+                problems.append(f"EXCLUDE_POOL_DIRS: {trash.lower()!r} is the trash "
+                                f"folder; entry ignored")
+            continue
+        if trash.lower() == unmanaged.lower():
+            if trash != _DEFAULTS["TRASH_FOLDER"]:
+                g["TRASH_FOLDER"] = _DEFAULTS["TRASH_FOLDER"]
+                problems.append(f"TRASH_FOLDER: {trash!r} is also UNMANAGED_FOLDER, and "
+                                f"the trash is emptied on a timer; kept the default")
+            else:
+                g["UNMANAGED_FOLDER"] = _DEFAULTS["UNMANAGED_FOLDER"]
+                problems.append(f"UNMANAGED_FOLDER: {unmanaged!r} is the trash folder, "
+                                f"which is emptied on a timer; kept the default")
+            continue
+        break
     return problems
 
 
@@ -373,28 +504,49 @@ def save_settings(values, path=None):
 
     Only keys that differ from the shipped default are written, so the file
     stays a short list of your choices rather than a copy of every default,
-    and a later change to a default reaches you unless you overrode it."""
+    and a later change to a default reaches you unless you overrode it.
+
+    The values are applied before anything is written, and what is written
+    is what was applied: a value refused here is left out of the file rather
+    than saved to be refused again at every start. Returns (path, problems),
+    the problems naming each value that kept its default."""
     p = path or settings_path()
+    before = current_settings()
+    # Reset to defaults first, so a key left out goes back to its default
+    # rather than lingering at the old value.
+    apply_settings(_DEFAULTS)
+    problems = apply_settings({k: values[k] for k in USER_SETTINGS if k in values})
+    applied = current_settings()
     out = {}
     for key in USER_SETTINGS:
         if key not in values:
             continue
-        v = values[key]
-        if isinstance(v, (set, frozenset)):
-            v = sorted(v)
+        v = applied[key]
         d = _DEFAULTS[key]
+        if isinstance(v, dict):
+            # Merged over the default when it is read, so the entries that
+            # differ from the default are the whole of the user's choice.
+            v = {k: x for k, x in v.items() if d.get(k) != x}
+            if not v:
+                continue
+        elif isinstance(v, (set, frozenset)):
+            v = sorted(v)
         if v == (sorted(d) if isinstance(d, (set, frozenset)) else d):
             continue
         out[key] = v
     tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, p)
-    # Reset to defaults first, so a key removed from the file goes back to
-    # its default rather than lingering at the old value.
-    apply_settings(_DEFAULTS)
-    return p, apply_settings(out)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, p)
+    except OSError:
+        # Not saved, so not applied either: the running process keeps
+        # agreeing with the file.
+        apply_settings(_DEFAULTS)
+        apply_settings(before)
+        raise
+    return p, problems
 
 
 _LOADED, SETTINGS_PROBLEMS = load_settings()

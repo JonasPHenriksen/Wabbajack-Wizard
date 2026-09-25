@@ -1187,12 +1187,15 @@ def pool_folder_problem(game, folder):
         return "wj_config is not importable, so the pool layout is unknown."
     if not CFG.valid_game_type(game):
         return f"{game!r} is not a usable GameType."
-    if not folder or not CFG.valid_game_type(folder):
-        return (f"{folder!r} cannot be a folder name: it must be a plain name "
-                "with no path separator.")
+    why = CFG.plain_name_problem(folder) if folder else "it is empty"
+    if why:
+        return f"{folder!r} cannot be a folder name: {why}."
     if folder.lower() in CFG.reserved_list_names():
         return (f"{folder!r} is reserved. A game folder by that name would "
                 "collide with a pool folder inside every game.")
+    why = CFG.folder_setting_problem(folder)
+    if why:
+        return f"{folder!r} cannot be a folder name: {why}."
     return None
 
 
@@ -2319,10 +2322,16 @@ def clear_master(game, keep_builds, on_delete=None):
     a run interrupted half-way used to leave no record of what it had done.
 
     Returns (moved, kept, bytes): `moved` is [(name, size)] of what went to
-    the trash, `kept` how many files were left because a list wants them."""
+    the trash, `kept` how many files were left because a list wants them.
+    Nothing moves when A.trash_name_problem() objects to the trash folder."""
     base, master, _s = A.WJ.resolve_game_dirs(game)
     trash = trash_folder_for(game)
     deleted, kept, freed = [], 0, 0
+    why = A.trash_name_problem()
+    if why:
+        out(f"    not clearing Master: the trash folder "
+            f"{CFG.TRASH_FOLDER if CFG else 'Trash'!r} cannot be used ({why}).")
+        return deleted, kept, freed
     try:
         entries = sorted(os.scandir(master), key=lambda e: e.name.lower())
     except OSError as e:

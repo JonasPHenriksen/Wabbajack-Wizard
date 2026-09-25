@@ -866,6 +866,32 @@ def load_plan_records(progress=None, files=None):
 # ----------------------------------------------------------------------
 # The trash: what stage 5c reclaimed, waiting out its purge date
 # ----------------------------------------------------------------------
+def trash_name_problem():
+    """Why the trash folder must not be acted on right now, or None.
+
+    wj_config refuses a bad TRASH_FOLDER on the way in. This asks again at
+    the two places that act on it - clearing Master into it, and the purge
+    that deletes from it for good - because both act on whatever folder the
+    name reaches, and a name that slipped past would cost every file in it.
+    It also asks what the settings alone cannot know: a modlist's own folder
+    is never a trash, and the manifests held here decide which names those
+    are."""
+    cfg = WJ.CFG
+    name = cfg.TRASH_FOLDER
+    why = (cfg.folder_setting_problem(name) if isinstance(name, str)
+           else "it is not a folder name")
+    if why:
+        return why
+    low = name.lower()
+    if low == str(cfg.UNMANAGED_FOLDER).lower():
+        return "it is also the unmanaged store"
+    if low in cfg.EXCLUDE_POOL_DIRS:
+        return "it is listed as another installer's folder"
+    if low in WJ.known_list_dirs_from(MANIFESTS):
+        return "it is the folder of a modlist held here"
+    return None
+
+
 def purge_trash(days=None):
     """Delete from every game's trash folder what has been there long enough.
 
@@ -876,7 +902,8 @@ def purge_trash(days=None):
     trash outright, which is what the wizard's "empty now" does.
 
     Returns (rows, record_path): one (game_folder, name, size, arrived) per
-    file removed, and the CSV they were written to as it went."""
+    file removed, and the CSV they were written to as it went. Nothing at
+    all is deleted when trash_name_problem() objects to the folder."""
     # The layout module is reached through the downloader, like everything
     # else here.
     cfg = WJ.CFG
@@ -885,6 +912,11 @@ def purge_trash(days=None):
     root = WJ.ARCHIVE_ROOT
     trash_name = cfg.TRASH_FOLDER
     rows, record, writer = [], None, None
+    why = trash_name_problem()
+    if why:
+        LOG.error("[ERROR] Not emptying the trash: TRASH_FOLDER %r cannot be used (%s). "
+                  "Nothing was deleted.", trash_name, why)
+        return rows, None
     try:
         games = sorted(os.listdir(root))
     except OSError:

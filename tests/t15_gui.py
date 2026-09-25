@@ -302,6 +302,25 @@ check("a bad value is refused with a message, and nothing is saved",
 check("the real settings file was never touched",
       not os.path.exists(os.path.join(REPO, "wj_settings.json"))
       or json.load(io.open(os.path.join(REPO, "wj_settings.json"), encoding="utf-8")).get("TRASH_KEEP_DAYS") != 7)
+# An emptied field is saved as null, and an emptied TRASH_FOLDER used to be
+# written that way and stop every tool starting; Master as the trash would
+# have been emptied at the next start.
+app.setting_vars["TRASH_KEEP_DAYS"].set("7")
+app.setting_vars["TRASH_FOLDER"].set("")
+app.setting_vars["UNMANAGED_FOLDER"].set("Master")
+DLG.calls.clear()
+app.settings_save()
+saved = json.load(io.open(p, encoding="utf-8"))
+check("an emptied or dangerous folder setting is never written",
+      "TRASH_FOLDER" not in saved and "UNMANAGED_FOLDER" not in saved
+      and saved.get("NEXUS_MODE") == "assist", str(saved))
+check("  the window says which settings kept their defaults",
+      DLG.shown("kept their defaults") and DLG.shown("TRASH_FOLDER")
+      and DLG.shown("UNMANAGED_FOLDER"), str(DLG.calls))
+check("  the running process has the defaults", CFG.TRASH_FOLDER == "Trash"
+      and CFG.UNMANAGED_FOLDER == "Unmanaged", str((CFG.TRASH_FOLDER, CFG.UNMANAGED_FOLDER)))
+check("  and the form shows them again", app.setting_vars["TRASH_FOLDER"].get() == "Trash"
+      and app.setting_vars["UNMANAGED_FOLDER"].get() == "Unmanaged")
 
 # ---------------------------------------------------------------- 15.7
 print("\n 15.7  a running Wabbajack blocks moves until it is closed")

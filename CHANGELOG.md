@@ -97,8 +97,24 @@ on the 20th. They are recorded here, under the release that carries them.
   Special Edition mod after it in the run. Another game is now believed only
   when it lists the wanted file, and the manifest's own game is asked why it
   will not serve the mod before any fallback is opened.
+- **A folder setting could point the trash at a pool.** `TRASH_FOLDER` and
+  `UNMANAGED_FOLDER` were only checked for being text, and the trash is
+  emptied for good, at every start, of whatever has sat in
+  `<game>\<TRASH_FOLDER>` for `TRASH_KEEP_DAYS`. Set to `Master`, it would
+  have deleted every Master archive older than that; set to an empty string,
+  the loose files in each game folder. The Settings tab writes an emptied
+  field as null, and after that no tool would start. Both folder settings,
+  the entries of `EXCLUDE_POOL_DIRS` and the values of `GAME_FOLDERS` must
+  now be plain folder names - no path in them, no device name, not Master or
+  Shared - and the trash may not also be the unmanaged store or another
+  installer's folder. A text setting that has to name something may not be
+  empty. A refused value keeps its default and is reported, and the Settings
+  tab no longer writes it to the file at all; a `GAME_FOLDERS` mapping is
+  written as just the entries that differ from the default. The purge and
+  stage 5c ask again before acting, and also refuse a trash folder that is a
+  modlist's own.
 
-Tests: 976 checks across 16 sandbox suites, up from 895.
+Tests: 1053 checks across 17 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 

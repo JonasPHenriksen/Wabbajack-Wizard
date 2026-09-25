@@ -349,7 +349,10 @@ went, the folder and the rule used.
 Master by hand and the next rebuild sorts it home. Stage 5d shows what the
 trash holds and when each game's oldest file falls due, and offers to empty it
 at once. The trash is invisible to every tool: never indexed, never counted as
-present, never moved, and a modlist may not be called `Trash`.
+present, never moved, and a modlist may not be called `Trash`. The purge, and
+5c before it moves anything, check the trash folder's name again: one that is
+a pool, the unmanaged store, another installer's folder or a modlist's own
+folder is refused, and nothing is deleted.
 
 One rule reclaims *more*: a Master copy of a build that also exists in Shared,
 in a modlist's folder, or under a better name inside Master itself is a
@@ -528,6 +531,18 @@ and a code update never touches. Copy `wj_settings.example.json` to start; only
 the keys you change need to be in it. A dict setting (`GAME_FOLDERS`,
 `GAME_DISPLAY`) is merged over its default; every other setting replaces it. A
 bad value is reported at start-up and its default used, never fatal.
+
+The folder settings are checked for what they would name, not only for being
+text, because one of them decides what is deleted: the trash is emptied for
+good on a timer. `UNMANAGED_FOLDER`, `TRASH_FOLDER`, the entries of
+`EXCLUDE_POOL_DIRS` and the values of `GAME_FOLDERS` must be plain folder
+names - no path in them, no device name like `NUL`, not `Master` or `Shared` -
+and the trash may not also be the unmanaged store or another installer's
+folder. A text setting that has to name something, `ARCHIVE_ROOT` say, may not
+be empty; `WABBAJACK_DIR`, `STAGE_LIST` and `NOTIFY_URL` may be null, which
+means what their row below says. The Settings tab never writes a refused value
+to the file, and writes a `GAME_FOLDERS` mapping as just the entries that
+differ from the default.
 
 | setting | default | meaning |
 | --- | --- | --- |
@@ -816,7 +831,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 976 checks across sixteen suites. None of them touch the live archive pools:
+environment instead). 1053 checks across seventeen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -841,6 +856,7 @@ exactly the failure they want to check.
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
 | `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, and the Start tab opening a second window from the first one's file without measuring anything |
 | `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
+| `t17_settings` | what each setting may be: folder names checked for what they would name, one folder never two things at once, text that has to say something, a bad file at start-up, a refused value never written, and the purge and 5c refusing a trash folder that is a pool or a modlist's own |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the
