@@ -1968,6 +1968,7 @@ class App:
         self.trash_note = tk.StringVar(value="")
         ttk.Label(bar3, textvariable=self.trash_note).pack(side="right")
         self.action(bar3, "Empty the trash now", self.space_empty_trash).pack(side="right", padx=(0, 8))
+        self.action(bar3, "Undo a cleanup...", self.space_undo).pack(side="right", padx=(0, 8))
         self.action(bar3, "Remove leftovers", self.space_leftovers).pack(side="right", padx=(0, 8))
         cols = [("game", "game folder", 150, "w"), ("folder", "folder", 300, "w"),
                 ("files", "files", 70, "e"), ("size", "size", 90, "e"),
@@ -2236,8 +2237,8 @@ class App:
         if not self.confirm(f"Clear Master for {len(chosen)} pool(s)", lines,
                             total=sum(free_bytes(m) for m in chosen), total_label="Total moving to Trash",
                             undo=f"Trash is purged {W.keep_days()} days after a file arrives, or at once "
-                                 f"with 'Empty the trash now'. Until then a file can be moved back into "
-                                 f"Master by hand."):
+                                 f"with 'Empty the trash now'. Until then 'Undo a cleanup' puts it "
+                                 f"back."):
             return
         if not self.wabbajack_clear("Clearing Master"):
             return
@@ -2268,6 +2269,66 @@ class App:
             self.data_changed("pools")
             self.space_measure()
         self.run_job("Emptying the trash", lambda: A.purge_trash(days=0), done)
+
+    def space_undo(self):
+        """The cleanups whose files are still in the trash, in a window of
+        their own: pick one, and it is put back into Master and sorted."""
+        records = [r for r in W.cleanup_records() if r["waiting"]]
+        if not records:
+            messagebox.showinfo("Undo a cleanup", "No cleanup has files left in the trash: "
+                                                  "nothing to put back.", parent=self.root)
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Undo a cleanup")
+        win.transient(self.root)
+        win.configure(background=self.root.cget("background"))
+        frame = ttk.Frame(win, padding=8)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="What stage 5c moved into a trash, newest first. The files still "
+                              "there go back into Master, and the pools are rebuilt so each one "
+                              "a list wants goes home.", wraplength=640).pack(anchor="w", pady=(0, 6))
+        cols = [("when", "when", 130, "w"), ("folder", "game folder", 120, "w"),
+                ("waiting", "still in the trash", 130, "e"), ("size", "size", 90, "e"),
+                ("rule", "rule", 220, "w")]
+        table = make_table(frame, cols, height=min(10, len(records)), selectmode="browse")
+        table.pack(fill="both", expand=True)
+        fill(table.tree, [((r["when"].strftime("%Y-%m-%d %H:%M") if r["when"] else r["stamp"]),
+                           r["folder"], f"{r['waiting']} of {r['files']}",
+                           human(r["waiting_bytes"]), r["rule"]) for r in records])
+        bar = ttk.Frame(frame)
+        bar.pack(fill="x", pady=(8, 0))
+        ttk.Button(bar, text="Put it back", command=self.undo_restore).pack(side="left")
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="left", padx=6)
+        self.undo_win, self.undo_table, self.undo_records = win, table, records
+
+    def undo_restore(self):
+        sel = selected_indices(self.undo_table.tree)
+        if not sel:
+            messagebox.showinfo("Undo a cleanup", "Select the cleanup to put back.",
+                                parent=self.undo_win)
+            return
+        rec = self.undo_records[sel[0]]
+        lines = [f"{rec['waiting']} file(s), {human(rec['waiting_bytes'])}, back into "
+                 f"{rec['folder']}'s Master, from {rec['file']}."]
+        staged = (self.state.get("staged") or {}).get(rec["folder"].lower())
+        if staged:
+            lines.append(f"\nRebuilding the {rec['folder']} pools afterwards UN-STAGES {staged}: "
+                         f"its shared archives go back to Shared. Stage it again before "
+                         f"installing it.")
+        if not self.confirm("Put a cleanup back", lines, total=rec["waiting_bytes"],
+                            total_label="Total moving back",
+                            undo="Nothing is deleted: the files move back into Master, and the "
+                                 "rebuild sorts home whatever a list wants."):
+            return
+        if not self.wabbajack_clear("Putting a cleanup back"):
+            return
+        self.undo_win.destroy()
+
+        def done(res):
+            self.data_changed("pools")
+            self.space_measure()
+        self.run_job("Putting a cleanup back",
+                     lambda: W.undo_cleanup(self.state, self.records, rec), done)
 
     def space_leftovers(self):
         """Debris no other step reaches: OS metadata, and a sidecar whose

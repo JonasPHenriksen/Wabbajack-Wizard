@@ -400,10 +400,15 @@ where it went, the folder and the rule used.
 **Nothing is deleted outright.** What stage 5c reclaims moves into that game's
 `Trash` folder, stamped with the moment it arrived, and is purged
 `TRASH_KEEP_DAYS` days later (30) at the start of the next run, with a
-`purged_trash_<timestamp>.csv` record. Until then a file can be moved back into
-Master by hand and the next rebuild sorts it home. Stage 5d shows what the
-trash holds and when each game's oldest file falls due, and offers to empty it
-at once. The trash is invisible to every tool: never indexed, never counted as
+`purged_trash_<timestamp>.csv` record. Until then a whole cleanup can be put
+back: **Undo a cleanup** in the Space tab, `[u]` in 5d, lists each cleanup's
+record with how much of it is still in the trash, moves that back into Master,
+and rebuilds the folder's pools, so whatever a list wants now goes home. A
+build that is back in Master already is left in the trash, one whose name
+another build has taken since comes back beside it under a `~N` suffix,
+sidecars go with their archives, and nothing is deleted on the way. Stage 5d
+shows what the trash holds and when each game's oldest file falls due, and
+offers to empty it at once. The trash is invisible to every tool: never indexed, never counted as
 present, never moved, and a modlist may not be called `Trash`. The purge, and
 5c before it moves anything, check the trash folder's name again: one that is
 a pool, the unmanaged store, another installer's folder or a modlist's own
@@ -903,7 +908,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1181 checks across eighteen suites. None of them touch the live archive pools:
+environment instead). 1197 checks across eighteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

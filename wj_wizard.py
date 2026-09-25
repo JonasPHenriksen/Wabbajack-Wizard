@@ -57,6 +57,7 @@ deletion rather than trusted from the table:
 """
 
 import os
+import re
 import csv
 import io
 import json
@@ -2629,6 +2630,154 @@ class DeletionRecord:
         return self.path if self._fh is not None else None
 
 
+# ----------------------------------------------------------------------
+# Undoing a cleanup
+# ----------------------------------------------------------------------
+_RECORD_NAME = re.compile(r"^deleted_(.+)_(\d{8}_\d{6})\.csv$", re.I)
+
+
+def _record_rows(path):
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            return [r for r in csv.DictReader(f) if r.get("archive")]
+    except (OSError, csv.Error):
+        return []
+
+
+def _in_trash(row, trash):
+    """Where this record row's file is in the game's trash now, or None when
+    it is not there any more at the size it went in at - purged, or moved
+    out by hand. The trash is found through the layout as it stands, not the
+    path the record wrote, so a share mapped to another letter since still
+    finds its files."""
+    p = os.path.join(trash, os.path.basename(str(row.get("trashed_to") or "")))
+    try:
+        size = int(row.get("size_bytes") or -1)
+        return p if os.path.isfile(p) and os.path.getsize(p) == size else None
+    except (OSError, ValueError):
+        return None
+
+
+def cleanup_records():
+    """The records stage 5c wrote of what it moved into a trash, newest
+    first, each with how much of it is still there to bring back.
+
+    [{"path", "file", "folder", "stamp", "when", "rule", "files", "bytes",
+      "waiting", "waiting_bytes"}]; `folder` is the game folder the record
+    is for, `files` and `bytes` count archives, not their sidecars."""
+    out_rows = []
+    folder = A.runtime_path(make=False)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out_rows
+    for n in names:
+        m = _RECORD_NAME.match(n)
+        if not m:
+            continue
+        path = os.path.join(folder, n)
+        rows = _record_rows(path)
+        game_folder, stamp = m.group(1), m.group(2)
+        trash = os.path.join(A.WJ.ARCHIVE_ROOT, game_folder, CFG.TRASH_FOLDER if CFG else "Trash")
+        archives = [r for r in rows if not r["archive"].lower().endswith(".meta")]
+        waiting = [r for r in archives if _in_trash(r, trash)]
+        try:
+            when = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+        except ValueError:
+            when = None
+
+        def size(r):
+            try:
+                return int(r.get("size_bytes") or 0)
+            except ValueError:
+                return 0
+        out_rows.append({"path": path, "file": n, "folder": game_folder, "stamp": stamp,
+                         "when": when, "rule": (rows[0].get("rule") if rows else "") or "",
+                         "files": len(archives), "bytes": sum(size(r) for r in archives),
+                         "waiting": len(waiting), "waiting_bytes": sum(size(r) for r in waiting)})
+    out_rows.sort(key=lambda r: r["stamp"], reverse=True)
+    return out_rows
+
+
+def restore_cleanup(record):
+    """Move back into Master what one cleanup put in the trash and is still
+    there, sidecars with their archives. Returns {"restored": [(name,
+    size)], "already": [names], "gone": count, "failed": [(name, error)]}.
+
+    Master and the trash are found through the layout as it stands. A file
+    whose name is taken in Master by a copy of the same size is left where
+    it is, since that build is back already, and one taken by a different
+    build comes back under a '~N' suffix, as the sorter parks a second
+    build. Nothing is deleted. The caller rebuilds the pools afterwards, so
+    each archive a list wants goes home again, and checks for Wabbajack
+    first."""
+    base = os.path.join(A.WJ.ARCHIVE_ROOT, record["folder"])
+    master = os.path.join(base, "Master")
+    trash = os.path.join(base, CFG.TRASH_FOLDER if CFG else "Trash")
+    rows = _record_rows(record["path"])
+    result = {"restored": [], "already": [], "gone": 0, "failed": []}
+    placed = {}                                  # archive name -> where it went
+    archives = [r for r in rows if not r["archive"].lower().endswith(".meta")]
+    metas = [r for r in rows if r["archive"].lower().endswith(".meta")]
+    for r in archives + metas:
+        name = r["archive"]
+        src = _in_trash(r, trash)
+        if src is None:
+            result["gone"] += 1
+            continue
+        size = os.path.getsize(src)
+        is_meta = name.lower().endswith(".meta")
+        if is_meta and name[:-5] in placed:
+            dst = placed[name[:-5]] + ".meta"       # beside its archive, under its name
+        else:
+            dst = os.path.join(master, name)
+            if os.path.exists(dst):
+                # The same build is back already; or, for a sidecar whose
+                # archive did not come back, the one beside it is its own.
+                if is_meta or os.path.getsize(dst) == size:
+                    result["already"].append(name)
+                    continue
+                dst = unique_path(dst)
+        try:
+            os.makedirs(master, exist_ok=True)
+            shutil.move(src, dst)
+        except (OSError, shutil.Error) as e:
+            result["failed"].append((name, str(e)))
+            continue
+        if not is_meta:
+            placed[name] = dst
+        result["restored"].append((name, size))
+    return result
+
+
+def undo_cleanup(state, records, record):
+    """Put one cleanup back and rebuild that folder's pools, so what the
+    lists held here want is sorted home out of Master. Returns (result,
+    rebuild exit code or None when no list here draws from the folder).
+    The caller confirms, and checks for Wabbajack."""
+    result = restore_cleanup(record)
+    out(f"  {len(result['restored'])} file(s) back in Master from {record['file']}"
+        + (f"; {len(result['already'])} already there" if result["already"] else "")
+        + (f"; {result['gone']} no longer in the trash" if result["gone"] else ""))
+    for name, err in result["failed"]:
+        out(f"    could not move {name}: {err}")
+    games = sorted({e.get("game") for e in records.values()
+                    if e.get("game") and A.WJ.folder_key(e["game"]) == record["folder"].lower()})
+    rc = None
+    if result["restored"] and games:
+        out(f"  Rebuilding the {record['folder']} pools, so each archive a list wants "
+            f"goes home ...")
+        rc = A.run_script(A.SORTER_SCRIPT, ["--game", games[0], "--cleanup-only", "--yes"],
+                          "sorter")
+        (state.get("staged") or {}).pop(record["folder"].lower(), None)
+        A.save_state(state)
+        if rc != 0:
+            out(f"  The rebuild FAILED (sorter exited {rc}); the files are in Master, "
+                f"and the next rebuild sorts them.")
+    A.WJ.invalidate_existing_cache()
+    return result, rc
+
+
 def wait_for_wabbajack(what):
     """Block while a Wabbajack process is running; it may be reading the pools.
 
@@ -2821,8 +2970,44 @@ def leftover_step():
     return count > 0
 
 
-def trash_step():
-    """5d: what the trash holds, and the offer to empty it now."""
+def undo_step(state, records, undoable):
+    """5d's [u]: pick one cleanup whose files are still in the trash, and put
+    it back into Master."""
+    out()
+    out("  Cleanups whose files are still in the trash, newest first:")
+    fw = fit([r["folder"] for r in undoable], 6) + 2
+    for i, r in enumerate(undoable, 1):
+        when = r["when"].strftime("%Y-%m-%d %H:%M") if r["when"] else r["stamp"]
+        out(f"    {i:>3}  {when}  {r['folder']:<{fw}}{r['waiting']:>5} of {r['files']:<5} "
+            f"{human(r['waiting_bytes']):>10}   {r['rule']}")
+    picks = choose(len(undoable), "cleanup", allow_all=False, single=True)
+    if picks is None:
+        out("  Left in the trash.")
+        return False
+    rec = undoable[picks[0]]
+    lines = [f"{rec['waiting']} file(s), {human(rec['waiting_bytes'])}, back into "
+             f"{rec['folder']}'s Master, from {rec['file']}"]
+    staged = (state.get("staged") or {}).get(rec["folder"].lower())
+    if staged:
+        lines.append("")
+        lines.append(f"Rebuilding the {rec['folder']} pools afterwards UN-STAGES {staged}: its "
+                     f"shared archives go back to Shared.")
+    verdict = confirm_destructive(
+        "About to put a cleanup back", lines, total_bytes=rec["waiting_bytes"],
+        total_label="Total moving back",
+        undo="Nothing is deleted: the files move back into Master, and the rebuild "
+             "sorts home whatever a list wants.")
+    if verdict != "yes":
+        out("  Left in the trash.")
+        return False
+    wait_for_wabbajack("Putting a cleanup back")
+    undo_cleanup(state, records, rec)
+    return True
+
+
+def trash_step(state=None, records=None):
+    """5d: what the trash holds, and the offer to empty it now, or to put a
+    cleanup back."""
     rows = trash_report()
     if not rows:
         return False
@@ -2831,8 +3016,8 @@ def trash_step():
     rule()
     out("  5d. Trash")
     out(f"      What stage 5c reclaims waits here {days} days, then goes for good at")
-    out("      the start of a run. Until then a file can be moved back into Master")
-    out("      by hand, and the next rebuild sorts it home.")
+    out("      the start of a run. Until then a cleanup can be put back, [u], and")
+    out("      the rebuild after it sorts each file home.")
     out()
     gw = fit([g for g, _f, _b, _o in rows], 4) + 2
     out(f"    {'game folder':<{gw}}{'files':>7}{'size':>11}   purged from")
@@ -2840,7 +3025,13 @@ def trash_step():
         due = datetime.fromtimestamp(oldest + days * 86400).strftime("%Y-%m-%d")
         out(f"    {g:<{gw}}{files:>7}{human(byts):>11}   {due}")
     total = sum(b for _g, _f, b, _o in rows)
-    a = ask(f"   [e] empty the trash now ({human(total)})   [s] leave it", ("e", "s"))
+    undoable = ([r for r in cleanup_records() if r["waiting"]]
+                if state is not None and records is not None else [])
+    a = ask(f"   [e] empty the trash now ({human(total)})"
+            + ("   [u] undo a cleanup" if undoable else "") + "   [s] leave it",
+            ("e", "u", "s") if undoable else ("e", "s"))
+    if a == "u":
+        return undo_step(state, records, undoable)
     if a == "s":
         return False
     verdict = confirm_destructive(
@@ -3036,7 +3227,7 @@ def stage_space(state, records):
             A.WJ.invalidate_existing_cache()
 
     cleared = clear_master_step(records, masters, failed_rebuilds)
-    trash_step()
+    trash_step(state, records)
     leftover_step()
     return deleted_any or cleared
 
@@ -3198,8 +3389,8 @@ def clear_master_step(records, masters, failed_rebuilds):
             total_bytes=sum(free_bytes(m) for m in chosen),
             total_label="Total moving to Trash",
             undo=(f"Trash is purged {keep_days()} days after a file arrives, at "
-                  f"the start of a run, or at once from 5d. Until then a file "
-                  f"can be moved back into Master by hand."))
+                  f"the start of a run, or at once from 5d. Until then 5d can "
+                  f"put the cleanup back."))
         if verdict == "change":
             continue
         if verdict == "no":

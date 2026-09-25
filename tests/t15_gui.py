@@ -1025,6 +1025,35 @@ text = drive(W.stage_browse, ["c", "1", "c", "t", "b", "s"], app.state, app.trac
 check("in the console the table has clicks and time, and [t] puts the quickest first",
       "clicks" in text and "time" in text and "quickest to finish first" in text, text[-1200:])
 
+# ---------------------------------------------------------------- 15.20
+print("\n 15.20  putting a cleanup back, from the Space tab")
+box.pool_file(GAME, "Master", "undo-me.7z", 77)
+A.WJ.invalidate_existing_cache()
+app.data_changed("pools")
+app.space_measure()
+settle()
+app.rule.set("y")
+app.masters_table.tree.selection_set("0")
+app.space_clear()
+settle()
+trash = os.path.join(box.archives, GAME, "Trash")
+check("clearing Master sent the file to the trash", os.path.isfile(os.path.join(trash, "undo-me.7z")),
+      str(os.listdir(trash)))
+app.space_undo()
+check("the undo window lists that cleanup first",
+      bool(app.undo_records) and rows(app.undo_table)
+      and app.undo_records[0]["waiting"] >= 1, str(app.undo_records))
+app.undo_table.tree.selection_set("0")
+DLG.calls.clear()
+app.undo_restore()
+settle()
+check("putting it back asks first", any(k == "ask" and "Put a cleanup back" in t
+                                        for k, t, _x in DLG.calls), str(DLG.calls))
+check("  and the file is back in Master",
+      os.path.isfile(os.path.join(box.archives, GAME, "Master", "undo-me.7z")))
+check("  and out of the trash", not os.path.exists(os.path.join(trash, "undo-me.7z")))
+check("  and the Space tab was measured again", not app.busy and app.space["masters"])
+
 # ---- put everything back ---------------------------------------------------
 root.destroy()
 W.out = REAL_WOUT

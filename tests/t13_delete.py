@@ -790,6 +790,54 @@ box.pool_file(GAME, "Trash", "again.7z", 4)
 check("  or leaves it alone",
       os.path.isfile(os.path.join(box.archives, GAME, "Trash", "again.7z")), text[-300:])
 
+# ---------------------------------------------------------------- 13.18
+print("\n 13.18  a cleanup is put back, and what a list wants goes home")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("L", GAME, [("keep.7z", 1, "nexus")])
+box.pool_file(GAME, "Master", "keep.7z", 1)
+for name, size in (("later.7z", 30), ("later.7z.meta", 3), ("junk.7z", 50), ("clash.7z", 20),
+                   ("twin.7z", 7), ("purged.7z", 9)):
+    box.pool_file(GAME, "Master", name, size)
+wire(box)
+records = A.load_plan_records()
+master = os.path.join(box.archives, GAME, "Master")
+trash = os.path.join(box.archives, GAME, "Trash")
+quiet(W.clear_masters, records, [{"game": GAME, "label": GAME, "path": master}], "y", None)
+check("the cleanup put everything nobody wants in the trash",
+      sorted(os.listdir(trash)) == ["clash.7z", "junk.7z", "later.7z", "later.7z.meta",
+                                    "purged.7z", "twin.7z"], str(sorted(os.listdir(trash))))
+recs = W.cleanup_records()
+check("its record is listed, every file still in the trash",
+      len(recs) == 1 and recs[0]["folder"] == GAME and recs[0]["files"] == 5
+      and recs[0]["waiting"] == 5 and recs[0]["rule"] == "your modlists only", str(recs))
+# Since then: one file purged, the same build of another fetched again, a
+# different build taking a third one's name, and a list that wants a fourth.
+os.remove(os.path.join(trash, "purged.7z"))
+box.pool_file(GAME, "Master", "twin.7z", 7)
+io.open(os.path.join(master, "clash.7z"), "wb").write(b"z" * 21)
+box.manifest("M", GAME, [("later.7z", 30, "nexus")])
+wire(box)
+records = A.load_plan_records()
+check("what is still there is counted", W.cleanup_records()[0]["waiting"] == 4,
+      str(W.cleanup_records()))
+state = {"lists": {}, "map": {}, "staged": {}}
+(res, text) = drive(W.trash_step, ["u", "1", "y"], state, records)
+check("5d offers the undo, and it runs", res is True and "back in Master" in text, text[-800:])
+check("the file a list now wants went home through the rebuild, its sidecar with it",
+      box.where("later.7z") == [("M", 30)]
+      and os.path.isfile(os.path.join(box.archives, GAME, "M", "later.7z.meta")),
+      str(box.where("later.7z")))
+check("what nobody wants is back in Master", box.where("junk.7z") == [("Master", 50)])
+check("a build that is back already is left in the trash, and said so",
+      os.path.isfile(os.path.join(trash, "twin.7z")) and "1 already there" in text, text[-400:])
+check("one whose name another build took comes back beside it, suffixed",
+      sorted(n for n in os.listdir(master) if n.startswith("clash")) == ["clash.7z", "clash~1.7z"]
+      and os.path.getsize(os.path.join(master, "clash~1.7z")) == 20, str(os.listdir(master)))
+check("  and the purged one is counted as gone", "1 no longer in the trash" in text, text[-400:])
+check("the record now counts only what is still in the trash",
+      W.cleanup_records()[0]["waiting"] == 1, str(W.cleanup_records()))
+
 W.WB.running_processes = REAL_RUNNING
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

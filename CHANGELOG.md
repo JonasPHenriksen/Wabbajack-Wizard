@@ -68,6 +68,15 @@ on the 20th. They are recorded here, under the release that carries them.
   name or size, the hash check after the download says whether it was the
   same bytes, and a file nothing matches is recorded and passed over too.
   The listing is asked for once per mod and remembered for the run.
+- **Undo a cleanup.** What stage 5c reclaims waits 30 days in a trash with a
+  record of every file, but getting files back out meant moving them by
+  hand. **Undo a cleanup...** in the Space tab, `[u]` in the console's 5d,
+  lists the cleanups whose files are still in the trash and puts the chosen
+  one back into Master, sidecars with their archives, then rebuilds that
+  folder's pools so whatever a list wants goes home. A build that is back in
+  Master already is left in the trash, one whose name another build has
+  taken comes back beside it under a `~N` suffix, and a file already purged
+  is counted as gone. Nothing is deleted.
 - **Hours and clicks, not only gigabytes.** Browse's "to fetch" column took
   every gigabyte as the same cost, but on a free Nexus account 20 GB from
   Nexus is about two hours and a click per file, while 20 GB from the
@@ -192,7 +201,7 @@ on the 20th. They are recorded here, under the release that carries them.
   folder - were appended to the real `wj_autoupdate.log`. They now log into a
   scratch folder the run removes.
 
-Tests: 1181 checks across 18 sandbox suites, up from 895 across 16.
+Tests: 1197 checks across 18 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 
