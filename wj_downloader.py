@@ -1606,9 +1606,10 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
                         if total:
                             pct = downloaded * 100 / total
                             say_progress(
-                                f"\r    {pct:5.1f}%  {human_bytes(downloaded)} / {human_bytes(total)}   ")
+                                f"\r    {pct:5.1f}%  {human_bytes(downloaded)} / {human_bytes(total)}"
+                                f"{run_note()}   ")
                         else:
-                            say_progress(f"\r    {human_bytes(downloaded)}   ")
+                            say_progress(f"\r    {human_bytes(downloaded)}{run_note()}   ")
         except (OSError, urllib.error.URLError, TimeoutError,
                 http.client.IncompleteRead, http.client.HTTPException) as e:
             if not quiet:
@@ -1618,7 +1619,7 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
             return False
 
     if not quiet:
-        say_progress("\r" + " " * 60 + "\r")
+        say_progress("\r" + " " * 110 + "\r")
 
     # A connection that closes cleanly part-way through looks exactly like a
     # finished download: read() returns b"" and nothing raises. Without this
@@ -1692,6 +1693,201 @@ def _tally(results, ok, name=None, reason=None):
         else:
             results["failed"] += 1
             results["failures"].append((name, reason))
+        _RUN["processed"] += 1
+
+
+# ----------------------------------------------------------------------
+# Time and clicks: what fetching a list costs, and what is left of a run
+# ----------------------------------------------------------------------
+# Gigabytes are not the cost that matters on a free Nexus account: a Nexus
+# file comes down at Nexus's cap and a click apiece, while a file from the
+# Wabbajack CDN comes at the line's own speed. Every archive a plan counts
+# falls in one of these: Nexus; direct, which this tool fetches itself; a
+# manual download, which a person fetches from a web page; and the rest,
+# which only Wabbajack can fetch, or nobody. Game files are none of these.
+DIRECT_KINDS = ("http", "wabbajackcdn", "mediafire")
+
+
+def source_class(kind):
+    """'nexus', 'direct', 'manual', 'gamefile' or 'other', for a state_type()."""
+    if kind == "nexus":
+        return "nexus"
+    if kind in DIRECT_KINDS:
+        return "direct"
+    if kind in ("manual", "gamefile"):
+        return kind
+    return "other"
+
+
+# Measured speeds, kept in the runtime folder: a few recent transfers per
+# source, so an estimate says what downloads here have done rather than what
+# a line is rated at. Until one has been measured, a Nexus file is estimated
+# at the cap Nexus puts on a free account, about 3 MB/s, and a direct one at
+# DIRECT_MBPS, which is only a guess and is shown as one.
+SPEEDS_FILE = "wj_speeds.json"
+NEXUS_FREE_MBPS = 3.0
+DIRECT_MBPS = 10.0
+# A transfer smaller than this says more about the fixed cost of a request
+# than about the line, so it is not kept as a sample.
+SPEED_SAMPLE_MIN = 8 << 20
+SPEED_SAMPLES_KEPT = 20
+_SPEED_SAMPLES = {"nexus": [], "direct": []}
+
+
+def note_speed(kind, size, seconds):
+    """Keep one finished transfer as a speed sample, when it is big enough
+    to say something about the line."""
+    cls = source_class(kind)
+    if cls not in _SPEED_SAMPLES or not size or size < SPEED_SAMPLE_MIN or seconds <= 0:
+        return
+    with _RESULTS_LOCK:
+        _SPEED_SAMPLES[cls].append(size / seconds)
+
+
+def _read_speeds(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_speeds(run_dir, premium=None):
+    """Add this run's samples to the speeds file, keeping the most recent
+    SPEED_SAMPLES_KEPT per source, and whether the Nexus account is Premium
+    when this run asked. Once, at the end of a run; never fails a run."""
+    got = {cls: list(v) for cls, v in _SPEED_SAMPLES.items() if v}
+    if not got and premium is None:
+        return
+    path = os.path.join(run_dir, SPEEDS_FILE)
+    data = _read_speeds(path)
+    for cls, samples in got.items():
+        data[cls] = (list(data.get(cls) or []) + samples)[-SPEED_SAMPLES_KEPT:]
+    if premium is not None:
+        data["premium"] = bool(premium)
+    data["updated"] = datetime.now().isoformat(timespec="seconds")
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp, path)
+    except OSError as e:
+        LOG.debug("Could not write the speeds file: %s", e)
+
+
+def load_speeds(run_dir):
+    """What estimates are made with: {"nexus": bytes/s, "direct": bytes/s,
+    "measured": {"nexus": bool, "direct": bool}, "premium": bool or None}.
+    A speed is the median of the samples, which one stalled transfer does
+    not move; a Premium account's Nexus files are estimated at the direct
+    speed until they have been measured themselves."""
+    data = _read_speeds(os.path.join(run_dir, SPEEDS_FILE))
+
+    def median(xs):
+        xs = sorted(x for x in (xs or []) if isinstance(x, (int, float)) and x > 0)
+        return xs[len(xs) // 2] if xs else None
+
+    premium = data.get("premium") if isinstance(data.get("premium"), bool) else None
+    direct, nexus = median(data.get("direct")), median(data.get("nexus"))
+    out = {"measured": {"direct": direct is not None, "nexus": nexus is not None},
+           "premium": premium}
+    out["direct"] = direct or DIRECT_MBPS * (1 << 20)
+    out["nexus"] = nexus or (out["direct"] if premium else NEXUS_FREE_MBPS * (1 << 20))
+    return out
+
+
+def estimate(split, speeds):
+    """What fetching `split` costs, from load_speeds()' `speeds`.
+
+    `split` is {"nexus": (files, bytes), "direct": (files, bytes),
+    "manual": files, "other": files}. Returns {"seconds", "nexus_seconds",
+    "direct_seconds", "clicks", "nexus_files", "direct_files", "manual",
+    "other"}: the transfer time, and a click per Nexus file unless the
+    account is Premium. A click's own time is not in the seconds - it is a
+    person's, and said as a count instead."""
+    nf, nb = split.get("nexus") or (0, 0)
+    df, db = split.get("direct") or (0, 0)
+    ns = nb / speeds["nexus"] if nb else 0.0
+    ds = db / speeds["direct"] if db else 0.0
+    return {"seconds": ns + ds, "nexus_seconds": ns, "direct_seconds": ds,
+            "clicks": 0 if speeds.get("premium") else nf,
+            "nexus_files": nf, "direct_files": df, "nexus_bytes": nb, "direct_bytes": db,
+            "manual": split.get("manual") or 0, "other": split.get("other") or 0}
+
+
+def human_duration(seconds, short=False):
+    """'2 h 05 min', '7 min', 'under a minute'; `short`: '2h 05m', '7m', '<1m'."""
+    s = int(round(seconds or 0))
+    if s < 60:
+        return "<1m" if short else "under a minute"
+    m = s // 60
+    if m < 60:
+        return f"{m}m" if short else f"{m} min"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m" if short else f"{h} h {m:02d} min"
+
+
+def human_rate(bps):
+    return human_bytes(bps) + "/s"
+
+
+# One run's progress, for the line that says how much is left of it.
+_RUN = {"total_files": 0, "total_bytes": 0, "processed": 0, "done_bytes": 0,
+        "started": None, "first_guess": 0.0}
+
+
+def split_of(archives):
+    """The `split` estimate() takes, for a list of parsed or cached archives:
+    {"nexus": (files, bytes), "direct": (files, bytes), "manual": files,
+    "other": files}. Game files count nowhere."""
+    counts = {"nexus": [0, 0], "direct": [0, 0], "manual": 0, "other": 0}
+    for a in archives:
+        cls = source_class(a.get("kind") or state_type(a.get("state")))
+        if cls in ("nexus", "direct"):
+            counts[cls][0] += 1
+            counts[cls][1] += a.get("size") or 0
+        elif cls in ("manual", "other"):
+            counts[cls] += 1
+    return {"nexus": tuple(counts["nexus"]), "direct": tuple(counts["direct"]),
+            "manual": counts["manual"], "other": counts["other"]}
+
+
+def run_begin(archives, speeds):
+    """Start counting a run of these archives, with a first estimate of it
+    from the measured speeds; the pace of the run itself takes over as soon
+    as it has done enough to be read. Returns that estimate."""
+    first = estimate(split_of(archives), speeds)
+    _RUN.update(total_files=len(archives),
+                total_bytes=sum(a.get("size") or 0 for a in archives),
+                processed=0, done_bytes=0, started=time.time(),
+                first_guess=first["seconds"])
+    return first
+
+
+def run_done_one(size):
+    with _RESULTS_LOCK:
+        _RUN["done_bytes"] += size or 0
+
+
+def run_note():
+    """'   [file 35 of 412, about 6h 10m left]' for the progress line, or ''
+    outside a run. The time left is the run's own pace once it has moved 32
+    MB and twenty seconds - clicks and waits included, in assist mode - and
+    the first estimate, scaled to what is left, before that."""
+    total = _RUN["total_files"]
+    if not total or _RUN["started"] is None:
+        return ""
+    left = max(0, _RUN["total_bytes"] - _RUN["done_bytes"])
+    elapsed = time.time() - _RUN["started"]
+    if _RUN["done_bytes"] >= (32 << 20) and elapsed >= 20:
+        seconds = left * elapsed / _RUN["done_bytes"]
+    elif _RUN["total_bytes"]:
+        seconds = _RUN["first_guess"] * left / _RUN["total_bytes"]
+    else:
+        seconds = 0
+    current = min(total, _RUN["processed"] + 1)
+    return f"   [file {current} of {total}, about {human_duration(seconds, short=True)} left]"
 
 
 def download_one(url, archive, dest_dir, results, quiet=False):
@@ -1711,6 +1907,11 @@ def download_one(url, archive, dest_dir, results, quiet=False):
         _tally(results, False, name, f"not a plain file name: {why}")
         return False
     dest = os.path.join(dest_dir, name)
+    # For the speed sample: a transfer that resumes a partial file moved
+    # fewer bytes than its size, so it says nothing true about the line.
+    kind = state_type(archive.get("state"))
+    fresh = not os.path.exists(dest + ".part")
+    t0 = time.time()
 
     # WabbajackCDN URLs are directory prefixes, not files.
     if _HAVE_CDN and (archive.get("_cdn") or _CDN.is_cdn_url(url)):
@@ -1730,6 +1931,8 @@ def download_one(url, archive, dest_dir, results, quiet=False):
                                          "definition, parts, or a hash that differs "
                                          "from the manifest)")
             return False
+        if fresh:
+            note_speed(kind, archive["size"], time.time() - t0)
         # The CDN module already hashed the assembled file; do not read a
         # multi-GB archive off the share a second time just to repeat that.
         if archive["hash"] and got and got != archive["hash"]:
@@ -1746,6 +1949,7 @@ def download_one(url, archive, dest_dir, results, quiet=False):
             _tally(results, False, name, f"verify: {reason}")
             return False
         write_meta(dest, archive["meta_text"])
+        run_done_one(archive["size"])
         _tally(results, True)
         return True
 
@@ -1759,6 +1963,8 @@ def download_one(url, archive, dest_dir, results, quiet=False):
     if not stream_download(url, dest, expected_size=archive["size"], quiet=quiet):
         _tally(results, False, name, "download failed")
         return False
+    if fresh:
+        note_speed(kind, archive["size"], time.time() - t0)
     good, reason = verify_file(dest, archive["size"], archive["hash"])
     if not good:
         # Previously this still counted as done and wrote a .meta, which left a
@@ -1771,6 +1977,7 @@ def download_one(url, archive, dest_dir, results, quiet=False):
         _tally(results, False, name, f"verify: {reason}")
         return False
     write_meta(dest, archive["meta_text"])
+    run_done_one(archive["size"])
     _tally(results, True)
     return True
 
@@ -1985,7 +2192,7 @@ class _DirectPool:
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
             if self.printed:
-                say_progress("\r" + " " * 70 + "\r")
+                say_progress("\r" + " " * 110 + "\r")
 
     def _reap(self, timeout):
         """Collect whatever finished, then refresh the pool's progress line."""
@@ -2019,7 +2226,7 @@ class _DirectPool:
         pct = (100.0 * self.small_done / self.small_total) if self.small_total else 0.0
         rate = self.small_bytes_done / max(0.1, now - self.started) / (1 << 20)
         say_progress(f"\r    {pct:5.1f}%  {self.small_done}/{self.small_total} small "
-                     f"file(s), {in_flight} in flight, {rate:.1f} MB/s   ")
+                     f"file(s), {in_flight} in flight, {rate:.1f} MB/s{run_note()}   ")
         self.printed = True
 
 
@@ -2754,6 +2961,21 @@ def main():
 
     results = {"done": 0, "failed": 0, "failures": []}
 
+    # What this run will cost, from the speeds downloads here have measured,
+    # and the counter the progress line reads its time left from. The Nexus
+    # files count only when this run fetches them.
+    speeds = load_speeds(run_dir)
+    if nexus is not None:
+        speeds["premium"] = bool(nexus.is_premium)
+    fetching_nexus = bool(nexus_items) and bool(
+        nexus.is_premium or args.nxm_file or args.nxm_assist)
+    first = run_begin([a for _k, a in direct_items] + (nexus_items if fetching_nexus else []),
+                      speeds)
+    LOG.info("Expected:       about %s of downloading%s",
+             human_duration(first["seconds"]),
+             (f", and a click for each of {first['clicks']} Nexus file(s)"
+              if first["clicks"] and fetching_nexus else ""))
+
     # ---- Non-Nexus first (works for everyone) ------------------------
     if direct_items:
         banner("STEP 5: DOWNLOADING (DIRECT SOURCES)")
@@ -2806,6 +3028,13 @@ def main():
     LOG.info("-> Unsupported source:%d", len(unsupported))
     if nexus and nexus.daily_remaining is not None:
         LOG.info("-> Nexus daily reqs left: %s", nexus.daily_remaining)
+    took = time.time() - (_RUN["started"] or time.time())
+    if took > 0 and _RUN["done_bytes"]:
+        LOG.info("-> Took:              %s, %s at %s", human_duration(took),
+                 human_bytes(_RUN["done_bytes"]), human_rate(_RUN["done_bytes"] / took))
+    # The next estimate - here, in Browse, in Incomplete - is made from what
+    # this run measured.
+    save_speeds(run_dir, premium=(nexus.is_premium if nexus else None))
     if results["failures"]:
         report = os.path.join(run_dir, f"download_failures_{target}.csv")
         try:

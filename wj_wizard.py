@@ -63,6 +63,7 @@ import json
 import sys
 import time
 import shutil
+import textwrap
 from datetime import datetime, timezone
 
 import wj_autoupdate as A
@@ -815,6 +816,76 @@ def load_records(force=False):
     return A.load_plan_records(progress=progress)
 
 
+# ----------------------------------------------------------------------
+# Time and clicks
+# ----------------------------------------------------------------------
+_SPEEDS = {"at": 0.0, "value": None}
+
+
+def current_speeds():
+    """The speeds downloads here have measured (the downloader's
+    load_speeds), read at most every ten seconds: a table asks once a row."""
+    now = time.time()
+    if _SPEEDS["value"] is None or now - _SPEEDS["at"] > 10:
+        _SPEEDS["value"] = A.WJ.load_speeds(A.runtime_path(make=False))
+        _SPEEDS["at"] = now
+    return _SPEEDS["value"]
+
+
+def about(seconds):
+    """'about 2 h 05 min', or 'under a minute'."""
+    text = A.WJ.human_duration(seconds)
+    return text if text == "under a minute" else f"about {text}"
+
+
+def effort_cells(e):
+    """(clicks, time) for a table row, each '' when there is nothing to say."""
+    if not e:
+        return "", ""
+    clicks = str(e["clicks"]) if e["clicks"] else ""
+    busy = e["nexus_files"] or e["direct_files"]
+    return clicks, (A.WJ.human_duration(e["seconds"], short=True) if busy else "")
+
+
+def speed_note(cls, speeds):
+    """The speed an estimate used, and where it came from."""
+    rate = A.WJ.human_rate(speeds[cls])
+    if speeds["measured"][cls]:
+        return f"{rate}, as measured here"
+    if cls == "nexus" and not speeds.get("premium"):
+        return f"{rate}, Nexus's cap for a free account"
+    return f"{rate}, a guess until a download here has been measured"
+
+
+def effort_text(e, speeds):
+    """What fetching a list's missing archives costs, in words: time by
+    source at the speed used, the clicks, and what no download here can get."""
+    bits = []
+    if e["nexus_files"]:
+        bits.append(f"{e['nexus_files']} from Nexus ({human(e['nexus_bytes'])}), "
+                    f"{about(e['nexus_seconds'])} at {speed_note('nexus', speeds)}"
+                    + (", and a click each" if e["clicks"] else ""))
+    if e["direct_files"]:
+        bits.append(f"{e['direct_files']} direct ({human(e['direct_bytes'])}), "
+                    f"{about(e['direct_seconds'])} at {speed_note('direct', speeds)}")
+    if e["manual"]:
+        bits.append(f"{e['manual']} to download by hand from a web page")
+    if e["other"]:
+        bits.append(f"{e['other']} that only Wabbajack can fetch, if anything can")
+    return "; ".join(bits) or "nothing"
+
+
+def incomplete_total(rows):
+    """One line for a table of incomplete lists: all of their downloading,
+    and all of their clicks, at the speeds measured here."""
+    seconds = sum((st.get("effort") or {}).get("seconds", 0) for _f, st in rows)
+    clicks = sum((st.get("effort") or {}).get("clicks", 0) for _f, st in rows)
+    sp = current_speeds()
+    return (f"All of it: {about(seconds)} of downloading"
+            + (f" and {clicks} click(s)" if clicks else "")
+            + f", Nexus at {speed_note('nexus', sp)}, direct at {speed_note('direct', sp)}.")
+
+
 def list_status(entry):
     """What is missing for one list. Returns None if it declares no game."""
     game = entry.get("game")
@@ -826,7 +897,7 @@ def list_status(entry):
     # file name, which the downloader refuses the whole list over.
     st = {"game": game, "present": 0, "gamefile": 0, "other": 0, "stale": 0,
           "nexus": 0, "nexus_bytes": 0, "direct": 0, "direct_bytes": 0,
-          "unsafe": int(entry.get("unsafe") or 0)}
+          "manual": 0, "unsafe": int(entry.get("unsafe") or 0)}
     for a in entry["archives"]:
         kind = a.get("kind")
         if kind == "gamefile":
@@ -850,8 +921,14 @@ def list_status(entry):
             st["direct_bytes"] += a["size"] or 0
         else:
             st["other"] += 1
+            if kind == "manual":
+                st["manual"] += 1
     st["missing"] = st["nexus"] + st["direct"]
     st["bytes"] = st["nexus_bytes"] + st["direct_bytes"]
+    # What fetching the rest costs: see estimate() in the downloader.
+    st["effort"] = A.WJ.estimate(
+        {"nexus": (st["nexus"], st["nexus_bytes"]), "direct": (st["direct"], st["direct_bytes"]),
+         "manual": st["manual"], "other": st["other"] - st["manual"]}, current_speeds())
     return st
 
 
@@ -939,13 +1016,16 @@ def evaluate_rows(rows, pool_dir, indexes, label):
     todo = [r for r in rows if "gap" not in r]
     if todo:
         out(f"  Reading {len(todo)} validation report(s) for {label} ...")
+    speeds = current_speeds()
     for i, r in enumerate(todo, 1):
         rep = G.load_report(r["key"])
         r["report_status"] = G.report_status(rep) if rep is not None else None
         if rep is None or G.report_is_empty(rep):
             r["gap"] = None
+            r["effort"] = None
         else:
             r["gap"] = G.evaluate(G.report_archives(rep, A.WJ), existing, A.WJ)
+            r["effort"] = A.WJ.estimate(r["gap"]["split"], speeds)
         if todo and (i % 25 == 0 or i == len(todo)):
             out(f"    [{i}/{len(todo)}]")
     return rows
@@ -974,8 +1054,18 @@ def set_hide_nsfw(hide):
     return bool(CFG.HIDE_NSFW)
 
 
-def show_gallery_table(rows, label, shown, hidden=None, search="", nsfw=0):
-    """The browse table for one game, most-complete first.
+def effort_sort_key(row):
+    """Quickest to finish first, by the estimated time and then the clicks;
+    lists that could not be measured last."""
+    e = row.get("effort")
+    if not e:
+        return (1, 0.0, 0, row["title"].lower())
+    return (0, e["seconds"], e["clicks"], row["title"].lower())
+
+
+def show_gallery_table(rows, label, shown, hidden=None, search="", nsfw=0, order=None):
+    """The browse table for one game, most-complete first, or in `order`'s
+    words when the caller sorted it some other way.
 
     `hidden` is (blocked, unknown): how many lists the 'only lists that can
     be completed' rule kept out of this table, and why, so the table never
@@ -983,19 +1073,23 @@ def show_gallery_table(rows, label, shown, hidden=None, search="", nsfw=0):
     same of a search and of HIDE_NSFW."""
     out()
     rule("-")
-    out(f"  {label.upper()}   {len(rows)} list(s), most complete first"
+    out(f"  {label.upper()}   {len(rows)} list(s), {order or 'most complete first'}"
         + (f", matching '{search}'" if search else ""))
     rule("-")
     nw = fit([r["title"] for r in rows[:shown]], 7) + 2
     vw = fit([r["version"] for r in rows[:shown]], 7) + 2
     out(f"     {'#':>3} own {'modlist':<{nw}}{'version':<{vw}}"
-        f"{'arch':>6}{'yours':>8}{'to fetch':>11}{'total':>11}  {'updated':<10}")
+        f"{'arch':>6}{'yours':>8}{'to fetch':>11}{'total':>11}  {'updated':<10}"
+        f"{'clicks':>7}{'time':>9}")
     for i, r in enumerate(rows[:shown], 1):
         g = r.get("gap")
+        e = r.get("effort")
         if G.completable(r) is False:
             mark = "x"
         elif r.get("nsfw"):
             mark = "n"
+        elif e and e["manual"]:
+            mark = "m"
         else:
             mark = "!" if G.unavailable(r) else (">" if r["retired"] else " ")
         own = "[x]" if r["have"] else "[ ]"
@@ -1006,12 +1100,20 @@ def show_gallery_table(rows, label, shown, hidden=None, search="", nsfw=0):
         else:
             n = r["archives"] or 0
             tail = f"{n:>6}{'-':>8}{'-':>11}{human(r['arch_size'] or 0):>11}"
+        clicks, took = effort_cells(e)
         out(f"   {mark} {i:>3} {own} {r['title'][:nw - 2]:<{nw}}"
-            f"{r['version'][:vw - 2]:<{vw}}{tail}  {r.get('updated') or '':<10}")
+            f"{r['version'][:vw - 2]:<{vw}}{tail}  {r.get('updated') or '':<10}"
+            f"{clicks:>7}{took:>9}")
     if len(rows) > shown:
         out(f"         ... {len(rows) - shown} more not shown")
     out()
     bits = []
+    if any((r.get("effort") or {}).get("manual") for r in rows[:shown]):
+        bits.append("m  needs files you download by hand from a web page")
+    if any(r.get("effort") for r in rows[:shown]):
+        sp = current_speeds()
+        bits.append(f"time: downloading what is missing, Nexus at {speed_note('nexus', sp)}, "
+                    f"direct at {speed_note('direct', sp)}; clicks: one per Nexus file")
     if any(r.get("nsfw") and G.completable(r) is not False for r in rows[:shown]):
         bits.append("n  marked NSFW by its author")
     if nsfw:
@@ -1083,6 +1185,10 @@ def show_gallery_detail(state, row):
         out(f"  archives           {g['total']:>7}")
         out(f"  already yours      {g['present']:>7}   ({g['percent']:.1f}%)")
         out(f"  still to fetch     {g['missing']:>7}   {human(g['missing_bytes'])}")
+        e = row.get("effort")
+        if e and g["missing"]:
+            out(textwrap.fill("which is " + effort_text(e, current_speeds()), width=74,
+                              initial_indent="    ", subsequent_indent="      "))
         if g["gamefile"]:
             out(f"  from the game      {g['gamefile']:>7}   "
                 f"supplied by your install, not downloaded")
@@ -1519,6 +1625,7 @@ def stage_browse(state, tracked):
 
         shown = min(PAGE, len(measured))
         search = ""
+        quickest = False
         while True:
             # Only lists that could be finished, unless [c] has said
             # otherwise: a tracked list, or one whose every archive is held
@@ -1530,11 +1637,15 @@ def stage_browse(state, tracked):
                 grp, kept_out = list(measured), None
             hide_nsfw = bool(CFG.HIDE_NSFW) if CFG else False
             grp, nsfw = G.browse_filter(grp, search, hide_nsfw)
-            show_gallery_table(grp, label, shown, hidden=kept_out, search=search, nsfw=nsfw)
+            if quickest:
+                grp.sort(key=effort_sort_key)
+            show_gallery_table(grp, label, shown, hidden=kept_out, search=search, nsfw=nsfw,
+                               order="quickest to finish first" if quickest else None)
             extra = ["[m] more"] if len(grp) > shown else []
             extra.append("[c] " + ("show every list" if only_completable
                                    else "only lists that can be completed"))
             extra.append("[n] " + ("show NSFW lists" if hide_nsfw else "hide NSFW lists"))
+            extra.append("[t] " + ("most complete first" if quickest else "quickest first"))
             extra.append("[b] back to the games")
             pick = ask_row(len(grp), extra, search=True)
             if isinstance(pick, str) and pick.startswith("/"):
@@ -1545,6 +1656,9 @@ def stage_browse(state, tracked):
                 continue
             if pick == "n":
                 set_hide_nsfw(not hide_nsfw)
+                continue
+            if pick == "t":
+                quickest = not quickest
                 continue
             if pick == "b":
                 break
@@ -1839,12 +1953,15 @@ def stage_incomplete(records, assist):
         nw = fit([stem_of(fn) for fn, _s in rows], 7) + 2
         gw = fit([A.WJ.game_label(s["game"]) for _f, s in rows], 4) + 2
         out(f"    {'#':>3}  {'modlist':<{nw}}{'game':<{gw}}{'absent':>7}"
-            f"{'wrong sz':>9}{'size':>10}{'nexus':>7}")
+            f"{'wrong sz':>9}{'size':>10}{'nexus':>7}{'time':>9}")
         for i, (fn, st) in enumerate(rows, 1):
+            _clicks, took = effort_cells(st.get("effort"))
             out(f"    {i:>3}  {stem_of(fn):<{nw}}"
                 f"{A.WJ.game_label(st['game']):<{gw}}"
                 f"{st['missing'] - st['stale']:>7}{st['stale'] or '-':>9}"
-                f"{human(st['bytes']):>10}{st['nexus'] or '-':>7}")
+                f"{human(st['bytes']):>10}{st['nexus'] or '-':>7}{took:>9}")
+        out()
+        out("    " + incomplete_total(rows))
         refused = [stem_of(fn) for fn, st in rows if st.get("unsafe")]
         if refused:
             out()

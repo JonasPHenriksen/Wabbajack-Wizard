@@ -307,6 +307,32 @@ archives in Space. The table's **updated** column is the date the list was last
 published, an `n` marks a list its author flags NSFW, and the detail pane gives
 the list's tags.
 
+### Time and clicks, not only gigabytes
+
+On a free Nexus account a gigabyte from Nexus and a gigabyte from the Wabbajack
+CDN are not the same cost. A Nexus file comes down at the cap Nexus puts on
+free accounts, about 3 MB/s, and costs a click; the CDN runs at the line's own
+speed. So Browse, Incomplete and the Start tab say what fetching the rest of a
+list costs in time and clicks. Browse has **clicks** and **time** columns - a
+click on any heading sorts by it, and `[t]` in the console puts the quickest to
+finish first - and an `m` marks a list that needs files you download by hand
+from a web page. The detail pane splits the time by source and says what speed
+each part assumed.
+
+The speeds are measured. Every download of 8 MB or more is a sample, kept by
+source in `runtime\wj_speeds.json`, the last twenty of each, and estimates use
+the median, so one stalled transfer does not move them. Until a source has
+been measured here, Nexus is taken at its free-account cap and a direct
+download at 10 MB/s, and the text says that second one is a guess. A Premium
+account's Nexus files cost no clicks. The time is the downloading alone: a
+click's own time is a person's, so it is given as a count instead.
+
+A download run says the same as it goes. It opens with what it expects to
+take, its progress line carries `[file 35 of 412, about 6h 10m left]` - from
+the first estimate until the run has moved enough to go by its own pace, which
+in assist mode includes the clicks and the waits - and it ends with how long
+it took, and at what speed.
+
 ### Hiding a list you will never want
 
 **Hide this list**, under the Browse tab's detail pane (`[h]` on a list's detail
@@ -877,7 +903,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1153 checks across eighteen suites. None of them touch the live archive pools:
+environment instead). 1181 checks across eighteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

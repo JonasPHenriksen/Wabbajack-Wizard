@@ -514,5 +514,21 @@ check("hiding NSFW lists leaves them out and counts them",
 shown, n = G.browse_filter(rows, "")
 check("  and without it nothing is left out", len(shown) == 3 and n == 0)
 
+# ---------------------------------------------------------------- 11.14
+print("\n 11.14  what is missing, by where it would come from")
+
+
+def orig(name, size, typ):
+    return {"Status": "Valid", "Original": {"Name": name, "Size": size, "Hash": "A=", "Meta": "",
+                                            "State": {"$type": typ + ", Wabbajack.Lib"}}}
+
+
+r = {"Archives": [orig("nx.7z", 30, "NexusDownloader"), orig("cdn.7z", 70, "WabbajackCDNDownloader+State"),
+                  orig("hand.7z", 5, "ManualDownloader"), orig("mega.7z", 5, "MegaDownloader"),
+                  orig("have.7z", 9, "NexusDownloader"), orig("game.bsa", 99, "GameFileSourceDownloader")]}
+st = G.evaluate(G.report_archives(r, WJ), {"have.7z": [("x", 9)]}, WJ)
+check("the missing archives are split by source, the one held and the game file left out",
+      st["split"] == {"nexus": (1, 30), "direct": (1, 70), "manual": 1, "other": 1}, str(st["split"]))
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

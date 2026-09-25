@@ -225,6 +225,41 @@ def save_overview(data):
         pass
 
 
+def _gap(r):
+    return r.get("gap") or {}
+
+
+def _effort(r):
+    return r.get("effort") or {}
+
+
+# The Browse columns a click on the heading sorts by: the key, whether the
+# first click sorts it descending, and what a row needs to have a value there
+# at all - a measured gap, or an estimate. A row without one sorts last,
+# whichever way the column is sorted.
+BROWSE_SORT = {
+    "title": (lambda r: r["title"].lower(), False, None),
+    "game": (lambda r: G.game_label(r["game"]).lower(), False, None),
+    "yours": (lambda r: _gap(r).get("percent", 0.0), True, "gap"),
+    "fetch": (lambda r: _gap(r).get("missing_bytes", 0), False, "gap"),
+    "total": (lambda r: _gap(r).get("total_bytes") or r.get("arch_size") or 0, True, None),
+    "updated": (lambda r: r.get("updated") or "", True, None),
+    "clicks": (lambda r: _effort(r).get("clicks", 0), False, "effort"),
+    "time": (lambda r: _effort(r).get("seconds", 0), False, "effort"),
+}
+
+
+def browse_sorted(rows, sort):
+    """`rows` in the order `sort` - (column, descending) - says, the rows
+    with nothing in that column after the rest."""
+    if not sort:
+        return list(rows)
+    key, _first, needs = BROWSE_SORT[sort[0]]
+    have = [r for r in rows if not needs or r.get(needs)]
+    rest = [r for r in rows if needs and not r.get(needs)]
+    return sorted(have, key=key, reverse=sort[1]) + rest
+
+
 # What each tab's contents are built from. A tab is rebuilt when something it
 # reads has moved on since it was last filled, and left alone otherwise.
 #
@@ -656,8 +691,10 @@ class App:
         s = ov.get("status")
         if s:
             c["status"]["body"].set(
-                f"{s.get('incomplete', 0)} incomplete, {human(s.get('bytes'))} still to fetch; "
-                f"{s.get('complete', 0)} complete" + (listed(s.get("names")) or "."))
+                f"{s.get('incomplete', 0)} incomplete, {human(s.get('bytes'))} still to fetch"
+                + (f", {W.about(s['seconds'])} of downloading" if s.get("seconds") else "")
+                + (f" and {s['clicks']} click(s)" if s.get("clicks") else "")
+                + f"; {s.get('complete', 0)} complete" + (listed(s.get("names")) or "."))
             c["status"]["when"].set(f"measured {when_text(s.get('when'))}")
         else:
             c["status"]["body"].set("Not measured yet. The Incomplete tab compares every manifest "
@@ -999,10 +1036,17 @@ class App:
                 ("version", "version", 100, "w"),
                 ("arch", "archives", 80, "e"), ("yours", "yours", 70, "e"),
                 ("fetch", "to fetch", 100, "e"), ("total", "total", 100, "e"),
-                ("updated", "updated", 90, "w")]
+                ("updated", "updated", 90, "w"),
+                ("clicks", "clicks", 60, "e"), ("time", "time", 80, "e")]
         self.browse_table = make_table(f, cols, height=12, selectmode="browse")
         self.browse_table.grid(row=4, column=0, sticky="nsew")
         self.browse_table.tree.bind("<<TreeviewSelect>>", lambda _e: self.browse_detail())
+        # A heading click sorts the table by that column, and a second click
+        # the other way; the measured order, most complete first, is where
+        # every game's table starts.
+        self.browse_table.labels = {c[0]: c[1] for c in cols}
+        for cid in BROWSE_SORT:
+            self.browse_table.tree.heading(cid, command=lambda c=cid: self.browse_sort_by(c))
 
         det = ttk.Frame(f)
         det.grid(row=5, column=0, sticky="nsew", pady=(6, 0))
@@ -1162,6 +1206,21 @@ class App:
         if self.browse.get("view") not in (None, HIDDEN_GAME):
             self._browse_apply_filter()
 
+    def browse_sort_by(self, cid):
+        """A heading was clicked: sort by that column, the other way when it
+        is clicked again, and mark the heading with the direction."""
+        cur = self.browse.get("sort")
+        rev = (not cur[1]) if cur and cur[0] == cid else BROWSE_SORT[cid][1]
+        self.browse["sort"] = (cid, rev)
+        self._browse_headings()
+        self.browse_refilter()
+
+    def _browse_headings(self):
+        sort = self.browse.get("sort")
+        for c, label in self.browse_table.labels.items():
+            arrow = ((" ▼" if sort[1] else " ▲") if sort and sort[0] == c else "")
+            self.browse_table.tree.heading(c, text=label + arrow)
+
     def browse_toggle_nsfw(self):
         """The NSFW box: remembered as HIDE_NSFW the way the Dark mode switch
         remembers THEME, through the call the Settings tab uses, and the
@@ -1189,6 +1248,7 @@ class App:
             shown, blocked, unknown = list(rows), [], []
         search = self.browse_search.get()
         shown, nsfw = G.browse_filter(shown, search, bool(self.browse_nsfw.get()))
+        shown = browse_sorted(shown, self.browse.get("sort"))
         self.browse["grp"] = shown
         self.browse["detail"] = None
         self._browse_fill(shown)
@@ -1224,8 +1284,16 @@ class App:
             legend.append("x  cannot be completed: a dead archive is not in your pools")
         if any(r.get("nsfw") for r in shown):
             legend.append("n  marked NSFW by its author")
+        if any(_effort(r).get("manual") for r in shown):
+            legend.append("m  needs files you download by hand from a web page")
         if legend:
             lines.append("     ".join(legend))
+        if any(r.get("effort") for r in shown):
+            sp = W.current_speeds()
+            lines.append(f"time: downloading what is still to fetch, Nexus files at "
+                         f"{W.speed_note('nexus', sp)}, direct ones at {W.speed_note('direct', sp)}. "
+                         f"clicks: one per Nexus file, which a free account needs. A heading "
+                         f"sorts the table.")
         self._set_text(self.browse_text, "\n\n".join(lines))
         self._browse_buttons()
 
@@ -1236,9 +1304,11 @@ class App:
         out_rows = []
         for r in rows:
             g = r.get("gap") if measured else None
+            e = r.get("effort") if measured else None
             mark = (("!" if G.unavailable(r) else "") + (">" if r["retired"] else "")
                     + ("x" if measured and G.completable(r) is False else "")
-                    + ("n" if r.get("nsfw") else ""))
+                    + ("n" if r.get("nsfw") else "")
+                    + ("m" if e and e["manual"] else ""))
             if g and g["total"]:
                 tail = (g["total"], f"{g['percent']:.1f}%", human(g["missing_bytes"]),
                         human(g["total_bytes"]))
@@ -1246,7 +1316,7 @@ class App:
                 tail = (r["archives"] or 0, "-", "-", human(r["arch_size"] or 0))
             out_rows.append(("[x]" if r["have"] else "", mark, r["title"],
                              G.game_label(r["game"]), r["version"]) + tail
-                            + (r.get("updated") or "",))
+                            + (r.get("updated") or "",) + W.effort_cells(e))
         fill(self.browse_table.tree, out_rows)
 
     def _browse_show_hidden(self):
@@ -1413,6 +1483,9 @@ class App:
                          f"   still to fetch {g['missing']} = {human(g['missing_bytes'])}"
                          f"   list total {human(g['total_bytes'])}"
                          + (f"   from the game {g['gamefile']}" if g["gamefile"] else ""))
+            e = r.get("effort")
+            if e and g["missing"]:
+                lines.append("Still to fetch: " + W.effort_text(e, W.current_speeds()) + ".")
             if g["dead_need"]:
                 lines.append(f"CANNOT BE COMPLETED from here: {len(g['dead_need'])} archive(s) the "
                              f"validator can no longer download are not in your pools.")
@@ -1562,8 +1635,11 @@ class App:
             self.tab_filled("Incomplete", "Prepare")
             missing = sorted(((st["bytes"], W.stem_of(fn)) for fn, st in rows if st["missing"]),
                              reverse=True)
+            efforts = [st.get("effort") or {} for _fn, st in rows if st["missing"]]
             self.note_overview("status", incomplete=len(missing), complete=len(rows) - len(missing),
-                               bytes=sum(b for b, _n in missing), names=[n for _b, n in missing])
+                               bytes=sum(b for b, _n in missing), names=[n for _b, n in missing],
+                               seconds=sum(e.get("seconds", 0) for e in efforts),
+                               clicks=sum(e.get("clicks", 0) for e in efforts))
             if then is not None:
                 then()
         return self.run_job("Checking what is on disk", self._status_job, done)
@@ -1582,7 +1658,7 @@ class App:
         cols = [("modlist", "modlist", 340, "w"), ("game", "game", 190, "w"),
                 ("absent", "absent", 70, "e"), ("stale", "wrong size", 80, "e"),
                 ("size", "size", 100, "e"), ("nexus", "nexus", 70, "e"),
-                ("state", "", 110, "w")]
+                ("state", "", 110, "w"), ("time", "time", 80, "e")]
         self.incomplete_table = make_table(f, cols, height=16)
         self.incomplete_table.grid(row=2, column=0, sticky="nsew")
 
@@ -1598,6 +1674,11 @@ class App:
             note += (" A list marked 'refused: edited' names archives with something other "
                      "than a plain file name, which only an edited manifest does; nothing is "
                      "downloaded for it until the manifest is fetched again.")
+        missing = [(fn, st) for fn, st in self.status_rows if st["missing"]]
+        if missing:
+            # The time column is the downloading alone; the nexus column
+            # is also the clicks, one per file, on a free account.
+            note += "\n" + W.incomplete_total(missing)
         self.incomplete_note.configure(text=note)
         rows = []
         for fn, st in sorted(self.status_rows, key=lambda r: -r[1]["bytes"]):
@@ -1607,7 +1688,7 @@ class App:
                 state = "refused: edited"
             rows.append((W.stem_of(fn), A.WJ.game_label(st["game"]),
                          st["missing"] - st["stale"], st["stale"] or "-", human(st["bytes"]),
-                         st["nexus"] or "-", state))
+                         st["nexus"] or "-", state, W.effort_cells(st.get("effort"))[1]))
         self.incomplete_order = sorted(self.status_rows, key=lambda r: -r[1]["bytes"])
         fill(self.incomplete_table.tree, rows)
         n = sum(1 for _f, st in self.status_rows if st["missing"])

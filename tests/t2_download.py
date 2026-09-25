@@ -795,5 +795,76 @@ landed = [os.path.join(d, n) for d, _s, fs in os.walk(box.root) for n in fs
 check("  and writes nothing, inside the pool or out of it", landed == [], str(landed))
 shutil.rmtree(box.root, ignore_errors=True)
 
+# ---------------------------------------------------------------- 2.16
+print("\n 2.16  time and clicks: what a list costs, and what is left of a run")
+MB = 1 << 20
+check("every source falls in one class",
+      [D.source_class(k) for k in ("nexus", "http", "wabbajackcdn", "mediafire", "manual",
+                                   "gamefile", "mega", "googledrive", "unknown")]
+      == ["nexus", "direct", "direct", "direct", "manual", "gamefile", "other", "other", "other"])
+arcs = [{"name": "n1", "size": 30 * MB, "kind": "nexus"}, {"name": "n2", "size": 10 * MB, "kind": "nexus"},
+        {"name": "d1", "size": 100 * MB, "kind": "wabbajackcdn"}, {"name": "m1", "size": 5, "kind": "manual"},
+        {"name": "g1", "size": 9, "kind": "gamefile"}, {"name": "x1", "size": 1, "kind": "mega"}]
+sp = D.split_of(arcs)
+check("split_of counts files and bytes by source, and game files nowhere",
+      sp == {"nexus": (2, 40 * MB), "direct": (1, 100 * MB), "manual": 1, "other": 1}, str(sp))
+speeds = {"nexus": 3 * MB, "direct": 50 * MB, "premium": False,
+          "measured": {"nexus": False, "direct": True}}
+e = D.estimate(sp, speeds)
+check("Nexus bytes at Nexus's speed, direct ones at theirs",
+      abs(e["nexus_seconds"] - 40 / 3) < 0.01 and abs(e["direct_seconds"] - 2) < 0.01
+      and abs(e["seconds"] - (40 / 3 + 2)) < 0.01, str(e))
+check("  a click per Nexus file on a free account, and what nothing here fetches counted",
+      e["clicks"] == 2 and e["manual"] == 1 and e["other"] == 1, str(e))
+check("  and no click on a Premium one", D.estimate(sp, dict(speeds, premium=True))["clicks"] == 0)
+check("durations read the way people say them",
+      [D.human_duration(s) for s in (5, 59, 60, 450, 3600, 7500)]
+      == ["under a minute", "under a minute", "1 min", "7 min", "1 h 00 min", "2 h 05 min"])
+check("  and short, for a table", [D.human_duration(s, short=True) for s in (5, 420, 7500)]
+      == ["<1m", "7m", "2h 05m"])
+
+sdir = os.path.join(TMP, "speeds")
+shutil.rmtree(sdir, ignore_errors=True)
+os.makedirs(sdir)
+first = D.load_speeds(sdir)
+check("with nothing measured, Nexus is its free-account cap and direct a guess",
+      first["nexus"] == D.NEXUS_FREE_MBPS * MB and first["direct"] == D.DIRECT_MBPS * MB
+      and first["measured"] == {"nexus": False, "direct": False}, str(first))
+for cls in D._SPEED_SAMPLES:
+    D._SPEED_SAMPLES[cls].clear()
+D.note_speed("http", 1 * MB, 1.0)
+check("a small transfer is not kept as a sample", D._SPEED_SAMPLES["direct"] == [])
+for rate in (10, 40, 45, 50, 1000):                      # MB/s, one of them a freak
+    D.note_speed("wabbajackcdn", 100 * MB, 100 / rate)
+D.note_speed("nexus", 30 * MB, 10.0)                      # 3 MB/s
+D.save_speeds(sdir, premium=False)
+got = D.load_speeds(sdir)
+check("the direct speed is the median of its samples, so a freak does not move it",
+      abs(got["direct"] - 45 * MB) < 1 and got["measured"]["direct"], str(got))
+check("  the Nexus one is what Nexus gave", abs(got["nexus"] - 3 * MB) < 1 and got["measured"]["nexus"])
+check("  and the account type is kept", got["premium"] is False)
+for cls in D._SPEED_SAMPLES:
+    D._SPEED_SAMPLES[cls].clear()
+for _ in range(D.SPEED_SAMPLES_KEPT + 5):
+    D.note_speed("http", 100 * MB, 1.0)
+D.save_speeds(sdir)
+with io.open(os.path.join(sdir, D.SPEEDS_FILE), encoding="utf-8") as f:
+    kept = json.load(f)
+check("only the most recent samples are kept", len(kept["direct"]) == D.SPEED_SAMPLES_KEPT
+      and len(kept["nexus"]) == 1, str({k: len(v) for k, v in kept.items() if isinstance(v, list)}))
+for cls in D._SPEED_SAMPLES:
+    D._SPEED_SAMPLES[cls].clear()
+
+D.run_begin([{"name": "a", "size": 40 * MB, "kind": "http"},
+             {"name": "b", "size": 40 * MB, "kind": "http"}], speeds)
+note = D.run_note()
+check("a run's progress line says which file of how many, and how long is left",
+      "file 1 of 2" in note and "left" in note, note)
+D.run_done_one(40 * MB)
+D._tally({"done": 0, "failed": 0, "failures": []}, True)
+check("  and moves on as files finish", "file 2 of 2" in D.run_note(), D.run_note())
+D._RUN.update(total_files=0, started=None)
+check("  and says nothing outside a run", D.run_note() == "")
+
 srv.shutdown()
 sys.exit(summary())

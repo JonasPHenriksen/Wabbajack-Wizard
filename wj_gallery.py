@@ -444,10 +444,17 @@ def evaluate(archives, existing, wj):
 
     Dead archives are split deliberately. An archive the validator can no
     longer download is only a problem if you do not already have it, and the
-    whole point of a pooled collection is that you often do."""
+    whole point of a pooled collection is that you often do.
+
+    `split` divides what is missing by where it would come from (see the
+    downloader's split_of): Nexus files, which on a free account cost a click
+    each and come at Nexus's cap; direct ones; manual downloads; and the
+    rest. A gigabyte from Nexus and one from the CDN are not the same cost,
+    and this is what the Browse tables' time and clicks are made from."""
     st = {"total": 0, "present": 0, "missing": 0, "gamefile": 0,
           "total_bytes": 0, "present_bytes": 0, "missing_bytes": 0,
           "dead_have": [], "dead_need": []}
+    missing = []
     for a in archives:
         size = a.get("size") or 0
         if a.get("kind") == "gamefile":
@@ -462,9 +469,11 @@ def evaluate(archives, existing, wj):
         else:
             st["missing"] += 1
             st["missing_bytes"] += size
+            missing.append(a)
         if a.get("status") not in ("Valid", "Unknown"):
             (st["dead_have"] if hit else st["dead_need"]).append(a)
     st["percent"] = (100.0 * st["present"] / st["total"]) if st["total"] else 0.0
+    st["split"] = wj.split_of(missing)
     return st
 
 

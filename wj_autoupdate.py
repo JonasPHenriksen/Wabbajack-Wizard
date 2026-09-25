@@ -131,16 +131,19 @@ HERE = wj_paths.app_dir(__file__)
 LOG = logging.getLogger("wj_autoupdate")
 
 
-def runtime_path(name=None):
+def runtime_path(name=None, make=True):
     """Where one of the files this tooling writes as it runs lives - the
     runtime folder beside the scripts, see wj_paths.RUNTIME_DIR - or that
     folder itself. Worked out from HERE at the moment of asking, so that
-    moving HERE, as every sandbox test does, moves these with it."""
+    moving HERE, as every sandbox test does, moves these with it. The folder
+    is made if it is not there, unless `make` is off, for a caller that only
+    reads."""
     d = os.path.join(HERE, wj_paths.RUNTIME_DIR)
-    try:
-        os.makedirs(d, exist_ok=True)
-    except OSError:
-        pass            # the caller's own open() then says what is wrong
+    if make:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass        # the caller's own open() then says what is wrong
     return os.path.join(d, name) if name else d
 
 # Filled in by resolve_dirs() during startup.

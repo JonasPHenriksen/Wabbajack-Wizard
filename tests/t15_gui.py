@@ -980,6 +980,51 @@ check("  [n] hides the NSFW lists, and says so", "marked NSFW are hidden" in tex
 check("  and the second [n] shows them again, the setting following",
       CFG.HIDE_NSFW is False, str(CFG.HIDE_NSFW))
 
+# ---------------------------------------------------------------- 15.19
+print("\n 15.19  time and clicks, and sorting by them")
+app.browse_only.set(False)
+app.browse_refilter()
+table = {r[2]: r for r in rows(app.browse_table)}
+check("a list still missing a Nexus file shows its click and its time",
+      table["Needs A Download"][10] == "1" and table["Needs A Download"][11] == "<1m",
+      str(table["Needs A Download"]))
+check("  one missing nothing shows neither", table["One List"][10] == "" and table["One List"][11] == "",
+      str(table["One List"]))
+check("  and one with no report shows nothing, rather than a zero",
+      table["Pulled List"][11] == "", str(table["Pulled List"]))
+app.browse_sort_by("time")
+order = [r[2] for r in rows(app.browse_table)]
+check("a click on the time heading sorts by it, quickest first",
+      order.index("Needs A Download") < order.index("Dead And Missing") and order[-1] == "Pulled List",
+      str(order))
+check("  and marks the heading", app.browse_table.tree.heading("time")["text"].endswith("▲"))
+app.browse_sort_by("time")
+order = [r[2] for r in rows(app.browse_table)]
+check("a second click reverses it, and the unmeasured list stays last",
+      order.index("Dead And Missing") < order.index("Needs A Download") and order[-1] == "Pulled List"
+      and app.browse_table.tree.heading("time")["text"].endswith("▼"), str(order))
+idx = order.index("Needs A Download")
+app.browse_table.tree.selection_set(str(idx))
+app.browse_detail()
+check("the detail pane says what fetching the rest costs",
+      "Still to fetch: 1 from Nexus" in app.browse_text.get("1.0", "end")
+      and "a click each" in app.browse_text.get("1.0", "end"), app.browse_text.get("1.0", "end")[:400])
+app.browse["sort"] = None
+app._browse_headings()
+app.browse_only.set(True)
+app.status_refresh()
+settle()
+inc = {r[0]: r for r in rows(app.incomplete_table)}
+check("the Incomplete tab has a time for each list",
+      all(len(r) == 8 for r in inc.values()) and inc["Keep"][7] == "<1m", str(inc))
+check("  and says what all of it costs", "All of it:" in app.incomplete_note.cget("text"),
+      app.incomplete_note.cget("text"))
+check("  as the Start tab does", "of downloading" in app.cards["status"]["body"].get()
+      or "under a minute" in app.cards["status"]["body"].get(), app.cards["status"]["body"].get())
+text = drive(W.stage_browse, ["c", "1", "c", "t", "b", "s"], app.state, app.tracked)
+check("in the console the table has clicks and time, and [t] puts the quickest first",
+      "clicks" in text and "time" in text and "quickest to finish first" in text, text[-1200:])
+
 # ---- put everything back ---------------------------------------------------
 root.destroy()
 W.out = REAL_WOUT

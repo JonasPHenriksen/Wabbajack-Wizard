@@ -68,6 +68,20 @@ on the 20th. They are recorded here, under the release that carries them.
   name or size, the hash check after the download says whether it was the
   same bytes, and a file nothing matches is recorded and passed over too.
   The listing is asked for once per mod and remembered for the run.
+- **Hours and clicks, not only gigabytes.** Browse's "to fetch" column took
+  every gigabyte as the same cost, but on a free Nexus account 20 GB from
+  Nexus is about two hours and a click per file, while 20 GB from the
+  Wabbajack CDN is minutes. Browse now has **clicks** and **time** columns,
+  sortable like every other by clicking a heading (`[t]` in the console puts
+  the quickest first), an `m` on a list that needs files downloaded by hand,
+  and a detail pane that splits the time by source. Incomplete gives each
+  list a time, and a total, which the Start tab gives too. The speeds are the
+  ones downloads here have measured - every download of 8 MB or more is a
+  sample, kept per source in `runtime\wj_speeds.json` - with Nexus's
+  free-account cap, about 3 MB/s, and a stated guess for direct downloads
+  until there is one. A download run says what it expects to take before it
+  starts, carries `[file 35 of 412, about 6h 10m left]` on its progress
+  line, and ends by saying how long it took.
 - **Browse can be searched, and NSFW lists hidden.** A search box above the
   table narrows the current game's lists as you type, to those whose title,
   key, game or tags hold every word typed; `/words` does the same in the
@@ -178,7 +192,7 @@ on the 20th. They are recorded here, under the release that carries them.
   folder - were appended to the real `wj_autoupdate.log`. They now log into a
   scratch folder the run removes.
 
-Tests: 1153 checks across 18 sandbox suites, up from 895 across 16.
+Tests: 1181 checks across 18 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 
