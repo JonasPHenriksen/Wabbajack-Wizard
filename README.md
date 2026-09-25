@@ -989,6 +989,18 @@ python -m venv .venv-build
 python build.py
 ```
 
+`requirements-build.txt` takes in `requirements.txt` as well, because a build
+carries everything the scripts use: xxhash for the hashing, and pywebview with
+the pythonnet it brings for the download window. PyInstaller only warns about
+a module it cannot find and builds anyway, so `build.py` checks for all three
+first and refuses without them, rather than making binaries that quietly
+open every Nexus page in the browser.
+
+`release.py` makes the source zip and its release notes from what git tracks
+at HEAD, and tags the release `v<version>` there; a tag of that name on any
+other commit refuses it. It uses git on PATH, or the MinGit copy `git.bat`
+runs. Pushing the tag is left to you.
+
 It is a one-folder build, not a one-file build, for two reasons. A run
 launches the downloader and then the sorter as child processes, and a
 one-file build unpacks the whole of Python afresh for each of them. And a

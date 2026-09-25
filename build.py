@@ -67,6 +67,15 @@ CLR_CONFIG = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
+# What a build must carry, by the module that proves it is there. PyInstaller
+# only warns about a hidden import it cannot find and builds anyway, so a
+# build environment without pywebview used to produce binaries that quietly
+# fell back to the browser for every Nexus page.
+BUNDLED = (("xxhash", "the real xxHash64 check on every download"),
+           ("webview", "the download window assist mode shows Nexus pages in (pywebview)"),
+           ("clr", "the .NET bridge the download window runs on (pythonnet)"))
+
+
 def builder():
     """The interpreter that has PyInstaller, or None.
 
@@ -83,6 +92,15 @@ def builder():
         if rc == 0:
             return py
     return None
+
+
+def missing_from(py):
+    """The BUNDLED modules `py` cannot import, as (module, what it is for)."""
+    gone = []
+    for mod, why in BUNDLED:
+        if subprocess.run([py, "-c", f"import {mod}"], capture_output=True).returncode != 0:
+            gone.append((mod, why))
+    return gone
 
 
 def main():
@@ -105,6 +123,14 @@ def main():
         print("or, with a machine-wide Python, in an environment of its own:")
         print("    python -m venv .venv-build")
         print("    .venv-build\\Scripts\\python -m pip install -r requirements-build.txt")
+        return 2
+    gone = missing_from(py)
+    if gone:
+        print(f"[REFUSED] {py} has PyInstaller but not everything a build carries:")
+        for mod, why in gone:
+            print(f"    {mod:<8} {why}")
+        print("Install them into the same interpreter:")
+        print(f"    \"{py}\" -m pip install -r requirements-build.txt")
         return 2
 
     # A stale bundle is worse than no bundle: a renamed or deleted module

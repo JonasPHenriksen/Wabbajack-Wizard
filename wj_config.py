@@ -22,7 +22,7 @@ import re
 
 import wj_paths
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 APP_NAME = "WabbajackWizard"
 USER_AGENT = f"{APP_NAME}/{__version__}"
 

@@ -12,6 +12,8 @@
 
 pyinstaller>=6.16
 
-# The bundle must carry the same hashing the scripts use, so it has to be
-# installed here too - PyInstaller can only package what it can import.
-xxhash>=3.0
+# The bundle carries everything the scripts use - xxhash for the hashing,
+# pywebview (and pythonnet, which it brings) for the download window - so
+# all of requirements.txt has to be here too: PyInstaller can only package
+# what it can import, and build.py refuses to build without them.
+-r requirements.txt

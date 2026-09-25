@@ -12,11 +12,20 @@ API key and your wj_settings.json can never ride along - they are all
 untracked, and the zip is checked for them afterwards regardless. The version
 comes from wj_config.py and must match the top entry of CHANGELOG.md, or this
 refuses; the release notes are that entry, with the install steps appended.
+
+The release is tagged: v<version>, annotated, on HEAD. A tag of that name on
+any other commit refuses the release before anything is built, since two
+commits cannot both be one version; pushing the tag is left to you.
+
+Git is the one on PATH, or else the copy kept inside this folder under
+.mingit\\ that git.bat runs - on a machine where nothing is installed, that is
+the only git there is.
 """
 
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -24,6 +33,38 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import wj_config as CFG
+
+# git.bat's git: MinGit unpacked inside the project.
+MINGIT = os.path.join(HERE, ".mingit", "cmd", "git.exe")
+
+
+def git():
+    """The command that runs git here, or None when there is none: git on
+    PATH first, then the MinGit copy git.bat uses. subprocess cannot run
+    git.bat itself - a .bat is not a program CreateProcess starts - so the
+    copy's own git.exe is named, with its folder first on PATH the way
+    git.bat puts it, so its credential helper and hooks find the same git."""
+    found = shutil.which("git")
+    if found:
+        return [found]
+    if os.path.isfile(MINGIT):
+        os.environ["PATH"] = os.path.dirname(MINGIT) + os.pathsep + os.environ.get("PATH", "")
+        return [MINGIT]
+    return None
+
+
+def tag_problem(g, tag):
+    """Why `tag` cannot be put on HEAD, or None: absent, or already there."""
+    at = subprocess.run(g + ["rev-list", "-n", "1", tag], cwd=HERE,
+                        capture_output=True, text=True)
+    if at.returncode != 0:
+        return None                                   # no such tag yet
+    head = subprocess.run(g + ["rev-parse", "HEAD"], cwd=HERE,
+                          capture_output=True, text=True).stdout.strip()
+    if at.stdout.strip() != head:
+        return (f"{tag} already exists, on {at.stdout.strip()[:7]}, not on HEAD "
+                f"({head[:7]}): one version cannot be two commits")
+    return None
 
 # Anything matching these must never be in a release. Belt and braces: they
 # are all untracked, but a release is the one place to check twice.
@@ -61,20 +102,29 @@ def main():
         print(f"[REFUSED] wj_config.__version__ is {version} but CHANGELOG.md's top entry "
               f"is {(entry or '').splitlines()[0] if entry else 'missing'}. Make them agree.")
         return 2
-    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=HERE,
+    g = git()
+    if g is None:
+        print("[REFUSED] No git: none on PATH, and no MinGit copy in .mingit\\ here.")
+        return 2
+    dirty = subprocess.run(g + ["status", "--porcelain"], cwd=HERE,
                            capture_output=True, text=True).stdout.strip()
     if dirty:
         print("[REFUSED] The working tree has uncommitted changes; a release is built "
               "from a commit:")
         print(dirty)
         return 2
+    tag = f"v{version}"
+    why = tag_problem(g, tag)
+    if why:
+        print(f"[REFUSED] {why}.")
+        return 2
 
     dist = os.path.join(HERE, "dist")
     os.makedirs(dist, exist_ok=True)
     name = f"WabbajackWizard-v{version}"
     zip_path = os.path.join(dist, name + ".zip")
-    subprocess.check_call(["git", "archive", "--format=zip", f"--prefix={name}/",
-                           "-o", zip_path, "HEAD"], cwd=HERE)
+    subprocess.check_call(g + ["archive", "--format=zip", f"--prefix={name}/",
+                               "-o", zip_path, "HEAD"], cwd=HERE)
 
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
@@ -95,7 +145,8 @@ def main():
         f"**WabbajackWizard-v{version}.zip** - the source, for Python 3.8 or newer:",
         "",
         "1. Unzip anywhere; a mapped network share is fine.",
-        "2. Run `setup_env.bat` once. It creates `.venv-win` and installs xxhash.",
+        "2. Run `setup_env.bat` once. It installs xxhash and pywebview into `.python\\`",
+        "   when an interpreter is unpacked there, else into a new `.venv-win`.",
         "3. Optional: copy `wj_settings.example.json` to `wj_settings.json` and change",
         "   what differs, or use the window's Settings tab.",
         "4. Run `run.bat` for the window, or `run.bat --wizard` for the console.",
@@ -106,11 +157,17 @@ def main():
     notes_path = os.path.join(dist, name + ".md")
     io.open(notes_path, "w", encoding="utf-8", newline="").write(notes)
 
+    tagged = subprocess.run(g + ["tag", "-a", tag, "-m", f"Wabbajack Wizard {version}", "HEAD"],
+                            cwd=HERE, capture_output=True, text=True)
+    if tagged.returncode != 0 and "already exists" not in (tagged.stderr or ""):
+        print(f"[WARN] Could not tag {tag}: {tagged.stderr.strip()}")
+
     print(f"{zip_path}")
     print(f"  {len(names)} file(s), {os.path.getsize(zip_path) / 2 ** 20:.2f} MB")
     for n in sorted(names):
         print("   ", n)
     print(f"{notes_path}")
+    print(f"Tagged {tag} on HEAD. Push it with:  git push origin {tag}")
     return 0
 
 

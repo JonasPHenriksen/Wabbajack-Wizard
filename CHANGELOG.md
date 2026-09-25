@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0 — unreleased
+## 1.3.0 — 2026-09-25
 
 The first five additions and three fixes below were made after the 1.2.0
 commit, on 2026-09-19 and 20, and are in the build that was zipped as 1.2.0
@@ -206,6 +206,15 @@ on the 20th. They are recorded here, under the release that carries them.
   window measured still looked in Fallout4VR, until the next start. Every
   copy now follows at once. Only `ARCHIVE_ROOT` and `MANIFEST_DIR` still wait
   for a restart, as the Settings tab says.
+- **The release tooling had fallen behind the folder it lives in.**
+  `release.py` ran a `git` that is not on PATH here - only `git.bat` is - so
+  it could not run at all. It now finds git on PATH or the MinGit copy
+  `git.bat` runs, and tags each release `v<version>`, refusing when a tag of
+  that name is already on another commit. `requirements-build.txt` left out
+  pywebview, so a build made in a fresh environment quietly lacked the
+  download window; it now takes in `requirements.txt`, and `build.py` refuses
+  to build without xxhash, pywebview and pythonnet. 1.1.0 and 1.2.0, never
+  tagged, are tagged on their release commits.
 - `wj_settings.example.json`, which gives every setting at its default, gave
   `NEXUS_MODE` as `assist`; the default is `skip`.
 - The test suites that import the scripts from the checkout set up logging
