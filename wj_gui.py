@@ -43,6 +43,7 @@ import wj_wizard as W
 import wj_gallery as G
 import wj_wabbajack as WB
 import wj_config as CFG
+import wj_keystore as KS
 
 APP_TITLE = f"Wabbajack Wizard {CFG.__version__}"
 POLL_MS = 100
@@ -2181,7 +2182,7 @@ class App:
     # ==================================================================
     def _build_settings(self, f):
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(2, weight=1)
+        f.rowconfigure(3, weight=1)
         ttk.Label(f, text=f"Your settings live in {CFG.SETTINGS_FILE} beside the scripts; only what "
                           f"differs from the shipped defaults is written. Paths and the manifest "
                           f"folder take effect after a restart; everything else at once.",
@@ -2198,6 +2199,25 @@ class App:
         self.settings_note = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.settings_note).pack(side="left", padx=(12, 0))
 
+        # The API key is not a setting - it is a secret, and has no place in
+        # the settings file - so it has a section of its own. It is never
+        # shown here, only where it is kept.
+        keybox = ttk.LabelFrame(f, text="Nexus API key", padding=8)
+        keybox.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        self.key_status = tk.StringVar(value="")
+        ttk.Label(keybox, textvariable=self.key_status, wraplength=1000,
+                  justify="left").pack(side="top", anchor="w")
+        kb = ttk.Frame(keybox)
+        kb.pack(side="top", anchor="w", pady=(6, 0))
+        self.key_move_btn = ttk.Button(kb, text=f"Move {KS.KEY_FILE} into Credential Manager",
+                                       command=self.key_move_in)
+        self.key_move_btn.pack(side="left")
+        self.key_set_btn = ttk.Button(kb, text="Set a key...", command=self.key_set)
+        self.key_set_btn.pack(side="left", padx=6)
+        self.key_forget_btn = ttk.Button(kb, text="Forget the stored key",
+                                         command=self.key_forget_stored)
+        self.key_forget_btn.pack(side="left")
+
         # The form scrolls. Twenty-odd rows outgrow the tab at the default
         # window size, more so under the dark theme's taller rows, and a
         # setting that cannot be reached without enlarging the window is one
@@ -2206,8 +2226,8 @@ class App:
         canvas = self._register_canvas(tk.Canvas(f, highlightthickness=0, borderwidth=0))
         vsb = ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
-        canvas.grid(row=2, column=0, sticky="nsew")
-        vsb.grid(row=2, column=1, sticky="ns")
+        canvas.grid(row=3, column=0, sticky="nsew")
+        vsb.grid(row=3, column=1, sticky="ns")
         form = ttk.Frame(canvas)
         item = canvas.create_window((0, 0), window=form, anchor="nw")
         form.columnconfigure(1, weight=1)
@@ -2266,8 +2286,59 @@ class App:
             self.setting_vars[key] = var
             row += 1
 
+    def key_fill(self):
+        """The API key section, from where the downloader would find the key
+        now: a line saying where, and the buttons that apply to that."""
+        self.key_status.set(f"The key the downloader uses is {KS.describe(A.HERE)}. It is "
+                            f"never shown or logged. Credential Manager keeps it with this "
+                            f"Windows account, so a copy of this folder on another machine "
+                            f"needs it again.")
+        can = KS.available()
+        self.key_move_btn.configure(state="normal" if can and KS.read_file(A.HERE) else "disabled")
+        self.key_set_btn.configure(state="normal" if can else "disabled")
+        self.key_forget_btn.configure(state="normal" if can and KS.read_stored() else "disabled")
+
+    def key_move_in(self):
+        if not messagebox.askyesno(
+                "Nexus API key",
+                f"Move the key in {KS.KEY_FILE} into Windows Credential Manager, and delete the "
+                f"file once the stored copy reads back the same?\n\nA copy of this folder on "
+                f"another machine will then need the key given to it again.", parent=self.root):
+            return
+        try:
+            W.out(KS.move_file_in(A.HERE))
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Nexus API key", f"Not moved: {e}.\n\n{KS.KEY_FILE} is untouched.",
+                                 parent=self.root)
+        self.key_fill()
+
+    def key_set(self):
+        key = simpledialog.askstring(
+            "Nexus API key", "Paste your Personal API key from nexusmods.com (your account, "
+                             "API Keys). It is kept in Windows Credential Manager, and not "
+                             "shown again.", show="*", parent=self.root)
+        if key is None:
+            return
+        try:
+            KS.store(key)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Nexus API key", f"Not stored: {e}.", parent=self.root)
+        else:
+            W.out(f"The Nexus API key is stored in Windows Credential Manager as {KS.TARGET}.")
+        self.key_fill()
+
+    def key_forget_stored(self):
+        if not messagebox.askyesno(
+                "Nexus API key", "Remove the key from Windows Credential Manager? Nexus "
+                                 "downloads will then need one again.", parent=self.root):
+            return
+        KS.forget()
+        W.out("The Nexus API key was removed from Windows Credential Manager.")
+        self.key_fill()
+
     def settings_fill(self, values=None):
         self.tab_filled("Settings")
+        self.key_fill()
         values = values or CFG.current_settings()
         for key, var in self.setting_vars.items():
             v = values.get(key)

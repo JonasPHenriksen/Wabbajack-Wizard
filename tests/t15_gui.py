@@ -321,6 +321,56 @@ check("  the running process has the defaults", CFG.TRASH_FOLDER == "Trash"
 check("  and the form shows them again", app.setting_vars["TRASH_FOLDER"].get() == "Trash"
       and app.setting_vars["UNMANAGED_FOLDER"].get() == "Unmanaged")
 
+# The API key section, against a stand-in for Credential Manager: this
+# suite never reaches the key the machine's account keeps.
+print("\n 15.6b  the Nexus API key section")
+import wj_keystore as KS
+
+
+class KeyStore:
+    def __init__(self):
+        self.data = {}
+
+    def read(self, t):
+        return self.data.get(t)
+
+    def write(self, t, s, u):
+        self.data[t] = s
+
+    def delete(self, t):
+        return self.data.pop(t, None) is not None
+
+
+keys = KeyStore()
+KS.STORE = keys
+keyfile = os.path.join(box.tools, KS.KEY_FILE)
+io.open(keyfile, "w", encoding="utf-8").write("gui-test-key\n")
+app.settings_fill()
+check("the section says the key is in the file, in plain text",
+      "plain text" in app.key_status.get() and "gui-test-key" not in app.key_status.get(),
+      app.key_status.get())
+check("  and offers to move it", str(app.key_move_btn.cget("state")) == "normal"
+      and str(app.key_forget_btn.cget("state")) == "disabled")
+DLG.calls.clear()
+app.key_move_in()
+check("moving asks first, then stores it and deletes the file",
+      any(k == "ask" for k, _t, _x in DLG.calls) and keys.data.get(KS.TARGET) == "gui-test-key"
+      and not os.path.exists(keyfile), str(DLG.calls))
+check("  and the section now says Credential Manager",
+      "Credential Manager, as" in app.key_status.get()
+      and str(app.key_move_btn.cget("state")) == "disabled"
+      and str(app.key_forget_btn.cget("state")) == "normal", app.key_status.get())
+REAL_ASK = GUI.simpledialog.askstring
+GUI.simpledialog.askstring = lambda *a, **k: "typed-key"
+app.key_set()
+GUI.simpledialog.askstring = REAL_ASK
+check("a key typed in is stored", keys.data.get(KS.TARGET) == "typed-key")
+check("  and never reaches the log", "typed-key" not in log_text())
+app.key_forget_stored()
+check("forgetting it empties the store", KS.TARGET not in keys.data)
+check("  and the section says so", "not set" in app.key_status.get(), app.key_status.get())
+KS.STORE = None
+
 # ---------------------------------------------------------------- 15.7
 print("\n 15.7  a running Wabbajack blocks moves until it is closed")
 WB.running_processes = lambda: [(1234, "Wabbajack.exe")]

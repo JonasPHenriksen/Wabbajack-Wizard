@@ -68,6 +68,20 @@ on the 20th. They are recorded here, under the release that carries them.
   name or size, the hash check after the download says whether it was the
   same bytes, and a file nothing matches is recorded and passed over too.
   The listing is asked for once per mod and remembered for the run.
+- **The Nexus API key can live in Windows Credential Manager.** It was read
+  from `NEXUS_API_KEY` or from `nexus_api_key.txt`, in plain text in a folder
+  on a share another machine mounts too, while git's token for the same
+  checkout went to Credential Manager so the folder would hold no secret. The
+  key is now looked for on the command line, then in `NEXUS_API_KEY`, then in
+  Credential Manager, then in the file. The Settings tab has a **Nexus API
+  key** section that says where the key is found - never what it is - and
+  moves the file's key into Credential Manager, deleting the file only once
+  the stored copy reads back the same; it also takes a key typed in, or
+  forgets the stored one. `run.bat --store-nexus-key`, `--forget-nexus-key`
+  and `--nexus-key-status` do the same from the console, and a run that reads
+  the key from the file says so. Nothing is installed for it: Credential
+  Manager is part of Windows, reached through its own API. No test suite
+  reaches the account's credentials.
 - **A runtime folder.** What the tools write as they run - the logs, the
   state file, the manifest cache, the lock, the files an assist session
   shares with the `nxm://` handler, and the records of what stage 5 took -
@@ -152,7 +166,7 @@ on the 20th. They are recorded here, under the release that carries them.
   folder - were appended to the real `wj_autoupdate.log`. They now log into a
   scratch folder the run removes.
 
-Tests: 1089 checks across 17 sandbox suites, up from 895 across 16.
+Tests: 1133 checks across 18 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 

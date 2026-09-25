@@ -533,6 +533,8 @@ run.bat --rediscover                  re-match local manifests against the feeds
 run.bat --nexus-mode skip             leave Nexus files to Wabbajack
 run.bat --selftest                    check upstream formats still read as expected
 run.bat --order largest               fetch the big files first for one run
+run.bat --store-nexus-key             keep the Nexus API key in Windows Credential Manager
+run.bat --nexus-key-status            say where the key is found, never what it is
 ```
 
 Exit codes: `0` clean, `1` finished with problems, `2` could not start,
@@ -675,7 +677,20 @@ Stacked tabs are the accepted cost of using your own browser and your own
 session, which is the only thing that actually works.
 
 An API key is required either way — it is what redeems the key from each click.
-Put it in `nexus_api_key.txt` (gitignored) or `NEXUS_API_KEY`.
+It is looked for on the command line (`--apikey`), then in `NEXUS_API_KEY`, then
+in Windows Credential Manager, then in `nexus_api_key.txt` beside the scripts
+(gitignored). The file is plain text in a folder on a share another machine
+mounts too, so the Settings tab's **Nexus API key** section can move the key
+into Credential Manager - where git's token for this checkout already goes, so
+the folder holds no secret - and deletes the file only once the stored copy
+reads back the same. It also takes a key typed in, or forgets the stored one.
+From the console, `run.bat --store-nexus-key` moves the file's key, or asks for
+one without showing it when there is no file; `--forget-nexus-key` removes it,
+and `--nexus-key-status` says where the key is found, never what it is. The
+cost is the git token's: Credential Manager keeps the key with this Windows
+account, so a copy of the folder on another machine needs it given again.
+Nothing is installed for any of this - Credential Manager is part of Windows,
+reached through its own API.
 
 ## Handing a list to Wabbajack
 
@@ -832,6 +847,7 @@ recognised (if unfetchable) source rather than "unknown".
 | `wj_wizard.py` | the console wizard, and the per-stage helpers both front ends share |
 | `wj_downloader.py` | fetches archives; also the shared library for manifest parsing, hashing and the on-disk index |
 | `wj_assistwin.py` | the download window assist mode shows Nexus pages in: WebView2 through pywebview, one page at a time, its own login |
+| `wj_keystore.py` | where the Nexus API key is found, in order, and keeping it in Windows Credential Manager rather than in a file |
 | `wj_sorter.py` | moves archives between pools |
 | `wj_cdn.py` | the Wabbajack CDN's multi-part protocol |
 | `wj_merge_pool.py` | folds one game's pool folder into another's, once: renames, hash-proven drops, a record |
@@ -846,7 +862,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1089 checks across seventeen suites. None of them touch the live archive pools:
+environment instead). 1133 checks across eighteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
@@ -874,6 +890,7 @@ suite run on its own keeps its sandbox either way.
 | `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, and the Start tab opening a second window from the first one's file without measuring anything |
 | `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
 | `t17_settings` | what each setting may be: folder names checked for what they would name, one folder never two things at once, text that has to say something, a bad file at start-up, a refused value never written, and the purge and 5c refusing a trash folder that is a pool or a modlist's own |
+| `t18_keystore` | where the Nexus API key is looked for and in what order, moving the file's key into Credential Manager and keeping the file when the store refuses or gives back something else, the console flags; against a stand-in store, so no suite reaches the account's credentials (`WJ_TEST_CREDMAN=1` adds one round trip through the real one, under a test name) |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the

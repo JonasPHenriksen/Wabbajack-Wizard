@@ -53,9 +53,10 @@ Layout:
 
 API key:
   Account Settings -> API Keys -> "Personal API Key" on nexusmods.com. Supply by
-  --apikey, the NEXUS_API_KEY env var, a nexus_api_key.txt file next to this
-  script, or the interactive prompt. The key is sent only to api.nexusmods.com
-  as the documented `apikey` header and is never written to the log.
+  --apikey, the NEXUS_API_KEY env var, Windows Credential Manager (see
+  wj_keystore.py), a nexus_api_key.txt file next to this script, or the
+  interactive prompt. The key is sent only to api.nexusmods.com as the
+  documented `apikey` header and is never written to the log.
 
 Notes:
   * Every download is verified by xxHash64, the hash Wabbajack itself uses.
@@ -97,6 +98,7 @@ from datetime import datetime
 from collections import defaultdict
 
 import wj_paths
+import wj_keystore
 
 # Wabbajack CDN multi-part support. Files on authored-files.wabbajack.org are
 # served as a definition plus numbered parts; a plain GET on the URL returns a
@@ -1851,20 +1853,16 @@ def confirm(prompt, assume_yes=False):
 # API key resolution (never logged)
 # ----------------------------------------------------------------------
 def resolve_api_key(cli_key, script_dir, prompt=True):
-    if cli_key:
-        return cli_key.strip()
-    env = os.environ.get("NEXUS_API_KEY")
-    if env:
-        return env.strip()
-    keyfile = os.path.join(script_dir, "nexus_api_key.txt")
-    if os.path.isfile(keyfile):
-        try:
-            with open(keyfile, encoding="utf-8") as f:
-                k = f.readline().strip()
-                if k:
-                    return k
-        except OSError:
-            pass
+    """The Nexus API key: --apikey, NEXUS_API_KEY, Windows Credential Manager,
+    then nexus_api_key.txt beside the scripts (see wj_keystore), then the
+    prompt. Never logged; only where it came from is."""
+    key, source = wj_keystore.resolve(cli_key, script_dir)
+    if key:
+        if source == wj_keystore.FROM_FILE:
+            LOG.info("[NOTE] The Nexus API key was read from %s, in plain text beside the "
+                     "scripts. The Settings tab, or run.bat --store-nexus-key, moves it into "
+                     "Windows Credential Manager, out of the folder.", wj_keystore.KEY_FILE)
+        return key
     if not prompt:
         return ""
     try:
@@ -2488,7 +2486,8 @@ def main():
         description="Download the archives a Wabbajack modlist needs (Premium or free).")
     parser.add_argument("--game", help="Pre-select a game (GameType or friendly name).")
     parser.add_argument("--list", dest="preset", help="Pre-select a modlist number.")
-    parser.add_argument("--apikey", help="Nexus Personal API key (else env/file/prompt).")
+    parser.add_argument("--apikey", help="Nexus Personal API key (else NEXUS_API_KEY, Windows "
+                                         "Credential Manager, nexus_api_key.txt, or a prompt).")
     parser.add_argument("--dest", help="Override the destination folder for downloads.")
     parser.add_argument("--dry-run", action="store_true",
                         help="List what would be downloaded but fetch nothing.")

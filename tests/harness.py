@@ -13,6 +13,10 @@ import sys
 import zipfile
 
 REAL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Neither a suite nor anything it runs reaches the Nexus key this Windows
+# account keeps in Credential Manager: a suite that wants a store puts a
+# stand-in in wj_keystore.STORE.
+os.environ["WJ_NO_CREDENTIAL_STORE"] = "1"
 # The interpreter the suites run the scripts with: the one kept inside the
 # project when there is one, else the environment setup_env.bat made.
 PY = os.path.join(REAL, ".python", "python.exe")
@@ -20,7 +24,7 @@ if not os.path.isfile(PY):
     PY = os.path.join(REAL, ".venv-win", "Scripts", "python.exe")
 SCRIPTS = ("wj_autoupdate.py", "wj_wizard.py", "wj_config.py",
            "wj_downloader.py", "wj_paths.py", "wj_assistwin.py",
-           "wj_sorter.py", "wj_cdn.py",
+           "wj_sorter.py", "wj_cdn.py", "wj_keystore.py",
            "wj_wabbajack.py", "wj_gallery.py", "wj_merge_pool.py")
 
 
@@ -90,8 +94,11 @@ class Sandbox:
 
     # -- running the code under test ---------------------------------
     def run(self, script, args, expect=None, env_extra=None):
+        # No Nexus key reaches a sandboxed script from this machine: not the
+        # environment's, and not the one this account keeps in Windows
+        # Credential Manager (see wj_keystore).
         env = dict(os.environ, PYTHONUNBUFFERED="1",
-                   WJ_MANIFEST_DIR=self.manifests)
+                   WJ_MANIFEST_DIR=self.manifests, WJ_NO_CREDENTIAL_STORE="1")
         env.pop("NEXUS_API_KEY", None)
         if env_extra:
             env.update(env_extra)

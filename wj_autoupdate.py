@@ -2189,6 +2189,45 @@ def cmd_run(args, state, tracked):
     return 1 if failures else 0
 
 
+def cmd_nexus_key(args):
+    """--store-nexus-key, --forget-nexus-key and --nexus-key-status.
+
+    Storing moves the key from nexus_api_key.txt into Windows Credential
+    Manager when the file holds one, and asks for it otherwise, without
+    echoing it. Nothing here needs the share, so it runs before bootstrap.
+    The key itself is never printed; only where it is."""
+    import wj_keystore as KS
+    if (args.store_nexus_key or args.forget_nexus_key) and not KS.available():
+        print("There is no Windows Credential Manager here, so the key stays in "
+              f"{KS.ENV_VAR} or {KS.KEY_FILE}.")
+        return 2
+    if args.forget_nexus_key:
+        print("The stored Nexus API key was removed." if KS.forget()
+              else "No Nexus API key was stored.")
+    elif args.store_nexus_key:
+        if KS.read_file(HERE):
+            try:
+                print(KS.move_file_in(HERE))
+            except (OSError, ValueError) as e:
+                print(f"Not moved: {e}. {KS.KEY_FILE} is untouched.")
+                return 1
+        else:
+            import getpass
+            try:
+                key = getpass.getpass("Your Nexus Personal API key (not shown as you type): ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 1
+            try:
+                KS.store(key)
+            except (OSError, ValueError) as e:
+                print(f"Not stored: {e}")
+                return 1
+            print(f"Stored in Windows Credential Manager as {KS.TARGET}.")
+    print(f"The Nexus API key is {KS.describe(HERE)}.")
+    return 0
+
+
 # ----------------------------------------------------------------------
 def main():
     global WJ, NEXUS_MODE
@@ -2259,8 +2298,18 @@ def main():
                          "interruption.")
     ap.add_argument("--allow-size-only", action="store_true",
                     help="Proceed without xxhash, checking sizes only.")
+    ap.add_argument("--store-nexus-key", action="store_true",
+                    help="Keep the Nexus API key in Windows Credential Manager: the one in "
+                         "nexus_api_key.txt, which is then deleted, or one you type.")
+    ap.add_argument("--forget-nexus-key", action="store_true",
+                    help="Remove the Nexus API key from Windows Credential Manager.")
+    ap.add_argument("--nexus-key-status", action="store_true",
+                    help="Say where the Nexus API key is found, never what it is.")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+
+    if args.store_nexus_key or args.forget_nexus_key or args.nexus_key_status:
+        return cmd_nexus_key(args)
 
     # A bare launch is the interactive wizard; the flags stay for scripted and
     # scheduled use. Keeping one entry point means run.bat needs no arguments

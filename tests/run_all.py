@@ -46,6 +46,7 @@ SUITES = [
     ("t15_gui.py", "the desktop window, driven through its own buttons"),
     ("t16_pool.py", "laying out a pool for a game you keep nothing for"),
     ("t17_settings.py", "settings: what a value may be, and what a bad one costs"),
+    ("t18_keystore.py", "the Nexus API key: where it is looked for, and Credential Manager"),
 ]
 
 total_pass = total_fail = 0
