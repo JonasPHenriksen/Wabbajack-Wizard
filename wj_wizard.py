@@ -1721,22 +1721,46 @@ def stage_updates(state, tracked):
 
     updates = [(k, e, p, f) for k, e, p, f, changed, _d in seen if changed]
     current = [(k, e, p, f) for k, e, p, f, changed, _d in seen if not changed]
+    installs = {row[3]: install_status(state, row[1], row[3], row[4]) for row in seen}
+    behind = [row for row in seen if (installs.get(row[3]) or {}).get("behind")]
+
+    def installed(f):
+        s = installs.get(f)
+        return (f"v{s['version'] or '?'}" + (" behind" if s["behind"] else "")) if s else "-"
 
     out()
     out(f"  UPDATE AVAILABLE ({len(updates)})")
     if not updates:
         out("    none - every tracked list is at its published version.")
     else:
-        out(f"    {'#':>3}  {'modlist':<44}{'have':>10} -> {'published':<12}{'manifest':>10}")
+        out(f"    {'#':>3}  {'modlist':<44}{'have':>10} -> {'published':<12}{'manifest':>10}"
+            f"  installed")
         for i, (_k, e, p, f) in enumerate(updates, 1):
             have = p.get("version") or "absent"
             out(f"    {i:>3}  {stem_of(f)[:43]:<44}{have[:10]:>10} -> "
-                f"{e['version'][:12]:<12}{human(e['size']):>10}")
+                f"{e['version'][:12]:<12}{human(e['size']):>10}  {installed(f)}")
 
     out()
     out(f"  UP TO DATE ({len(current)})")
     for _k, e, _p, f in current:
-        out(f"         {stem_of(f)[:52]:<53} {e['version']}")
+        out(f"         {stem_of(f)[:52]:<53} {e['version']}"
+            + (f"   installed {installed(f)}" if installs.get(f) else ""))
+
+    if behind:
+        out()
+        out(f"  INSTALLED, AND BEHIND WHAT IS PUBLISHED ({len(behind)})")
+        for _k, e, _p, f, _c, _d in behind:
+            s = installs[f]
+            out(f"         {stem_of(f)[:40]:<41} v{s['version'] or '?'} -> v{e['version']}"
+                f"   in {s['path']}")
+        a = ask("   [i] update an installed list end to end   "
+                + ("[f] fetch manifests only   " if updates else "") + "[s] skip",
+                ("i", "f", "s") if updates else ("i", "s"))
+        if a == "i":
+            return install_update_step(state, behind)
+        if a == "s":
+            out("  Skipped.")
+            return False
 
     if not updates:
         out()
@@ -1760,6 +1784,60 @@ def stage_updates(state, tracked):
     out()
     out(f"  {done} of {len(want)} manifest(s) updated.")
     return done > 0
+
+
+def install_update_step(state, rows):
+    """Stage 2's [i]: pick an installed list that is behind, make the checks
+    an install makes, say what will happen, and do it (update_install)."""
+    out()
+    for i, (_k, e, _p, f, _c, _d) in enumerate(rows, 1):
+        s = install_status(state, e, f, True) or {}
+        out(f"    {i:>3}  {stem_of(f)[:40]:<41} v{s.get('version') or '?'} -> v{e['version']}")
+    picks = choose(len(rows), "installed list", allow_all=False, single=True)
+    if picks is None:
+        out("  Skipped.")
+        return False
+    row = rows[picks[0]]
+    key, ent, _prev, fn, changed, _d = row
+    inst = install_status(state, ent, fn, changed) or {}
+    wj = WB.find_wabbajack()
+    if not wj or not wj.get("cli"):
+        out("  wabbajack-cli.exe was not found, so the install cannot be driven from here.")
+        return False
+    for name in WB.prune_old_versions(wj):
+        out(f"    Removed Wabbajack {name}, superseded by {wj['version']}.")
+    game = (load_records().get(fn) or {}).get("game")
+    ready, detail = WB.game_ready(wj.get("cli"), game)
+    out(f"    Game        {A.WJ.game_label(game) if game else '?'}  "
+        f"[{ {True: 'ok', False: 'BLOCKED', None: 'unknown'}[ready] }]")
+    out(f"                {detail}")
+    if ready is False:
+        out("  Not updating: the check above has to pass first.")
+        return False
+    update = WB.update_status(wj)
+    out(f"    Wabbajack   {update['text']}")
+    if update["outdated"] and ask("   [c] carry on with this version   [s] skip",
+                                  ("c", "s")) == "s":
+        out("  Skipped.")
+        return False
+    lines = [f"{stem_of(fn)}   v{inst.get('version') or '?'} -> v{ent['version']}",
+             f"install folder   {inst.get('path')}", ""]
+    if changed:
+        lines.append(f"1. fetch the new manifest ({human(ent.get('size') or 0)})")
+    lines += ["2. download what it is missing"
+              + (" - a click per Nexus file" if A.NEXUS_MODE == "assist" else ""),
+              "3. stage it, which un-stages anything else staged for that game",
+              "4. run Wabbajack's installer into the same folder"]
+    verdict = confirm_destructive(
+        "About to update an install", lines,
+        undo="Wabbajack updates the folder in place, as it does for any reinstall.")
+    if verdict != "yes":
+        out("  Skipped.")
+        return False
+    wait_for_wabbajack("Updating an install")
+    ok, message = update_install(state, row, A.NEXUS_MODE == "assist", wj)
+    out(("  Done: " if ok else "  Stopped: ") + message + ".")
+    return ok
 
 
 # ----------------------------------------------------------------------
@@ -2069,6 +2147,92 @@ def stage_prepare(records, state=None):
     return rc == 0
 
 
+def record_install(state, filename, target):
+    """Remember that Wabbajack installed this list into `target`, and which
+    version it was: the feed's, for a list the feeds describe, else the
+    manifest's own. Written to the state only when an install finished, so
+    it is a fact rather than an intention; where an install was last started
+    is kept apart, as `install`. Returns the record."""
+    stem = stem_of(filename)
+    key, entry = next(((k, v) for k, v in (state.get("lists") or {}).items()
+                       if v.get("file") == filename), (None, {}))
+    version = entry.get("version") or A.manifest_version(os.path.join(A.MANIFESTS, filename)) or ""
+    rec = {"path": target, "version": version, "key": key, "file": filename,
+           "when": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    state.setdefault("installed", {})[stem] = rec
+    A.save_state(state)
+    return rec
+
+
+def install_status(state, ent, filename, changed):
+    """For a tracked list: the install recorded for it and whether it is
+    behind what is published, or None when none is recorded here. Behind is
+    a newer published version than the manifest held (`changed`), or an
+    install of an older version than the one published."""
+    inst = (state.get("installed") or {}).get(stem_of(filename))
+    if not inst:
+        return None
+    behind = bool(changed) or bool(inst.get("version")
+                                   and inst.get("version") != (ent or {}).get("version"))
+    return dict(inst, behind=behind)
+
+
+def update_install(state, row, assist, wj):
+    """Bring one installed list up to date, end to end: its new manifest if
+    one is published, the archives that manifest is missing, the staging,
+    and Wabbajack's installer, run into the folder it was installed in.
+
+    `row` is one of pending_updates()' (key, entry, previous, filename,
+    changed, on_disk) tuples, `wj` what find_wabbajack() found. The caller
+    confirms, and makes the checks an install makes first: Wabbajack found
+    and able to see the game, and whether it is current. This stops at the
+    first step that fails. Returns (ok, message)."""
+    key, ent, prev, fn, changed, _on_disk = row
+    stem = stem_of(fn)
+    inst = (state.get("installed") or {}).get(stem) or {}
+    target = inst.get("path") or (state.get("install") or {}).get(stem)
+    if not target:
+        return False, "no install folder is recorded for this list"
+    if changed:
+        out(f"  1/4  Fetching {stem} v{ent['version']} ...")
+        if not fetch_updates(state, [(key, ent, prev, fn)]):
+            return False, "the new manifest could not be fetched; nothing else was done"
+        refresh_known_dirs()
+    else:
+        out(f"  1/4  {stem}'s manifest is already the published v{ent['version']}.")
+    records = load_records()
+    entry = records.get(fn)
+    st = list_status(entry) if entry else None
+    if st is None:
+        return False, "the manifest could not be read"
+    if st["missing"]:
+        out(f"  2/4  Downloading {st['missing']} missing archive(s), {human(st['bytes'])} ...")
+        download_list(records, fn, st, assist)
+        A.WJ.invalidate_existing_cache()
+        st = list_status(load_records().get(fn) or entry) or st
+    else:
+        out("  2/4  Every archive it needs is already here.")
+    if WB.running_processes():
+        return False, "Wabbajack is running, and staging would move archives under it"
+    out(f"  3/4  Staging {stem} ...")
+    rc = stage_list(state, fn, st)
+    if rc != 0:
+        return False, f"staging failed (sorter exited {rc})"
+    manifest = os.path.join(A.MANIFESTS, fn)
+    downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
+    problems = WB.check_paths(manifest, downloads, target)
+    if problems:
+        return False, "; ".join(problems)
+    out(f"  4/4  Installing into {target} ...")
+    rc = WB.run_install(wj["cli"], manifest, downloads, target,
+                        on_line=lambda line: out("  | " + line))
+    if rc != 0:
+        return False, (f"Wabbajack exited {rc}; the staged folder is untouched, so "
+                       f"running it again is safe")
+    rec = record_install(state, fn, target)
+    return True, f"{stem} is installed at {target}, v{rec['version'] or '?'}"
+
+
 def offer_install(state, filename, st):
     """Hand a freshly staged list to Wabbajack.
 
@@ -2197,6 +2361,7 @@ def offer_install(state, filename, st):
                         on_line=lambda l: out("  | " + l))
     rule()
     if rc == 0:
+        record_install(state, filename, target)
         out(f"  Wabbajack finished. {stem} is installed at {target}.")
     else:
         out(f"  Wabbajack exited {rc}. Its output above says why; the staged "

@@ -1054,6 +1054,32 @@ check("  and the file is back in Master",
 check("  and out of the trash", not os.path.exists(os.path.join(trash, "undo-me.7z")))
 check("  and the Space tab was measured again", not app.busy and app.space["masters"])
 
+# ---------------------------------------------------------------- 15.21
+print("\n 15.21  an install Wabbajack finishes is remembered")
+real = (WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready)
+WB.run_install = lambda cli, manifest, downloads, into, on_line=None: 0
+WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None, "cli": "stub-cli",
+                                       "version": "4.2.3.0"}
+WB.latest_release = lambda force=False: {"version": "4.2.3.0", "url": "u", "published": ""}
+WB.game_ready = lambda cli, game: (True, "found")
+try:
+    app.status_refresh()
+    settle()
+    app._offer_install("Keep.wabbajack")
+    settle()
+    into = os.path.join(box.root, "KeepInstall")
+    app.install_path.set(into)
+    DLG.calls.clear()
+    app.prepare_install()
+    settle()
+    inst = (app.state.get("installed") or {}).get("Keep")
+    check("the install is recorded where it went", bool(inst) and inst["path"] == into, str(inst))
+    app.start_fill()
+    check("  and the Start tab lists it", "installed with Wabbajack: 1" in app.cards["records"]["body"].get(),
+          app.cards["records"]["body"].get())
+finally:
+    WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready = real
+
 # ---- put everything back ---------------------------------------------------
 root.destroy()
 W.out = REAL_WOUT

@@ -674,14 +674,22 @@ class App:
         if staged:
             lines.append("staged for Wabbajack: "
                          + ", ".join(f"{v} ({k})" for k, v in sorted(staged.items())))
+        installed = self.state.get("installed") or {}
+        if installed:
+            lines.append(f"installed with Wabbajack: {len(installed)}"
+                         + listed(f"{stem}  v{i.get('version') or '?'}  in {i.get('path')}"
+                                  for stem, i in sorted(installed.items())))
         c["records"]["body"].set("\n".join(lines))
         c["records"]["when"].set("as it stands now")
 
         u = ov.get("updates")
         if u:
+            behind = u.get("behind") or []
             c["updates"]["body"].set(
                 f"{u.get('pending', 0)} of {u.get('total', 0)} tracked list(s) have a newer "
-                f"published version" + (listed(u.get("names")) or "."))
+                f"published version" + (listed(u.get("names")) or ".")
+                + (f"\n{len(behind)} install(s) behind what is published"
+                   + (listed(behind) or "") if behind else ""))
             c["updates"]["when"].set(f"checked {when_text(u.get('when'))}")
         else:
             c["updates"]["body"].set("Not checked yet. The Updates tab asks the published feeds, "
@@ -1549,11 +1557,15 @@ class App:
         self.action(bar, "Check the feeds", self.updates_check).pack(side="left")
         self.action(bar, "Fetch selected", self.updates_fetch).pack(side="left", padx=4)
         self.action(bar, "Fetch all updates", lambda: self.updates_fetch(all_updates=True)).pack(side="left")
+        self.action(bar, "Update the selected install", self.updates_install).pack(side="left", padx=12)
         self.updates_summary = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.updates_summary).pack(side="right")
+        # "installed" is what Wabbajack installed here, recorded when an
+        # install finished; "reinstall" says the install is older than the
+        # manifest held, which is itself the published one.
         cols = [("status", "", 90, "center"), ("modlist", "modlist", 380, "w"),
                 ("have", "you have", 110, "w"), ("pub", "published", 110, "w"),
-                ("size", "manifest", 100, "e")]
+                ("size", "manifest", 100, "e"), ("installed", "installed", 110, "w")]
         self.updates_table = make_table(f, cols, height=16)
         self.updates_table.grid(row=2, column=0, sticky="nsew")
 
@@ -1570,16 +1582,24 @@ class App:
             else:
                 self.tab_filled("Updates")
                 self.update_rows = sorted(seen, key=lambda t: (not t[4], W.stem_of(t[3]).lower()))
-                rows = []
+                rows, behind = [], []
                 for key, e, p, fn, changed, on_disk in self.update_rows:
-                    rows.append(("UPDATE" if changed else "ok", W.stem_of(fn),
+                    inst = W.install_status(self.state, e, fn, changed)
+                    if inst and inst["behind"]:
+                        behind.append(W.stem_of(fn))
+                    status = ("UPDATE" if changed
+                              else "reinstall" if inst and inst["behind"] else "ok")
+                    rows.append((status, W.stem_of(fn),
                                  p.get("version") or ("absent" if not on_disk else "unknown"),
-                                 e["version"], human(e["size"] or 0)))
+                                 e["version"], human(e["size"] or 0),
+                                 f"v{inst['version'] or '?'}" if inst else ""))
                 fill(self.updates_table.tree, rows)
                 n = sum(1 for t in self.update_rows if t[4])
-                self.updates_summary.set(f"{n} of {len(self.update_rows)} tracked list(s) have updates.")
+                self.updates_summary.set(f"{n} of {len(self.update_rows)} tracked list(s) have updates"
+                                         + (f"; {len(behind)} install(s) behind" if behind else "") + ".")
                 self.note_overview("updates", total=len(self.update_rows), pending=n,
-                                   names=[W.stem_of(t[3]) for t in self.update_rows if t[4]])
+                                   names=[W.stem_of(t[3]) for t in self.update_rows if t[4]],
+                                   behind=behind)
             if then is not None:
                 then()
         return self.run_job("Checking the feeds", job, done)
@@ -1610,6 +1630,76 @@ class App:
             self.data_changed("records")
             self.updates_check()
         self.run_job("Fetching manifests", job, done)
+
+    def updates_install(self):
+        """Update the selected installed list end to end: the checks an
+        install makes first, off the main thread; one confirmation naming
+        every step; then update_install() as one job."""
+        sel = selected_indices(self.updates_table.tree)
+        if not sel:
+            messagebox.showinfo("Update an install", "Select an installed list.", parent=self.root)
+            return
+        row = self.update_rows[sel[0]]
+        key, ent, _p, fn, changed, _d = row
+        inst = W.install_status(self.state, ent, fn, changed)
+        if not inst:
+            messagebox.showinfo("Update an install",
+                                f"No install of {W.stem_of(fn)} is recorded here. Install it once "
+                                f"from Prepare; after that this updates it in place.", parent=self.root)
+            return
+        game = (self.records.get(fn) or {}).get("game")
+
+        def check():
+            wj = self._find_wabbajack()
+            if not wj or not wj.get("cli"):
+                return {"wj": wj}
+            ready, detail = WB.game_ready(wj.get("cli"), game)
+            return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj)}
+
+        def checked(res):
+            wj = res["wj"]
+            if not wj or not wj.get("cli"):
+                messagebox.showerror("Update an install", "wabbajack-cli.exe was not found, so the "
+                                     "install cannot be driven from here.", parent=self.root)
+                return
+            if res["ready"] is False:
+                messagebox.showerror("Update an install", f"Not updating: {res['detail']}.",
+                                     parent=self.root)
+                return
+            upd = res["update"]
+            self._note_wabbajack(upd)
+            if upd.get("outdated") and not messagebox.askyesno(
+                    "Wabbajack is out of date", f"{upd['text']}.\n\nA modlist built for a newer "
+                    f"Wabbajack can fail to install on an older one. Carry on anyway?",
+                    icon="warning", parent=self.root):
+                return
+            lines = [f"{W.stem_of(fn)}   v{inst['version'] or '?'} -> v{ent['version']}",
+                     f"into {inst['path']}", ""]
+            if changed:
+                lines.append(f"1. fetch the new manifest ({human(ent.get('size') or 0)})")
+            lines += ["2. download what it is missing"
+                      + (", a click per Nexus file" if self.assist else ""),
+                      "3. stage it, which un-stages anything else staged for that game",
+                      "4. run Wabbajack's installer into the same folder"]
+            if not self.confirm("Update an install", lines,
+                                undo="Wabbajack updates the folder in place, as it does for any "
+                                     "reinstall. This runs for a long time; its output follows in "
+                                     "the log."):
+                return
+            if not self.wabbajack_clear("Updating an install"):
+                return
+
+            def done(res2):
+                ok, message = res2
+                (messagebox.showinfo if ok else messagebox.showwarning)(
+                    "Update an install", ("Done: " if ok else "Stopped: ") + message + ".",
+                    parent=self.root)
+                self.reload_records()
+                self.data_changed("records", "pools")
+                self.updates_check()
+            self.run_job(f"Updating {W.stem_of(fn)}",
+                         lambda: W.update_install(self.state, row, self.assist, wj), done)
+        self.run_job("Checking Wabbajack", check, checked)
 
     # ==================================================================
     # Incomplete + Prepare share the per-list status
@@ -1912,6 +2002,8 @@ class App:
 
         def done(rc):
             if rc == 0:
+                W.record_install(self.state, ctx["fn"], target)
+                self.data_changed("records")
                 messagebox.showinfo("Install", f"Wabbajack finished. {stem} is installed at {target}.",
                                     parent=self.root)
             else:

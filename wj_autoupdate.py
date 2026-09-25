@@ -681,6 +681,23 @@ def manifest_name(path):
         return None
 
 
+def manifest_version(path):
+    """The modlist's own Version field, for a list no feed describes."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            t = next((m for m in z.namelist()
+                      if os.path.basename(m).lower() == "modlist"), None)
+            if not t:
+                return None
+            with z.open(t) as fh:
+                data = json.load(fh)
+        v = data.get("Version") if isinstance(data, dict) else None
+        return str(v) if v else None
+    except Exception:
+        return None
+
+
 def load_state():
     p = runtime_path(STATE_FILE)
     try:

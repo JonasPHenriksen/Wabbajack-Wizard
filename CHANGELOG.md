@@ -68,6 +68,18 @@ on the 20th. They are recorded here, under the release that carries them.
   name or size, the hash check after the download says whether it was the
   same bytes, and a file nothing matches is recorded and passed over too.
   The listing is asked for once per mod and remembered for the run.
+- **Installs are remembered, and can be updated in place.** The install
+  folder was saved as an install started, but nothing was recorded when one
+  finished, so nothing could say which version was installed. A finished
+  `wabbajack-cli` install is now recorded - the list, the folder, the version
+  and when - and the Updates tab gains an **installed** column, with
+  `reinstall` for an install older than the manifest held. **Update the
+  selected install**, `[i]` in the console's stage 2, does the whole update in
+  one go: the new manifest if one is published, the archives it is missing,
+  the staging, and Wabbajack's installer into the same folder, after the
+  checks an install makes and one confirmation naming every step. It stops at
+  the first step that fails. The Start tab lists the installs, and those
+  behind.
 - **Undo a cleanup.** What stage 5c reclaims waits 30 days in a trash with a
   record of every file, but getting files back out meant moving them by
   hand. **Undo a cleanup...** in the Space tab, `[u]` in the console's 5d,
@@ -201,7 +213,7 @@ on the 20th. They are recorded here, under the release that carries them.
   folder - were appended to the real `wj_autoupdate.log`. They now log into a
   scratch folder the run removes.
 
-Tests: 1197 checks across 18 sandbox suites, up from 895 across 16.
+Tests: 1213 checks across 18 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 

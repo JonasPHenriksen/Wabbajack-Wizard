@@ -276,5 +276,108 @@ finally:
     G.fetch_json = real_fetch
 check("  as it is for an answer in the wrong shape", r is None, str(r))
 
+# ---------------------------------------------------------------- 9.8
+print("\n 9.8  an install is remembered, and brought up to date end to end")
+import json
+import zipfile
+from harness import Sandbox
+import wj_config as CFG
+box = Sandbox(os.path.join(BOXROOT, "sb9b"))
+saved_paths = (A.HERE, A.MANIFESTS, A.WJ.ARCHIVE_ROOT, CFG.ARCHIVE_ROOT)
+A.HERE, A.MANIFESTS = box.tools, box.manifests
+A.WJ.ARCHIVE_ROOT = CFG.ARCHIVE_ROOT = box.archives
+box.manifest("Some_@@_list", "Fallout4", [("a.7z", 5, "nexus")])
+with zipfile.ZipFile(os.path.join(box.manifests, "Own.wabbajack"), "w") as z:
+    z.writestr("modlist", json.dumps({"GameType": "Fallout4", "Version": "3.2.1",
+                                      "Archives": [{"Name": "o.7z", "Size": 1, "Hash": "A=",
+                                                    "State": {"$type": "HttpDownloader"}}]}))
+A.WJ.set_known_list_dirs(A.WJ.known_list_dirs_from(box.manifests))
+A.WJ.invalidate_existing_cache()
+fn = "Some_@@_list.wabbajack"
+target = os.path.join(box.root, "Installed")
+state = {"lists": {"Some/list": {"version": "1.0", "hash": "h", "file": fn}}}
+said = []
+real_out = W.out
+W.out = lambda msg="": said.append(str(msg))
+rec = W.record_install(state, fn, target)
+check("a finished install is recorded, with the feed's version and key",
+      rec["version"] == "1.0" and rec["key"] == "Some/list"
+      and state["installed"]["Some_@@_list"]["path"] == target, str(rec))
+check("  and saved with the state", (A.load_state().get("installed") or {}).get("Some_@@_list")
+      == state["installed"]["Some_@@_list"])
+own = W.record_install(state, "Own.wabbajack", os.path.join(box.root, "Own"))
+check("a list no feed describes takes the manifest's own version", own["version"] == "3.2.1"
+      and own["key"] is None, str(own))
+ent = {"version": "1.1", "size": 10, "hash": "h2", "title": "Some list", "updated": ""}
+check("an install at the published version is not behind",
+      W.install_status(state, {"version": "1.0"}, fn, False)["behind"] is False)
+check("  one with a newer manifest published is", W.install_status(state, ent, fn, True)["behind"])
+check("  and so is one older than a manifest already fetched",
+      W.install_status(state, ent, fn, False)["behind"])
+check("a list with nothing installed has no status",
+      W.install_status(state, ent, "Other.wabbajack", True) is None)
+
+calls = []
+real = (A.fetch_manifest, W.download_list, W.stage_list, WB.run_install, WB.running_processes)
+A.fetch_manifest = lambda e, f: calls.append(("fetch", f)) or True
+W.download_list = lambda records, f, st, assist: calls.append(("download", f, assist)) or (True, 0, st)
+W.stage_list = lambda state_, f, st: calls.append(("stage", f)) or 0
+WB.run_install = (lambda cli, manifest, downloads, into, on_line=None:
+                  calls.append(("install", os.path.basename(manifest), into)) or 0)
+WB.running_processes = lambda: []
+os.makedirs(os.path.join(box.archives, "Fallout4", "Some_@@_list"), exist_ok=True)
+row = ("Some/list", ent, state["lists"]["Some/list"], fn, True, True)
+try:
+    ok, message = W.update_install(state, row, False, {"cli": "stub-cli"})
+    check("every step runs, in order: fetch, download, stage, install",
+          [c[0] for c in calls] == ["fetch", "download", "stage", "install"], str(calls))
+    check("  the installer is run into the folder it was installed in",
+          calls[-1] == ("install", fn, target), str(calls[-1:]))
+    check("  and the record follows the new version",
+          ok and state["installed"]["Some_@@_list"]["version"] == "1.1", str((ok, message)))
+    calls.clear()
+    W.stage_list = lambda state_, f, st: calls.append(("stage", f)) or 1
+    ok, message = W.update_install(state, row[:4] + (False, True), False, {"cli": "stub-cli"})
+    check("a staging that fails stops it before the installer, and says so",
+          not ok and "staging failed" in message and [c[0] for c in calls] == ["download", "stage"],
+          str((message, calls)))
+    calls.clear()
+    WB.running_processes = lambda: [(9, "Wabbajack.exe")]
+    ok, message = W.update_install(state, row[:4] + (False, True), False, {"cli": "stub-cli"})
+    check("  so does a Wabbajack that is running, before anything is moved",
+          not ok and "running" in message and "stage" not in [c[0] for c in calls], message)
+    WB.running_processes = lambda: []
+    ok, message = W.update_install({"lists": {}}, row, False, {"cli": "stub-cli"})
+    check("  and a list with no install folder recorded is refused outright",
+          not ok and "no install folder" in message, message)
+
+    # The console's [i]: pick the list, confirm once, and the same update runs.
+    import builtins
+    answers = iter(["1", "y"])
+    real_input = builtins.input
+    builtins.input = lambda prompt="": next(answers)
+    stubs = (WB.find_wabbajack, WB.prune_old_versions, WB.game_ready, WB.update_status)
+    WB.find_wabbajack = lambda hint=None: {"dir": "d", "exe": None, "cli": "stub-cli",
+                                           "version": "4.2.3.0"}
+    WB.prune_old_versions = lambda wj, running=None: []
+    WB.game_ready = lambda cli, game: (True, "found")
+    WB.update_status = lambda wj, latest=None: {"text": "the newest release", "outdated": False,
+                                                "url": ""}
+    W.stage_list = lambda state_, f, st: calls.append(("stage", f)) or 0
+    calls.clear()
+    try:
+        ok = W.install_update_step(state, [row])
+    finally:
+        builtins.input = real_input
+        WB.find_wabbajack, WB.prune_old_versions, WB.game_ready, WB.update_status = stubs
+    check("the console's [i] runs the same update after one confirmation",
+          ok is True and [c[0] for c in calls] == ["fetch", "download", "stage", "install"],
+          str(calls) + " " + " | ".join(said[-6:]))
+finally:
+    A.fetch_manifest, W.download_list, W.stage_list, WB.run_install, WB.running_processes = real
+    W.out = real_out
+    A.HERE, A.MANIFESTS, A.WJ.ARCHIVE_ROOT, CFG.ARCHIVE_ROOT = saved_paths
+    shutil.rmtree(box.root, ignore_errors=True)
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

@@ -772,6 +772,23 @@ game is installed; the game is missing; or Wabbajack does not support that game
 at all (Dark Souls 3, for one, is not in its list). A missing CLI reports
 "unknown" rather than guessing either way.
 
+### Installs are remembered, and updated in place
+
+When `wabbajack-cli` finishes an install, the list, the folder, the version and
+the time are recorded in the state file; the version is the feed's for a list
+the feeds describe, else the manifest's own. The Updates tab then has an
+**installed** column, and `reinstall` in its status column means the install is
+older than the manifest held here, which is itself the published one.
+
+**Update the selected install** - `[i]` in the console's stage 2 - brings an
+installed list up to date in one go. It makes the checks an install makes
+(Wabbajack found, able to see the game, and whether it is current), names every
+step in one confirmation, then fetches the new manifest if one is published,
+downloads what that manifest is missing (a click per Nexus file in assist
+mode), stages it, and runs Wabbajack's installer into the same folder, which
+updates it in place. It stops at the first step that fails, and says which.
+The Start tab lists what is installed, and which installs are behind.
+
 ### Is Wabbajack itself current?
 
 The same step asks whether the Wabbajack it found is the newest release, since
@@ -908,7 +925,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1197 checks across eighteen suites. None of them touch the live archive pools:
+environment instead). 1213 checks across eighteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
