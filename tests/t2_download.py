@@ -866,5 +866,66 @@ check("  and moves on as files finish", "file 2 of 2" in D.run_note(), D.run_not
 D._RUN.update(total_files=0, started=None)
 check("  and says nothing outside a run", D.run_note() == "")
 
+# ---------------------------------------------------------------- 2.17
+print("\n 2.17  the two quick answers leave the folder as they found it")
+# Found 2026-09-25 checking a fresh build: --check-window left an empty
+# runtime folder beside the binaries, since main() made it before either
+# answer. Making it later must not cost a click nobody was listening for.
+box = Sandbox(os.path.join(BOXROOT, "sb2"))
+quiet = {"PYTHONDONTWRITEBYTECODE": "1"}        # no __pycache__ to tell apart from what it wrote
+before = sorted(os.listdir(box.tools))
+rc, out = box.run("wj_downloader.py", ["--check-window"], env_extra=quiet)
+check("--check-window answers, and writes nothing beside the scripts",
+      rc == 0 and re.search(r"^(yes|no): ", out, re.M) is not None
+      and sorted(os.listdir(box.tools)) == before,
+      out[-300:] + " new: " + str(sorted(set(os.listdir(box.tools)) - set(before))))
+
+CLICK = "nxm://skyrimspecialedition/mods/1/files/2?key=k&expires=1&user_id=3"
+heard = []
+lsn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+lsn.bind(("127.0.0.1", 0))
+lsn.listen(1)
+lsn.settimeout(30)
+
+
+def hear():
+    try:
+        conn, _ = lsn.accept()
+    except OSError:
+        return
+    with conn:
+        got = b""
+        while True:
+            part = conn.recv(4096)
+            if not part:
+                break
+            got += part
+    heard.append(got.decode("utf-8"))
+
+
+listening = threading.Thread(target=hear, daemon=True)
+listening.start()
+os.makedirs(box.runtime)
+io.open(os.path.join(box.runtime, D.NXM_PORT_FILE), "w", encoding="utf-8").write(
+    str(lsn.getsockname()[1]))
+rc, out = box.run("wj_downloader.py", ["--nxm", CLICK], env_extra=quiet)
+listening.join(10)
+lsn.close()
+check("a click is handed to the session listening for it", rc == 0 and heard == [CLICK + "\n"],
+      str(heard) + " " + out[-300:])
+check("  and nothing else is written, beside the scripts or in the runtime folder",
+      sorted(os.listdir(box.tools)) == sorted(before + [os.path.basename(box.runtime)])
+      and box.runtime_files() == [D.NXM_PORT_FILE],
+      str(sorted(os.listdir(box.tools))) + " " + str(box.runtime_files()))
+
+shutil.rmtree(box.runtime)
+rc, out = box.run("wj_downloader.py", ["--nxm", CLICK], env_extra=quiet)
+kept = os.path.join(box.runtime, D.NXM_FALLBACK_FILE)
+check("with nobody listening and no runtime folder yet, the click is kept for --nxm-file",
+      rc == 0 and box.runtime_files() == [D.NXM_FALLBACK_FILE]
+      and io.open(kept, encoding="utf-8").read() == CLICK + "\n",
+      str(box.runtime_files()) + " " + out[-300:])
+shutil.rmtree(box.root, ignore_errors=True)
+
 srv.shutdown()
 sys.exit(summary())

@@ -222,7 +222,7 @@ on the 20th. They are recorded here, under the release that carries them.
   folder - were appended to the real `wj_autoupdate.log`. They now log into a
   scratch folder the run removes.
 
-Tests: 1213 checks across 18 sandbox suites, up from 895 across 16.
+Tests: 1217 checks across 18 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 

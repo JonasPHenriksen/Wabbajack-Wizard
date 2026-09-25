@@ -1355,8 +1355,12 @@ def forward_nxm(url, run_dir):
             return
         except OSError:
             pass
-    # No listener: persist it so a later --nxm-file run can use it.
+    # No listener: persist it so a later --nxm-file run can use it. The
+    # runtime folder may not be there yet - nothing has run since this
+    # folder was unpacked, or upgraded from a version without one - and a
+    # click is not lost for that.
     try:
+        os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, NXM_FALLBACK_FILE), "a", encoding="utf-8") as f:
             f.write(url.strip() + "\n")
     except OSError:
@@ -2740,7 +2744,9 @@ def main():
     script_dir = wj_paths.app_dir(__file__)
     # Logs, the CSV reports and the files an assist session shares with the
     # nxm:// handler all live here; see wj_paths.RUNTIME_DIR. Made only once
-    # past the two quick answers below, which write nothing of their own.
+    # past the two quick answers below: --check-window writes nothing, and a
+    # forwarded click only reads the port file a listening session wrote -
+    # it makes the folder itself only to keep a click nobody was listening for.
     run_dir = os.path.join(script_dir, wj_paths.RUNTIME_DIR)
 
     # --- Handler-invocation entry point: forward the URL and exit immediately.
