@@ -1098,10 +1098,17 @@ def reload_settings():
 
     The GUI's Settings tab saves the file and calls this, so the change takes
     effect in the running process rather than after a restart. The downloader
-    module reads wj_config directly and needs no copy."""
+    module keeps copies of its own - the pool layout among them, which this
+    process plans with - so it is asked to refresh them as well: the copy
+    loaded as WJ, and the ordinary import, where anything made one."""
     global AUTO_TRACK, MANIFEST_DIR, EXCLUDE, TRACK, STAGE_LIST, NEXUS_MODE
     global KEEP_BACKUP_DAYS, REQUIRE_HASH, DOWNLOAD_ORDER, FREE_SPACE_MARGIN_GB
     global NOTIFY_URL
+    copies = {id(m): m for m in (WJ, sys.modules.get("wj_downloader")) if m is not None}
+    for mod in copies.values():
+        refresh = getattr(mod, "refresh_settings", None)
+        if refresh is not None:
+            refresh()
     AUTO_TRACK = CFG.AUTO_TRACK
     MANIFEST_DIR = CFG.MANIFEST_DIR
     EXCLUDE = list(CFG.EXCLUDE)

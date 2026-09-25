@@ -137,6 +137,13 @@ check("16.6f so they read as one pool, and protect each other",
       CFG.same_pool("Fallout4VR", "Fallout4"))
 check("16.6g the Skyrim family it shipped with is still mapped",
       CFG.same_pool("SkyrimVR", "SkyrimSpecialEdition"))
+# The window plans with the downloader module, which keeps copies of the
+# layout. Before refresh_settings() it went on looking in Fallout4VR until
+# the next start, while wj_config already said Fallout4.
+check("16.6i the downloader module this process plans with agrees at once",
+      A.WJ.game_folder("Fallout4VR") == "Fallout4"
+      and os.path.basename(A.WJ.resolve_game_dirs("Fallout4VR")[0]) == "Fallout4",
+      str((A.WJ.game_folder("Fallout4VR"), A.WJ.resolve_game_dirs("Fallout4VR")[0])))
 
 _, _, mapped6b = W.create_game_pool("Fallout4VR", "Fallout4")
 check("16.6h writing the same mapping twice is not a second write", not mapped6b)

@@ -127,8 +127,16 @@ on the 20th. They are recorded here, under the release that carries them.
   entry or a feed with such a key is left out and counted as a feed that did
   not answer, so the "any known modlist" rule does not delete on the gap, and
   a cache path that would leave the cache is refused.
+- **A change of settings was half applied in the running window.** The
+  downloader module keeps its own copies of part of the configuration, the
+  pool layout above all, and the window plans with it; saving the Settings
+  tab refreshed only the updater's copies. After Set up a pool folded
+  Fallout4VR into Fallout4, `wj_config` said Fallout4 while everything the
+  window measured still looked in Fallout4VR, until the next start. Every
+  copy now follows at once. Only `ARCHIVE_ROOT` and `MANIFEST_DIR` still wait
+  for a restart, as the Settings tab says.
 
-Tests: 1068 checks across 17 sandbox suites, up from 895 across 16.
+Tests: 1081 checks across 17 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 

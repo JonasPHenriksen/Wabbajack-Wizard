@@ -162,6 +162,37 @@ QUEUE_DEPTH = max(1, int(getattr(CFG, "ASSIST_QUEUE_DEPTH", 1) or 1))
 URL_REMINT_MARGIN_S = 300
 # Assist mode: show the pages in a window of our own rather than the browser.
 ASSIST_WINDOW = bool(getattr(CFG, "ASSIST_WINDOW", True))
+
+
+def refresh_settings():
+    """Copy the settings above from wj_config again, after they changed.
+
+    A process that changes the settings - the window's Settings tab, or Set
+    up a pool folding one game into another's pool - calls this through
+    wj_autoupdate.reload_settings(), so the layout this module plans with is
+    the one wj_config now says. Before this, a fold was half applied until
+    the next start: wj_config had Fallout4VR drawing from Fallout4 while this
+    module still looked in Fallout4VR. ARCHIVE_ROOT and the manifest folder
+    stay as they were, as the Settings tab says: they move everything at
+    once, and take effect on the next start. Every setting copied above has
+    to be copied here too; t17 checks each one."""
+    global GAME_FOLDERS, GAME_DISPLAY, EXCLUDE_POOL_DIRS, REQUIRE_HASH, DOWNLOAD_ORDER
+    global PARALLEL_SMALL, SMALL_BYTES, CLICK_AHEAD, QUEUE_DEPTH, ASSIST_WINDOW
+    GAME_FOLDERS = CFG.GAME_FOLDERS
+    GAME_DISPLAY = CFG.GAME_DISPLAY
+    EXCLUDE_POOL_DIRS = CFG.excluded_dirs()
+    REQUIRE_HASH = CFG.REQUIRE_HASH
+    DOWNLOAD_ORDER = CFG.DOWNLOAD_ORDER or "smallest"
+    PARALLEL_SMALL = max(1, int(getattr(CFG, "PARALLEL_SMALL_DOWNLOADS", 1) or 1))
+    SMALL_BYTES = int(getattr(CFG, "SMALL_DOWNLOAD_MB", 50) or 0) * (1 << 20)
+    CLICK_AHEAD = bool(getattr(CFG, "ASSIST_CLICK_AHEAD", False))
+    QUEUE_DEPTH = max(1, int(getattr(CFG, "ASSIST_QUEUE_DEPTH", 1) or 1))
+    ASSIST_WINDOW = bool(getattr(CFG, "ASSIST_WINDOW", True))
+    # The index of what is on disk skips the excluded folders, and those
+    # may just have changed.
+    invalidate_existing_cache()
+
+
 try:
     import wj_assistwin as _ASSISTWIN
 except Exception:                       # the module is optional at run time

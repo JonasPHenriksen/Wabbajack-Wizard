@@ -227,5 +227,41 @@ for bad in ("Starfield.", "NUL", "a/b", "Master"):
     check("17.13 %r is refused" % bad, bool(W.pool_folder_problem("Starfield", bad)))
 check("17.13b an ordinary one is not", W.pool_folder_problem("Starfield", "Starfield") is None)
 
+# ---------------------------------------------------------------- 17.14
+print("\n 17.14  a saved change reaches the downloader's own copies")
+# The downloader copies part of wj_config when it loads; the window then
+# plans with that copy in the same process. Every copied setting is changed
+# here and must follow, so a copy added later without a refresh shows up.
+fresh()
+vals = CFG.current_settings()
+vals.update({"GAME_FOLDERS": {"Fallout4VR": "Fallout4"}, "GAME_DISPLAY": {"Fallout4VR": "F4 VR"},
+             "EXCLUDE_POOL_DIRS": ["nolvus", "MO2"], "TRASH_FOLDER": "Recycled",
+             "REQUIRE_HASH": False, "DOWNLOAD_ORDER": "largest",
+             "PARALLEL_SMALL_DOWNLOADS": 3, "SMALL_DOWNLOAD_MB": 20,
+             "ASSIST_CLICK_AHEAD": True, "ASSIST_QUEUE_DEPTH": 4, "ASSIST_WINDOW": False})
+CFG.save_settings(vals, path=os.path.join(box.tools, "saved.json"))
+A.reload_settings()
+W_ = A.WJ
+followed = {
+    "GAME_FOLDERS": W_.game_folder("Fallout4VR") == "Fallout4",
+    "GAME_DISPLAY": W_.game_label("Fallout4VR") == "F4 VR",
+    "EXCLUDE_POOL_DIRS": {"mo2", "recycled"} <= W_.EXCLUDE_POOL_DIRS,
+    "REQUIRE_HASH": W_.REQUIRE_HASH is False,
+    "DOWNLOAD_ORDER": W_.DOWNLOAD_ORDER == "largest",
+    "PARALLEL_SMALL_DOWNLOADS": W_.PARALLEL_SMALL == 3,
+    "SMALL_DOWNLOAD_MB": W_.SMALL_BYTES == 20 << 20,
+    "ASSIST_CLICK_AHEAD": W_.CLICK_AHEAD is True,
+    "ASSIST_QUEUE_DEPTH": W_.QUEUE_DEPTH == 4,
+    "ASSIST_WINDOW": W_.ASSIST_WINDOW is False,
+}
+for key, ok in followed.items():
+    check("17.14 %s follows" % key, ok)
+check("17.14b and the pool index is rebuilt for the new exclusions",
+      not W_._EXISTING_CACHE)
+fresh()
+A.reload_settings()
+check("17.14c going back reaches it too", W_.game_folder("Fallout4VR") == "Fallout4VR"
+      and W_.PARALLEL_SMALL == 1 and W_.ASSIST_WINDOW is True)
+
 fresh()
 sys.exit(summary())
