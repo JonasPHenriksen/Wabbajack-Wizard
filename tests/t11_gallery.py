@@ -436,5 +436,53 @@ check("  and serves a subset request from the same snapshot",
 A.reset_feed_cache()
 check("reset_feed_cache clears it", A._FEED_CACHE["all"] is None)
 
+# ---------------------------------------------------------------- 11.12
+print("\n 11.12  a key that is not a plain name never becomes a path")
+# A list's key is <repo>/<machineURL>, both from the authors' own files, and
+# its report is cached at reports/<repo>/<machineURL>/status.json.gz.
+fresh_box()
+check("normalise refuses a machineURL with a path in it",
+      A.normalise({"machineURL": "..\\..\\up", "title": "Up", "game": "fallout4"}, "r") is None)
+kept = A.normalise({"machineURL": "fine", "title": "Fine", "game": "fallout4"}, "r")
+check("  and keeps a plain one", bool(kept) and kept["key"] == "r/fine", str(kept))
+refused = False
+try:
+    G.cache_file(G.report_rel("r/../../../escaped"))
+except G.GalleryError:
+    refused = True
+check("a cache path that would leave the cache is refused", refused)
+check("  while an ordinary one lands inside it",
+      G.cache_file(G.report_rel("r/fine")).startswith(os.path.abspath(G.cache_root())))
+r = rep("x", "1", [("ok.7z", 5, "nexus", "Valid"), ("..\\evil.7z", 5, "nexus", "Valid")])
+check("a report's archive whose name is not a plain file name is dropped",
+      [a["name"] for a in G.report_archives(r, WJ)] == ["ok.7z"])
+seed_cache(G.DISABLED_PATH, [{"links": {"machineURL": "..\\x"}, "title": "Bad"},
+                             {"links": {"machineURL": "ok"}, "title": "Ok"}])
+check("a retired list is held to the same rule", set(G.load_disabled()) == {"retired/ok"},
+      str(sorted(G.load_disabled())))
+
+REAL_HTTP_JSON = A.http_json
+
+
+def fake_http_json(url):
+    if url == A.REPOSITORIES_URL:
+        return {"good": "https://feed/good", "..\\bad": "https://feed/bad"}
+    if url == "https://feed/good":
+        return [{"machineURL": "fine", "title": "Fine", "game": "fallout4"},
+                {"machineURL": "../../up", "title": "Up", "game": "fallout4"}]
+    raise OSError("no such feed in this test: %s" % url)
+
+
+A.http_json = fake_http_json
+A.reset_feed_cache()
+try:
+    feeds, complete = A.load_feeds()
+finally:
+    A.http_json = REAL_HTTP_JSON
+    A.reset_feed_cache()
+check("a refused feed and a refused entry leave only the plain one",
+      set(feeds) == {"good/fine"}, str(sorted(feeds)))
+check("  and mark the picture incomplete, so nothing is deleted on it", complete is False)
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

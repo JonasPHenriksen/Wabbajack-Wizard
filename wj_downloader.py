@@ -411,8 +411,17 @@ def parse_meta(meta_text):
 # Manifest parsing
 # ----------------------------------------------------------------------
 def parse_manifest(wj_path):
+    """One manifest's archives, as every tool here reads them.
+
+    `unsafe` lists the archive names that are not plain file names. A
+    .wabbajack is a zip anyone could have edited, and an archive's name
+    becomes a path: joined onto the pool folder, '..\\..\\x' wrote its
+    download two folders above it. Such an archive is left out of the
+    record, and the downloader then refuses the whole list. Nothing
+    Wabbajack writes has one: none of the 17,238 names in the manifests held
+    here or the 302,621 in the published reports did, checked 2026-09-25."""
     record = {"game": None, "name": os.path.splitext(os.path.basename(wj_path))[0],
-              "archives": [], "readable": True}
+              "archives": [], "readable": True, "unsafe": []}
     base = os.path.basename(wj_path)
     LOG.info("  [SCAN] %s", base)
     try:
@@ -440,9 +449,16 @@ def parse_manifest(wj_path):
             name = a.get("Name") or a.get("NameLog")
             if not name:
                 continue
+            name = str(name)
+            why = CFG.plain_name_problem(name)
+            if why:
+                LOG.error("  [ERROR] %s lists an archive named %r, which is not a plain "
+                          "file name (%s). It is left out.", base, name, why)
+                record["unsafe"].append(name)
+                continue
             meta_text = a.get("Meta") or ""
             record["archives"].append({
-                "name":      str(name),
+                "name":      name,
                 "size":      a.get("Size") if isinstance(a.get("Size"), int) else None,
                 "hash":      a.get("Hash"),
                 "meta_text": meta_text,
@@ -610,8 +626,10 @@ def load_light_records(manifest_dir, cache_path, progress=None, files=None):
     for the cache to describe a file that is no longer there: entries for
     vanished manifests are dropped whenever the cache is rewritten.
 
-    Returns {filename: {"stamp", "game", "readable", "archives": [
-        {"name", "size", "kind"[, "raw"]} ]}}."""
+    Returns {filename: {"stamp", "game", "readable", "unsafe", "archives": [
+        {"name", "size", "kind"[, "raw"]} ]}}, `unsafe` counting the archives
+    left out for a name that is not a plain file name (see parse_manifest).
+    An entry an older version cached is held to the same rule as it is read."""
     try:
         with open(cache_path, encoding="utf-8") as f:
             cache = json.load(f)
@@ -631,7 +649,7 @@ def load_light_records(manifest_dir, cache_path, progress=None, files=None):
         stamp = [int(st.st_mtime), st.st_size]
         hit = cache.get(fn)
         if isinstance(hit, dict) and hit.get("stamp") == stamp:
-            out[fn] = hit
+            out[fn] = _plain_names_only(hit)
             continue
         misses.append((i, fn, full, stamp))
 
@@ -643,6 +661,7 @@ def load_light_records(manifest_dir, cache_path, progress=None, files=None):
             "stamp": stamp,
             "game": rec["game"],
             "readable": rec["readable"],
+            "unsafe": len(rec["unsafe"]),
             # The raw $type is kept only for the entries we could not
             # classify, so the cache stays small while an unrecognised
             # downloader can still be named in a report.
@@ -667,6 +686,18 @@ def load_light_records(manifest_dir, cache_path, progress=None, files=None):
         except OSError as e:
             LOG.debug("Could not write the manifest cache: %s", e)
     return out
+
+
+def _plain_names_only(entry):
+    """A cached light record with any archive whose name is not a plain file
+    name taken out and counted, as parse_manifest() does for a fresh read.
+    The entry itself when there is none, which is every entry in practice."""
+    archives = entry.get("archives") or []
+    kept = [a for a in archives if CFG.plain_name_problem(str(a.get("name") or "x")) is None]
+    if len(kept) == len(archives):
+        return entry
+    return dict(entry, archives=kept,
+                unsafe=int(entry.get("unsafe") or 0) + len(archives) - len(kept))
 
 
 def index_existing(game_base, known_lists=None):
@@ -1632,8 +1663,17 @@ def download_one(url, archive, dest_dir, results, quiet=False):
 
     `quiet` is for a download running beside others: no progress line of its
     own, and a CDN file is fetched with fewer part-workers so a pool of them
-    does not open a dozen connections at once."""
+    does not open a dozen connections at once.
+
+    This is where an archive's name becomes a path, so it is checked here
+    too, whoever the caller: a name that is not a plain file name would put
+    the file somewhere other than `dest_dir`."""
     name = archive["name"]
+    why = CFG.plain_name_problem(name)
+    if why:
+        LOG.error("  [SKIP] %r is not a plain file name (%s); not downloaded.", name, why)
+        _tally(results, False, name, f"not a plain file name: {why}")
+        return False
     dest = os.path.join(dest_dir, name)
 
     # WabbajackCDN URLs are directory prefixes, not files.
@@ -2559,6 +2599,17 @@ def main():
     if target.lower() in reserved_list_names():
         LOG.error("[TERMINATED] Modlist '%s' clashes with a reserved pool folder "
                   "name. Rename the .wabbajack file.", target)
+        sys.exit(2)
+
+    # A name that is not a plain file name is never Wabbajack's doing: the
+    # manifest has been edited, and one entry written to reach outside the
+    # pool says nothing good about the rest of it.
+    if record["unsafe"]:
+        LOG.error("[TERMINATED] %s names %d archive(s) that are not plain file names, "
+                  "e.g. %r. Downloaded under such a name a file can land outside the "
+                  "pool, and Wabbajack never writes one, so this manifest has been "
+                  "edited. Nothing is downloaded for it; fetch it again, or remove it.",
+                  target, len(record["unsafe"]), record["unsafe"][0])
         sys.exit(2)
 
     game_base, _, _ = resolve_game_dirs(chosen_game)

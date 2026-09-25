@@ -89,8 +89,22 @@ def cache_file(rel):
     """Local path for a remote file, mirroring its remote layout.
 
     Kept gzipped, with the '.gz' on the end, so a half-written cache entry is
-    obvious rather than being served back as truncated JSON."""
-    return os.path.join(cache_root(), *rel.split("/")) + ".gz"
+    obvious rather than being served back as truncated JSON.
+
+    A report's `rel` is built from a list's key, and the keys come from the
+    authors' own feeds. Those are refused on the way in when they are not
+    plain names (wj_autoupdate.normalise), and this is the last word: a path
+    that would leave the cache is a GalleryError, never a file written
+    wherever it pointed."""
+    root = os.path.abspath(cache_root())
+    path = os.path.abspath(os.path.join(root, *rel.split("/")) + ".gz")
+    try:
+        inside = os.path.commonpath([root, path]) == root
+    except ValueError:                      # another drive altogether
+        inside = False
+    if not inside:
+        raise GalleryError("refusing a cache path outside the cache: %s" % rel)
+    return path
 
 
 def cache_age(rel):
@@ -226,7 +240,9 @@ def load_disabled(force=False):
             if not isinstance(r, dict):
                 continue
             mu = (r.get("links") or {}).get("machineURL") or r.get("machineURL")
-            if mu:
+            # The key becomes a path in the cache, like a feed's; see
+            # cache_file().
+            if mu and (CFG is None or CFG.plain_name_problem(str(mu)) is None):
                 out["retired/%s" % mu] = r
     return out
 
@@ -398,6 +414,11 @@ def report_archives(rep, wj):
             continue
         name = a.get("Name")
         if not name:
+            continue
+        # Held to the rule a manifest is (wj_downloader.parse_manifest): a
+        # name that is not a plain file name matches no file on disk, and
+        # is no archive anyone could hold.
+        if CFG is not None and CFG.plain_name_problem(str(name)):
             continue
         meta_text = a.get("Meta") or ""
         state = a.get("State") or {}

@@ -1543,12 +1543,20 @@ class App:
                      "and waits for you to click 'Mod manager download'.")
         else:
             note += " Nexus files are left to Wabbajack (NEXUS_MODE is 'skip')."
+        if any(st.get("unsafe") for _f, st in self.status_rows):
+            note += (" A list marked 'refused: edited' names archives with something other "
+                     "than a plain file name, which only an edited manifest does; nothing is "
+                     "downloaded for it until the manifest is fetched again.")
         self.incomplete_note.configure(text=note)
         rows = []
         for fn, st in sorted(self.status_rows, key=lambda r: -r[1]["bytes"]):
+            state = "incomplete" if st["missing"] else "complete"
+            if st.get("unsafe"):
+                # Named archives outside the pool: the downloader refuses it.
+                state = "refused: edited"
             rows.append((W.stem_of(fn), A.WJ.game_label(st["game"]),
                          st["missing"] - st["stale"], st["stale"] or "-", human(st["bytes"]),
-                         st["nexus"] or "-", "incomplete" if st["missing"] else "complete"))
+                         st["nexus"] or "-", state))
         self.incomplete_order = sorted(self.status_rows, key=lambda r: -r[1]["bytes"])
         fill(self.incomplete_table.tree, rows)
         n = sum(1 for _f, st in self.status_rows if st["missing"])

@@ -822,8 +822,11 @@ def list_status(entry):
         return None
     base, _, _ = A.WJ.resolve_game_dirs(game)
     existing = A.WJ.index_existing(base)
+    # `unsafe`: archives the manifest names with something other than a plain
+    # file name, which the downloader refuses the whole list over.
     st = {"game": game, "present": 0, "gamefile": 0, "other": 0, "stale": 0,
-          "nexus": 0, "nexus_bytes": 0, "direct": 0, "direct_bytes": 0}
+          "nexus": 0, "nexus_bytes": 0, "direct": 0, "direct_bytes": 0,
+          "unsafe": int(entry.get("unsafe") or 0)}
     for a in entry["archives"]:
         kind = a.get("kind")
         if kind == "gamefile":
@@ -1804,6 +1807,12 @@ def stage_incomplete(records, assist):
                 f"{A.WJ.game_label(st['game']):<{gw}}"
                 f"{st['missing'] - st['stale']:>7}{st['stale'] or '-':>9}"
                 f"{human(st['bytes']):>10}{st['nexus'] or '-':>7}")
+        refused = [stem_of(fn) for fn, st in rows if st.get("unsafe")]
+        if refused:
+            out()
+            out(f"    REFUSED: {', '.join(refused)} name(s) archives with something other")
+            out("    than a plain file name, which only an edited manifest does. The")
+            out("    downloader fetches nothing for such a list; fetch the manifest again.")
         total_stale = sum(st["stale"] for _f, st in rows)
         if total_stale:
             out()

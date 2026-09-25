@@ -40,6 +40,16 @@ Manifest filenames follow `<repo>_@@_<machineURL>.wabbajack`, which *is* the
 published feed key with `/` written as `_@@_`. That is how a local file is
 matched to its published list — exactly, with no guessing from titles.
 
+Every name that arrives from outside and becomes a path is held to one rule
+first: an archive's name in a manifest or a validation report, and a list's
+key in a feed. It has to be a plain file name - no separator, no drive colon,
+not only dots, nothing Windows refuses in a name - because joined onto a pool
+folder, `..\..\x` is a path somewhere else. Wabbajack never writes such a name:
+none of the 17,238 archive names in the manifests held here, or the 302,621 in
+the published reports, is one. So a manifest that has one has been edited, and
+the downloader fetches nothing for it; a feed entry with such a key is left
+out, and counts as a feed that did not answer.
+
 ## Quick start
 
 Two ways in, and neither needs the other.
@@ -831,7 +841,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1053 checks across seventeen suites. None of them touch the live archive pools:
+environment instead). 1068 checks across seventeen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

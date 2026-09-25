@@ -113,8 +113,22 @@ on the 20th. They are recorded here, under the release that carries them.
   written as just the entries that differ from the default. The purge and
   stage 5c ask again before acting, and also refuse a trash folder that is a
   modlist's own.
+- **A manifest could make the downloader write outside the pool.** An
+  archive's name was used as a path just as it stood, so a `.wabbajack`
+  naming one `..\..\escaped.txt` had its download written two folders above
+  Master, and it passed verification, since the manifest brings the hash
+  too. Reproduced in a sandbox. An archive name must now be a plain file
+  name, checked where a manifest is read, again as the light cache is read,
+  and again where a download is written. A manifest with such a name is
+  refused whole, since Wabbajack never writes one, and the Incomplete tab
+  marks it. The sorter was never exposed: it moves only files it finds on
+  disk, under their own names. The same rule now covers the keys the
+  gallery caches reports under, which come from the authors' own feeds: an
+  entry or a feed with such a key is left out and counted as a feed that did
+  not answer, so the "any known modlist" rule does not delete on the gap, and
+  a cache path that would leave the cache is refused.
 
-Tests: 1053 checks across 17 sandbox suites, up from 895 across 16.
+Tests: 1068 checks across 17 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 

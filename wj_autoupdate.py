@@ -503,8 +503,19 @@ def entry_field(entry, *names):
 
 
 def normalise(entry, repo):
+    """One feed entry in the shape every tool here uses, or None.
+
+    The feeds are their authors' own files, and the key made from repo and
+    machineURL becomes a path: the gallery keeps each list's report at
+    reports/<repo>/<machineURL> in its cache. A machineURL that is not a
+    plain name is refused here, with the entry."""
     mu = entry_field(entry, "machineURL")
     if not mu:
+        return None
+    why = CFG.plain_name_problem(str(mu))
+    if why:
+        LOG.warning("[WARN] Feed '%s' lists a modlist whose machineURL %r is not a plain "
+                    "name (%s); it is left out.", repo, str(mu), why)
         return None
     dm = entry.get("download_metadata")
     dm = dm if isinstance(dm, dict) else {}
@@ -578,14 +589,23 @@ def load_feeds(repo_names=None):
 
     wanted = {r: u for r, u in repos.items()
               if repo_names is None or r in repo_names}
-    missing = set(repo_names or []) - set(wanted)
+    # A repository's name is the first half of every key it publishes, and
+    # so of a path in the gallery cache; see normalise(). One left out is a
+    # gap in the picture exactly as a feed that did not answer is, so it
+    # counts as failed: the "any known modlist" rule must not delete on it.
+    refused = [r for r in wanted if CFG.plain_name_problem(str(r))]
+    for r in refused:
+        LOG.warning("[WARN] repositories.json names a feed %r that is not a plain "
+                    "name; it is left out.", r)
+        del wanted[r]
+    missing = set(repo_names or []) - set(wanted) - set(refused)
     if missing:
         LOG.warning("[WARN] Unknown repo(s) in TRACK, ignoring: %s",
                     ", ".join(sorted(missing)))
     LOG.info("Fetching %d feed(s)...", len(wanted))
 
     out = {}
-    failed = []
+    failed = [str(r) for r in refused]
 
     def grab(item):
         repo, url = item
@@ -601,16 +621,21 @@ def load_feeds(repo_names=None):
                 failed.append(repo)
                 continue
             n = 0
+            short = False
             for raw in iter_entries(data):
                 ent = normalise(raw, repo)
                 if ent:
                     out[ent["key"]] = ent
                     n += 1
+                elif CFG.plain_name_problem(str(entry_field(raw, "machineURL") or "x")):
+                    short = True            # refused by normalise(), not merely empty
+            if short:
+                failed.append(repo)
             LOG.debug("  %-28s %d list(s)", repo, n)
     LOG.info("Indexed %d list(s) across %d feed(s).", len(out), len(wanted))
     if failed:
-        LOG.warning("[WARN] %d feed(s) could not be read this run (%s). The "
-                    "picture is incomplete, so nothing will be recorded as "
+        LOG.warning("[WARN] %d feed(s) could not be read this run, or were left out "
+                    "(%s). The picture is incomplete, so nothing will be recorded as "
                     "permanently unmatched.", len(failed), ", ".join(sorted(failed)))
     # Only a request for EVERY feed produces a snapshot later subset requests
     # can be served from. Caching a subset would make the next caller think a

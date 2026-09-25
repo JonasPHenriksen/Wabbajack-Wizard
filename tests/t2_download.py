@@ -738,5 +738,62 @@ try:
 finally:
     D.REQUEST_PAUSE_S = saved_pause
 
+# ---------------------------------------------------------------- 2.15
+print("\n 2.15  an archive name with a path in it never becomes a path")
+# Reproduced 2026-09-25 against the code as it stood: a manifest naming an
+# archive '..\\..\\escaped.txt' had its download written two folders above
+# Master, and it passed verification, since the manifest brings the hash too.
+import json
+import shutil
+import zipfile
+from harness import Sandbox
+
+EVIL = ["..\\..\\escaped.bin", "C:\\x.bin", "sub/dir.bin", "trail.bin."]
+wjp = os.path.join(TMP, "Evil.wabbajack")
+with zipfile.ZipFile(wjp, "w") as z:
+    z.writestr("modlist", json.dumps({"GameType": "Fallout4", "Archives": [
+        {"Name": n, "Size": len(BODY), "Hash": "", "Meta": "",
+         "State": {"$type": "HttpDownloader, Wabbajack.Lib", "Url": BASE + "/ok"}}
+        for n in ["fine.bin"] + EVIL]}))
+rec = D.parse_manifest(wjp)
+check("parse_manifest keeps the plain name", [a["name"] for a in rec["archives"]] == ["fine.bin"],
+      str(rec["archives"]))
+check("  and names every other one as unsafe", sorted(rec["unsafe"]) == sorted(EVIL), str(rec["unsafe"]))
+
+res = {"done": 0, "failed": 0, "failures": []}
+inner = os.path.join(TMP, "pool", "Fallout4", "Master")
+os.makedirs(inner, exist_ok=True)
+ok = D.download_one(BASE + "/ok", dict(archive, name="..\\..\\escaped.bin"), inner, res)
+check("download_one refuses such a name handed to it directly",
+      ok is False and res["failed"] == 1
+      and not os.path.exists(os.path.join(TMP, "pool", "escaped.bin")), str(res))
+
+cache_path = os.path.join(TMP, "light_cache.json")
+if os.path.exists(cache_path):
+    os.remove(cache_path)
+light = D.load_light_records(TMP, cache_path, files=["Evil.wabbajack"])
+entry = light["Evil.wabbajack"]
+check("the light cache leaves them out and counts them",
+      entry["unsafe"] == 4 and [a["name"] for a in entry["archives"]] == ["fine.bin"], str(entry))
+with io.open(cache_path, encoding="utf-8") as f:
+    cached = json.load(f)
+cached["Evil.wabbajack"]["archives"].append({"name": "..\\old.bin", "size": 1, "kind": "http"})
+cached["Evil.wabbajack"]["unsafe"] = 0          # as a version before this one cached it
+with io.open(cache_path, "w", encoding="utf-8") as f:
+    json.dump(cached, f)
+entry = D.load_light_records(TMP, cache_path, files=["Evil.wabbajack"])["Evil.wabbajack"]
+check("  and an entry cached before is held to the same rule as it is read",
+      entry["unsafe"] == 1 and [a["name"] for a in entry["archives"]] == ["fine.bin"], str(entry))
+
+box = Sandbox(os.path.join(BOXROOT, "sb2"))
+shutil.copy2(wjp, os.path.join(box.manifests, "Evil.wabbajack"))
+rc, out = box.run("wj_downloader.py", ["--game", "Fallout4", "--list", "Evil", "--yes",
+                                       "--skip-nexus"])
+check("the downloader refuses the whole list", rc == 2 and "not plain file names" in out, out[-600:])
+landed = [os.path.join(d, n) for d, _s, fs in os.walk(box.root) for n in fs
+          if n.lower().endswith(".bin") or n.lower().startswith("escaped")]
+check("  and writes nothing, inside the pool or out of it", landed == [], str(landed))
+shutil.rmtree(box.root, ignore_errors=True)
+
 srv.shutdown()
 sys.exit(summary())
