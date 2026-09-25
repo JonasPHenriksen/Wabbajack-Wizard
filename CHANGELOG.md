@@ -68,6 +68,9 @@ on the 20th. They are recorded here, under the release that carries them.
   name or size, the hash check after the download says whether it was the
   same bytes, and a file nothing matches is recorded and passed over too.
   The listing is asked for once per mod and remembered for the run.
+- `tests\run_all.py` removes its sandboxes from `%TEMP%` when every suite
+  passes, some 10 MB left behind by each run until now, and keeps them, and
+  says where, when one fails.
 
 ### Fixed
 

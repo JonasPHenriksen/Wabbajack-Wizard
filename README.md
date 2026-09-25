@@ -846,7 +846,9 @@ environment instead). 1081 checks across seventeen suites. None of them touch th
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites
 serve their own localhost HTTP server, so they need no internet and can force
-exactly the failure they want to check.
+exactly the failure they want to check. A full run removes its sandboxes from
+`%TEMP%` when every suite passes, and keeps them, named, when one fails; a
+suite run on its own keeps its sandbox either way.
 
 | suite | covers |
 | --- | --- |

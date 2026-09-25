@@ -12,12 +12,22 @@ resolved against the SCRIPT folder, so each suite copies the scripts into a
 temporary directory and they operate on a temporary pool instead. The two HTTP
 suites serve their own localhost server, so no suite needs the internet except
 where it is explicitly checking a real feed.
+
+When every suite passes, the sandboxes in %TEMP% are removed afterwards; when
+one fails they are kept, and named, for a look.
 """
 import os
+import shutil
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Where the suites build their sandboxes and scratch files. Most of them leave
+# theirs behind, which is right for one suite run by hand - the sandbox is
+# there to be looked at - and wrong for the whole run, which used to leave
+# some 10 MB of synthetic pools in %TEMP% every time.
+TEMP = os.environ.get("TEMP", "/tmp")
+SCRATCH = [os.path.join(TEMP, d) for d in ("wj_tests", "wj_t2", "wj_t3")]
 SUITES = [
     ("t1_sorter.py", "sorter: aborts, collisions, reserved names, dry-run"),
     ("t2_download.py", "downloads: hard vs transient failures, resume, verify"),
@@ -69,5 +79,12 @@ print("  TOTAL: %d passed, %d failed, across %d suites"
       % (total_pass, total_fail, len(SUITES)))
 if failed_suites:
     print("  suites with failures: " + ", ".join(failed_suites))
+    # Kept: a failure is exactly when a sandbox is worth looking at.
+    print("  sandboxes kept for a look: " + ", ".join(d for d in SCRATCH if os.path.isdir(d)))
+else:
+    for d in SCRATCH:
+        shutil.rmtree(d, ignore_errors=True)
+    left = [d for d in SCRATCH if os.path.isdir(d)]
+    print("  sandboxes removed" + (" except: " + ", ".join(left) if left else ""))
 print("=" * 72)
 sys.exit(1 if failed_suites else 0)
