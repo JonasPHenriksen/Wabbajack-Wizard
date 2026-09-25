@@ -483,5 +483,36 @@ check("a refused feed and a refused entry leave only the plain one",
       set(feeds) == {"good/fine"}, str(sorted(feeds)))
 check("  and mark the picture incomplete, so nothing is deleted on it", complete is False)
 
+# ---------------------------------------------------------------- 11.13
+print("\n 11.13  searching the gallery, and the NSFW flag")
+check("a date and time becomes the date", G.updated_date("2026-08-24T10:11:12Z") == "2026-08-24")
+check("  a plain date stays one", G.updated_date("2026-08-24") == "2026-08-24")
+check("  and no date is none", G.updated_date(None) == "" and G.updated_date("soon") == "")
+feeds = {
+    "r/a": dict(feed_entry("r", "a", "fallout4", title="Wasteland Survival"),
+                tags=["Survival", "Gameplay"], updated="2026-09-01T00:00:00"),
+    "r/b": dict(feed_entry("r", "b", "fallout4", title="Lewd Commonwealth"),
+                tags=["Adult"], nsfw=True),
+    "r/c": dict(feed_entry("r", "c", "skyrimspecialedition", title="Frost Survival"),
+                tags=["survival"]),
+}
+by = {r["key"]: r for r in G.build_rows(feeds, {}, set(), {}, set())}
+check("rows carry the NSFW flag, the tags and the date",
+      by["r/b"]["nsfw"] is True and by["r/a"]["nsfw"] is False
+      and by["r/a"]["tags"] == ["Survival", "Gameplay"] and by["r/a"]["updated"] == "2026-09-01",
+      str(by["r/a"]))
+rows = list(by.values())
+shown, n = G.browse_filter(rows, "SURVIVAL")
+check("a search finds a word in a tag or a title, whatever its case",
+      sorted(r["key"] for r in shown) == ["r/a", "r/c"], str([r["key"] for r in shown]))
+shown, n = G.browse_filter(rows, "survival skyrim")
+check("  every word has to match, the game's name among them",
+      [r["key"] for r in shown] == ["r/c"], str([r["key"] for r in shown]))
+shown, n = G.browse_filter(rows, "", hide_nsfw=True)
+check("hiding NSFW lists leaves them out and counts them",
+      sorted(r["key"] for r in shown) == ["r/a", "r/c"] and n == 1)
+shown, n = G.browse_filter(rows, "")
+check("  and without it nothing is left out", len(shown) == 3 and n == 0)
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

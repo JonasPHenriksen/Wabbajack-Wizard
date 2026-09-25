@@ -646,6 +646,9 @@ def build_rows(feeds, summary, featured, disabled, have_keys, games=None):
             "failed": s.get("failed") or 0,
             "passed": s.get("passed") or 0,
             "modlist_missing": bool(s.get("modlist_missing")),
+            "nsfw": bool(ent.get("nsfw")),
+            "tags": [str(t) for t in (ent.get("tags") or [])],
+            "updated": updated_date(ent.get("updated")),
             "entry": ent,
         })
 
@@ -681,6 +684,9 @@ def build_rows(feeds, summary, featured, disabled, have_keys, games=None):
             "failed": 0,
             "passed": 0,
             "modlist_missing": False,
+            "nsfw": bool(raw.get("nsfw")),
+            "tags": [str(t) for t in (raw.get("tags") or []) if isinstance(t, (str, int))],
+            "updated": updated_date(raw.get("dateUpdated")),
             # Enough of a feed entry to download from, but deliberately no
             # repository: there is no feed behind a retired list, so it can be
             # fetched and installed and can never be version-tracked.
@@ -697,6 +703,43 @@ def build_rows(feeds, summary, featured, disabled, have_keys, games=None):
             } if links.get("download") else None,
         })
     return rows
+
+
+def updated_date(text):
+    """A feed's dateUpdated as YYYY-MM-DD, or '' when it carries none. The
+    feeds write it several ways - a date, a date and time, with or without a
+    zone - and the date is the part a table needs."""
+    m = re.search(r"\d{4}-\d{2}-\d{2}", str(text or ""))
+    return m.group(0) if m else ""
+
+
+def search_text(row):
+    """What a Browse search looks through for one row, lower-cased: the
+    title, the key, the game, and the tags."""
+    return " ".join([str(row.get("title") or ""), str(row.get("key") or ""),
+                     game_label(row.get("game")) or ""]
+                    + [str(t) for t in row.get("tags") or []]).lower()
+
+
+def browse_filter(rows, search="", hide_nsfw=False):
+    """(shown, nsfw_hidden): the rows a search and the NSFW setting leave in
+    a Browse table, and how many NSFW rows the setting kept out.
+
+    Every word of `search` has to appear somewhere in search_text(), in any
+    order, so "survival skyrim" finds a list tagged Survival. Display only,
+    like split_completable(): nothing here changes what a list protects."""
+    words = str(search or "").lower().split()
+    shown, nsfw = [], 0
+    for r in rows:
+        if hide_nsfw and r.get("nsfw"):
+            nsfw += 1
+            continue
+        if words:
+            text = search_text(r)
+            if not all(w in text for w in words):
+                continue
+        shown.append(r)
+    return shown, nsfw
 
 
 def completable(row):

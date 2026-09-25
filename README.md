@@ -293,6 +293,20 @@ menu keeps counting every list. Toggled off, a list that cannot be completed
 carries an `x`. The toggle is display only: a list kept out of the table is still
 a published list, and still protects its archives in Space.
 
+### Searching, and lists marked NSFW
+
+The search box above a game's table narrows it as you type, to the lists whose
+title, key, game or tags hold every word typed, in any order: `survival` finds
+a list tagged Survival, and `survival skyrim` only the Skyrim ones among them.
+In the console it is `/` and the words, and `/` alone clears it. **hide NSFW
+lists** keeps out the lists their authors mark NSFW, and is remembered as
+`HIDE_NSFW` (`[n]` in the console). Both work on the rows already measured, so
+neither costs a read of the share, and both are display only, as **Only lists
+that can be completed** is: a list kept out of the table still protects its
+archives in Space. The table's **updated** column is the date the list was last
+published, an `n` marks a list its author flags NSFW, and the detail pane gives
+the list's tags.
+
 ### Hiding a list you will never want
 
 **Hide this list**, under the Browse tab's detail pane (`[h]` on a list's detail
@@ -575,6 +589,7 @@ differ from the default.
 | `AUTO_TRACK` | `true` | match every manifest in the folder against the feeds automatically |
 | `EXCLUDE`, `TRACK` | `[]` | lists to leave alone, and pins for lists auto-matching cannot resolve |
 | `HIDDEN` | `[]` | published lists hidden from the gallery, by feed key; the Browse tab's Hide button writes it |
+| `HIDE_NSFW` | `false` | keep the lists their authors mark NSFW out of the Browse tables; the window's "hide NSFW lists" box and the console's `[n]` write it. Display only |
 | `STAGE_LIST` | `null` | which list a scheduled run stages; `--only` overrides it |
 | `NEXUS_MODE` | `skip` | `assist` opens each Nexus page for a click; `skip` leaves them to Wabbajack |
 | `KEEP_BACKUP_DAYS` | 14 | how long superseded manifests are kept |
@@ -862,7 +877,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1133 checks across eighteen suites. None of them touch the live archive pools:
+environment instead). 1153 checks across eighteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

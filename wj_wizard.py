@@ -875,15 +875,18 @@ def fit(values, minimum=4):
 PAGE = 20
 
 
-def ask_row(count, extra):
+def ask_row(count, extra, search=False):
     """Prompt for a row number, or one of `extra` single-letter actions.
 
     Returns an int index (0-based) or the letter. Numbers outside the table
     are refused rather than clamped, for the same reason parse_selection()
     refuses them: acting on a different row than the one typed is worse than
-    asking again."""
+    asking again. With `search`, a line starting with '/' is returned as it
+    was typed, '/' included: the words after it are a search, and '/' alone
+    clears one."""
     out()
-    out("   " + "   ".join(list(extra) + ["[q] quit"]))
+    out("   " + "   ".join(list(extra) + (["[/words] search"] if search else [])
+                           + ["[q] quit"]))
     while True:
         try:
             raw = input("> ").strip().lower()
@@ -892,6 +895,8 @@ def ask_row(count, extra):
             raise Quit()
         if raw in ("q", "quit", "exit"):
             raise Quit()
+        if search and raw.startswith("/"):
+            return raw
         for letter in extra:
             if raw == letter[1:2]:
                 return letter[1:2]
@@ -957,24 +962,40 @@ def gap_sort_key(row):
     return (0, -g["percent"], row["title"].lower())
 
 
-def show_gallery_table(rows, label, shown, hidden=None):
+def set_hide_nsfw(hide):
+    """HIDE_NSFW, saved through the call the Settings tab uses, so the
+    window's box and the console's [n] are one setting."""
+    if CFG is None:
+        return False
+    values = CFG.current_settings()
+    values["HIDE_NSFW"] = bool(hide)
+    CFG.save_settings(values)
+    A.reload_settings()
+    return bool(CFG.HIDE_NSFW)
+
+
+def show_gallery_table(rows, label, shown, hidden=None, search="", nsfw=0):
     """The browse table for one game, most-complete first.
 
     `hidden` is (blocked, unknown): how many lists the 'only lists that can
     be completed' rule kept out of this table, and why, so the table never
-    reads as the whole gallery when it is not."""
+    reads as the whole gallery when it is not. `search` and `nsfw` say the
+    same of a search and of HIDE_NSFW."""
     out()
     rule("-")
-    out(f"  {label.upper()}   {len(rows)} list(s), most complete first")
+    out(f"  {label.upper()}   {len(rows)} list(s), most complete first"
+        + (f", matching '{search}'" if search else ""))
     rule("-")
     nw = fit([r["title"] for r in rows[:shown]], 7) + 2
     vw = fit([r["version"] for r in rows[:shown]], 7) + 2
     out(f"     {'#':>3} own {'modlist':<{nw}}{'version':<{vw}}"
-        f"{'arch':>6}{'yours':>8}{'to fetch':>11}{'total':>11}")
+        f"{'arch':>6}{'yours':>8}{'to fetch':>11}{'total':>11}  {'updated':<10}")
     for i, r in enumerate(rows[:shown], 1):
         g = r.get("gap")
         if G.completable(r) is False:
             mark = "x"
+        elif r.get("nsfw"):
+            mark = "n"
         else:
             mark = "!" if G.unavailable(r) else (">" if r["retired"] else " ")
         own = "[x]" if r["have"] else "[ ]"
@@ -986,11 +1007,15 @@ def show_gallery_table(rows, label, shown, hidden=None):
             n = r["archives"] or 0
             tail = f"{n:>6}{'-':>8}{'-':>11}{human(r['arch_size'] or 0):>11}"
         out(f"   {mark} {i:>3} {own} {r['title'][:nw - 2]:<{nw}}"
-            f"{r['version'][:vw - 2]:<{vw}}{tail}")
+            f"{r['version'][:vw - 2]:<{vw}}{tail}  {r.get('updated') or '':<10}")
     if len(rows) > shown:
         out(f"         ... {len(rows) - shown} more not shown")
     out()
     bits = []
+    if any(r.get("nsfw") and G.completable(r) is not False for r in rows[:shown]):
+        bits.append("n  marked NSFW by its author")
+    if nsfw:
+        bits.append(f"{nsfw} list(s) marked NSFW are hidden. [n] shows them.")
     if any(G.completable(r) is False for r in rows[:shown]):
         bits.append("x  cannot be completed: a dead archive is not in your pools")
     if any(G.unavailable(r) and G.completable(r) is not False for r in rows[:shown]):
@@ -1493,6 +1518,7 @@ def stage_browse(state, tracked):
         measured.sort(key=gap_sort_key)
 
         shown = min(PAGE, len(measured))
+        search = ""
         while True:
             # Only lists that could be finished, unless [c] has said
             # otherwise: a tracked list, or one whose every archive is held
@@ -1502,12 +1528,24 @@ def stage_browse(state, tracked):
                 kept_out = (len(blocked), len(unknown))
             else:
                 grp, kept_out = list(measured), None
-            show_gallery_table(grp, label, shown, hidden=kept_out)
+            hide_nsfw = bool(CFG.HIDE_NSFW) if CFG else False
+            grp, nsfw = G.browse_filter(grp, search, hide_nsfw)
+            show_gallery_table(grp, label, shown, hidden=kept_out, search=search, nsfw=nsfw)
             extra = ["[m] more"] if len(grp) > shown else []
             extra.append("[c] " + ("show every list" if only_completable
                                    else "only lists that can be completed"))
+            extra.append("[n] " + ("show NSFW lists" if hide_nsfw else "hide NSFW lists"))
             extra.append("[b] back to the games")
-            pick = ask_row(len(grp), extra)
+            pick = ask_row(len(grp), extra, search=True)
+            if isinstance(pick, str) and pick.startswith("/"):
+                # Words after the slash narrow the table; a slash alone
+                # clears the search.
+                search = pick[1:].strip()
+                shown = min(PAGE, len(measured))
+                continue
+            if pick == "n":
+                set_hide_nsfw(not hide_nsfw)
+                continue
             if pick == "b":
                 break
             if pick == "m":

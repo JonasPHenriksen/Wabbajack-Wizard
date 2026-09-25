@@ -262,6 +262,13 @@ NOTIFY_URL = None
 # a dark palette. The Dark mode switch in the window's status bar writes
 # this; the console side ignores it.
 THEME = "light"
+
+# Keep the lists their authors mark NSFW out of the Browse tables, in the
+# window and the console alike. The window's "hide NSFW" box and the
+# console's [n] write this. Display only, as the "only lists that can be
+# completed" filter is: such a list is still a published list, and still
+# protects its archives when Master is cleared.
+HIDE_NSFW = False
 # =======================================================================
 
 # The settings above that wj_settings.json may override, in the order the
@@ -270,7 +277,7 @@ USER_SETTINGS = (
     "ARCHIVE_ROOT", "MANIFEST_DIR", "GAME_FOLDERS", "GAME_DISPLAY",
     "EXCLUDE_POOL_DIRS", "UNMANAGED_FOLDER", "TRASH_FOLDER", "TRASH_KEEP_DAYS",
     "WABBAJACK_DIR", "INSTALL_MODE", "AUTO_TRACK", "EXCLUDE", "TRACK", "HIDDEN",
-    "STAGE_LIST", "NEXUS_MODE", "KEEP_BACKUP_DAYS", "REQUIRE_HASH",
+    "HIDE_NSFW", "STAGE_LIST", "NEXUS_MODE", "KEEP_BACKUP_DAYS", "REQUIRE_HASH",
     "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "PARALLEL_SMALL_DOWNLOADS",
     "SMALL_DOWNLOAD_MB", "ASSIST_CLICK_AHEAD", "ASSIST_QUEUE_DEPTH", "ASSIST_WINDOW",
     "NOTIFY_URL", "THEME",

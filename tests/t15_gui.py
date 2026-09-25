@@ -911,6 +911,75 @@ check("a tracked list is shown whatever its state",
       "Dead And Missing" in [r[2] for r in rows(app.browse_table)], str([r[2] for r in rows(app.browse_table)]))
 del app.tracked["r/deadmissing"]
 
+# ---------------------------------------------------------------- 15.18
+print("\n 15.18  searching Browse, and hiding NSFW lists")
+A._FEED_CACHE["all"]["r/needs"].update(tags=["Survival", "Gameplay"], updated="2026-09-01T00:00:00")
+A._FEED_CACHE["all"]["r/deadheld"].update(nsfw=True, tags=["Adult"])
+app.browse_only.set(False)
+app.browse_load()
+settle()
+app.browse_game.current(app.browse["games"].index("fallout4"))
+app.browse_show_game()
+settle()
+table = {r[2]: r for r in rows(app.browse_table)}
+check("the updated column gives the date", table["Needs A Download"][9] == "2026-09-01",
+      str(table.get("Needs A Download")))
+check("  and an NSFW list carries an n", "n" in table["Dead But Held"][1], str(table.get("Dead But Held")))
+app.browse_search.set("survival")
+check("a search narrows the table as it is typed, with no job",
+      not app.busy and [r[2] for r in rows(app.browse_table)] == ["Needs A Download"],
+      str([r[2] for r in rows(app.browse_table)]))
+app.browse_search.set("")
+check("  and clearing it brings every list back", len(rows(app.browse_table)) == len(table))
+app.browse_nsfw.set(True)
+app.browse_toggle_nsfw()
+check("hiding NSFW lists takes it out of the table",
+      "Dead But Held" not in [r[2] for r in rows(app.browse_table)])
+check("  remembered as HIDE_NSFW, in the sandbox's settings file",
+      CFG.HIDE_NSFW is True
+      and json.load(io.open(CFG.settings_path(), encoding="utf-8")).get("HIDE_NSFW") is True)
+check("  and the pane says how many it hid",
+      "1 marked NSFW hidden" in app.browse_text.get("1.0", "end"), app.browse_text.get("1.0", "end")[:200])
+app.browse_nsfw.set(False)
+app.browse_toggle_nsfw()
+check("unticking it brings the list back",
+      "Dead But Held" in [r[2] for r in rows(app.browse_table)] and CFG.HIDE_NSFW is False)
+idx = [r[2] for r in rows(app.browse_table)].index("Needs A Download")
+app.browse_table.tree.selection_set(str(idx))
+app.browse_detail()
+detail = app.browse_text.get("1.0", "end")
+check("the detail pane gives the date and the tags",
+      "updated 2026-09-01" in detail and "tags: Survival, Gameplay" in detail, detail[:200])
+app.browse_only.set(True)
+
+# The console's browse stage, driven with typed answers: the same filter.
+import builtins
+
+
+def drive(fn, answers, *args):
+    said, feed_in = [], iter(answers)
+    real_in, real_out = builtins.input, W.out
+    builtins.input = lambda prompt="": next(feed_in)
+    W.out = lambda msg="": said.append(str(msg))
+    try:
+        fn(*args)
+    except (StopIteration, W.Quit):
+        pass
+    finally:
+        builtins.input, W.out = real_in, real_out
+    return "\n".join(said)
+
+
+text = drive(W.stage_browse, ["c", "1", "c", "/survival", "n", "n", "b", "s"],
+             app.state, app.tracked)
+after_search = text.split("matching 'survival'", 1)[-1]
+check("in the console, /words searches the table",
+      "matching 'survival'" in text and "Needs A Download" in after_search.split("[q] quit")[0]
+      and "One List" not in after_search.split("[q] quit")[0], text[-1500:])
+check("  [n] hides the NSFW lists, and says so", "marked NSFW are hidden" in text, text[-800:])
+check("  and the second [n] shows them again, the setting following",
+      CFG.HIDE_NSFW is False, str(CFG.HIDE_NSFW))
+
 # ---- put everything back ---------------------------------------------------
 root.destroy()
 W.out = REAL_WOUT

@@ -945,8 +945,8 @@ class App:
     # ==================================================================
     def _build_browse(self, f):
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(3, weight=3)
-        f.rowconfigure(4, weight=1)
+        f.rowconfigure(4, weight=3)
+        f.rowconfigure(5, weight=1)
         ttk.Label(f, text="Every modlist published for a game you keep archives for, and how "
                           "much of each is already in your pools. Read from Wabbajack's own "
                           "validation reports, before any .wabbajack is downloaded. By default "
@@ -973,23 +973,39 @@ class App:
         self.action(bar, "Refresh every report", lambda: self.browse_sync(True)).pack(side="left")
         self.browse_pool_btn = self.action(bar, "Set up a pool", self.browse_make_pool)
         self.browse_pool_btn.pack(side="left", padx=4)
+        # Searching and the NSFW filter narrow the current game's table from
+        # the rows already measured, as the toggle above does: no job, no
+        # read of the share.
+        find = ttk.Frame(f)
+        find.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(find, text="Search:").pack(side="left")
+        self.browse_search = tk.StringVar(value="")
+        ttk.Entry(find, textvariable=self.browse_search, width=36).pack(side="left", padx=(4, 8))
+        self.browse_search.trace_add("write", lambda *_a: self.browse_refilter())
+        ttk.Label(find, text="title, key, game or tag; every word must match",
+                  style="Hint.TLabel").pack(side="left", padx=(0, 12))
+        self.browse_nsfw = tk.BooleanVar(value=bool(CFG.HIDE_NSFW))
+        ttk.Checkbutton(find, text="hide NSFW lists", variable=self.browse_nsfw,
+                        command=self.browse_toggle_nsfw).pack(side="left")
         # On a row of its own: beside the buttons it was cut off at the
         # window's default width.
         self.browse_summary = tk.StringVar(value="Not loaded yet.")
         ttk.Label(f, textvariable=self.browse_summary, style="Hint.TLabel").grid(
-            row=2, column=0, sticky="w", pady=(0, 6))
+            row=3, column=0, sticky="w", pady=(0, 6))
 
+        # New columns go on the end, so each existing one keeps its place.
         cols = [("own", "own", 40, "center"), ("mark", "", 44, "center"),
                 ("title", "modlist", 300, "w"), ("game", "game", 160, "w"),
                 ("version", "version", 100, "w"),
                 ("arch", "archives", 80, "e"), ("yours", "yours", 70, "e"),
-                ("fetch", "to fetch", 100, "e"), ("total", "total", 100, "e")]
+                ("fetch", "to fetch", 100, "e"), ("total", "total", 100, "e"),
+                ("updated", "updated", 90, "w")]
         self.browse_table = make_table(f, cols, height=12, selectmode="browse")
-        self.browse_table.grid(row=3, column=0, sticky="nsew")
+        self.browse_table.grid(row=4, column=0, sticky="nsew")
         self.browse_table.tree.bind("<<TreeviewSelect>>", lambda _e: self.browse_detail())
 
         det = ttk.Frame(f)
-        det.grid(row=4, column=0, sticky="nsew", pady=(6, 0))
+        det.grid(row=5, column=0, sticky="nsew", pady=(6, 0))
         det.columnconfigure(0, weight=1)
         det.rowconfigure(0, weight=1)
         self.browse_text = self._register_text(tk.Text(det, height=7, wrap="word",
@@ -1139,12 +1155,24 @@ class App:
         self.run_job(f"Measuring {label}", job, done)
 
     def browse_refilter(self):
-        """The toggle flipped: the current game's table is rebuilt from the
-        rows already measured, so it costs nothing."""
+        """A toggle flipped or the search changed: the current game's table
+        is rebuilt from the rows already measured, so it costs nothing."""
         if self.busy:
             return
         if self.browse.get("view") not in (None, HIDDEN_GAME):
             self._browse_apply_filter()
+
+    def browse_toggle_nsfw(self):
+        """The NSFW box: remembered as HIDE_NSFW the way the Dark mode switch
+        remembers THEME, through the call the Settings tab uses, and the
+        table refiltered from what is already measured."""
+        hide = bool(self.browse_nsfw.get())
+        if bool(CFG.HIDE_NSFW) != hide:
+            W.set_hide_nsfw(hide)
+            var = getattr(self, "setting_vars", {}).get("HIDE_NSFW")
+            if var is not None:
+                var.set(hide)
+        self.browse_refilter()
 
     def _browse_apply_filter(self):
         """The current game's table from its measured rows, under the 'only
@@ -1159,11 +1187,20 @@ class App:
             shown, blocked, unknown = G.split_completable(rows)
         else:
             shown, blocked, unknown = list(rows), [], []
+        search = self.browse_search.get()
+        shown, nsfw = G.browse_filter(shown, search, bool(self.browse_nsfw.get()))
         self.browse["grp"] = shown
         self.browse["detail"] = None
         self._browse_fill(shown)
 
         lines = ["Select a list for its details."]
+        narrowed = []
+        if search.strip():
+            narrowed.append(f"matching '{search.strip()}'")
+        if nsfw:
+            narrowed.append(f"{nsfw} marked NSFW hidden")
+        if narrowed:
+            lines.append(f"{len(shown)} list(s) " + ", ".join(narrowed) + ".")
         if only and (blocked or unknown):
             bits = []
             if blocked:
@@ -1185,6 +1222,8 @@ class App:
             legend.append(">  retired from the gallery")
         if any(G.completable(r) is False for r in shown):
             legend.append("x  cannot be completed: a dead archive is not in your pools")
+        if any(r.get("nsfw") for r in shown):
+            legend.append("n  marked NSFW by its author")
         if legend:
             lines.append("     ".join(legend))
         self._set_text(self.browse_text, "\n\n".join(lines))
@@ -1198,14 +1237,16 @@ class App:
         for r in rows:
             g = r.get("gap") if measured else None
             mark = (("!" if G.unavailable(r) else "") + (">" if r["retired"] else "")
-                    + ("x" if measured and G.completable(r) is False else ""))
+                    + ("x" if measured and G.completable(r) is False else "")
+                    + ("n" if r.get("nsfw") else ""))
             if g and g["total"]:
                 tail = (g["total"], f"{g['percent']:.1f}%", human(g["missing_bytes"]),
                         human(g["total_bytes"]))
             else:
                 tail = (r["archives"] or 0, "-", "-", human(r["arch_size"] or 0))
             out_rows.append(("[x]" if r["have"] else "", mark, r["title"],
-                             G.game_label(r["game"]), r["version"]) + tail)
+                             G.game_label(r["game"]), r["version"]) + tail
+                            + (r.get("updated") or "",))
         fill(self.browse_table.tree, out_rows)
 
     def _browse_show_hidden(self):
@@ -1334,6 +1375,15 @@ class App:
         self.browse["detail"] = r
         g = r.get("gap")
         lines = [f"{r['title']}   v{r['version']}    {r['key']}    {A.WJ.game_label(r['game'])}"]
+        facts = []
+        if r.get("updated"):
+            facts.append(f"updated {r['updated']}")
+        if r.get("tags"):
+            facts.append("tags: " + ", ".join(r["tags"]))
+        if r.get("nsfw"):
+            facts.append("marked NSFW by its author")
+        if facts:
+            lines.append("   ".join(facts))
         if r["hidden"]:
             lines.append("HIDDEN from the gallery: shown only here, never measured against your "
                          "pools, its report never fetched, its archives unprotected when Master "
@@ -2270,6 +2320,7 @@ class App:
                     "EXCLUDE_POOL_DIRS": "comma-separated", "EXCLUDE": "comma-separated",
                     "TRACK": "comma-separated",
                     "HIDDEN": "comma-separated feed keys; the Browse tab's Hide button writes this",
+                    "HIDE_NSFW": "the Browse tab's 'hide NSFW lists' box writes this",
                     "STAGE_LIST": "empty = most recently updated",
                     "WABBAJACK_DIR": "empty = auto-detect", "NOTIFY_URL": "empty = off",
                     "THEME": "the Dark mode switch beside the progress bar writes this",
@@ -2386,6 +2437,7 @@ class App:
         A.reload_settings()
         self.assist = (A.NEXUS_MODE == "assist")
         self.apply_theme(CFG.THEME)
+        self.browse_nsfw.set(bool(CFG.HIDE_NSFW))
         # A setting can move the archive root or rename a pool folder, so every
         # other tab is rebuilt from scratch rather than guessing what survived.
         self.data_changed("settings", "records", "pools")

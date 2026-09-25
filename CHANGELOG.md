@@ -68,6 +68,16 @@ on the 20th. They are recorded here, under the release that carries them.
   name or size, the hash check after the download says whether it was the
   same bytes, and a file nothing matches is recorded and passed over too.
   The listing is asked for once per mod and remembered for the run.
+- **Browse can be searched, and NSFW lists hidden.** A search box above the
+  table narrows the current game's lists as you type, to those whose title,
+  key, game or tags hold every word typed; `/words` does the same in the
+  console, and `/` alone clears it. **hide NSFW lists** keeps the lists their
+  authors mark NSFW out of the table, and is remembered as `HIDE_NSFW` (`[n]`
+  in the console). Like the completable filter both are display only, so a
+  list kept out still protects its archives. The table gains an **updated**
+  column, the date the list was last published, an `n` marks an NSFW list,
+  and the detail pane gives its tags. The feeds carried all three; nothing
+  showed them.
 - **The Nexus API key can live in Windows Credential Manager.** It was read
   from `NEXUS_API_KEY` or from `nexus_api_key.txt`, in plain text in a folder
   on a share another machine mounts too, while git's token for the same
@@ -161,12 +171,14 @@ on the 20th. They are recorded here, under the release that carries them.
   window measured still looked in Fallout4VR, until the next start. Every
   copy now follows at once. Only `ARCHIVE_ROOT` and `MANIFEST_DIR` still wait
   for a restart, as the Settings tab says.
+- `wj_settings.example.json`, which gives every setting at its default, gave
+  `NEXUS_MODE` as `assist`; the default is `skip`.
 - The test suites that import the scripts from the checkout set up logging
   there, so their warnings - an unreadable test manifest, a stray test
   folder - were appended to the real `wj_autoupdate.log`. They now log into a
   scratch folder the run removes.
 
-Tests: 1133 checks across 18 sandbox suites, up from 895 across 16.
+Tests: 1153 checks across 18 sandbox suites, up from 895 across 16.
 
 ## 1.2.0 — 2026-09-19
 
