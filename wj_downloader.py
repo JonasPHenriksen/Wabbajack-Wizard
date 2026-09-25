@@ -2739,8 +2739,9 @@ def main():
 
     script_dir = wj_paths.app_dir(__file__)
     # Logs, the CSV reports and the files an assist session shares with the
-    # nxm:// handler all live here; see wj_paths.RUNTIME_DIR.
-    run_dir = wj_paths.runtime_dir(__file__)
+    # nxm:// handler all live here; see wj_paths.RUNTIME_DIR. Made only once
+    # past the two quick answers below, which write nothing of their own.
+    run_dir = os.path.join(script_dir, wj_paths.RUNTIME_DIR)
 
     # --- Handler-invocation entry point: forward the URL and exit immediately.
     if args.nxm:
@@ -2766,7 +2767,7 @@ def main():
               f"{_ASSISTWIN.storage_dir()}")
         return
 
-    wj_paths.adopt_runtime(script_dir)
+    wj_paths.adopt_runtime(script_dir)          # makes run_dir, and fills it from an older layout
     log_path = setup_logging(run_dir, verbose=args.verbose)
 
     # --- Standalone handler (un)registration.
