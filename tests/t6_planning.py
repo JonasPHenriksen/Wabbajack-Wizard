@@ -182,6 +182,24 @@ A.prune_backups()
 check("with BACKUPS == MANIFESTS it prunes nothing at all",
       os.path.exists(os.path.join(A.MANIFESTS, "Live.wabbajack")))
 
+print("\n      and a backup's age runs from when its manifest was replaced")
+# Found 2026-09-26 in a real run: magnum_opus's manifest, fetched on 9/6 and
+# replaced on 9/25, was parked with its own 9/6 date, so the prune that ends
+# the next run would have deleted the backup at once - as it would have any
+# backup of a list that went KEEP_BACKUP_DAYS without an update.
+A.BACKUPS = os.path.join(box2.tools, "manifest_backups")
+stale = os.path.join(A.MANIFESTS, "Stale.wabbajack")
+io.open(stale, "wb").write(b"the version being replaced")
+os.utime(stale, (old, old))                      # downloaded long ago
+A.backup_existing("Stale.wabbajack")
+bak = os.path.join(A.BACKUPS, "Stale.wabbajack.bak")
+check("backup_existing parks the manifest, stamped with the moment it was replaced",
+      os.path.isfile(bak) and not os.path.exists(stale)
+      and abs(os.path.getmtime(bak) - time.time()) < 120,
+      time.ctime(os.path.getmtime(bak)) if os.path.isfile(bak) else "no backup")
+A.prune_backups()
+check("  so the prune that ends the run keeps it for KEEP_BACKUP_DAYS", os.path.isfile(bak))
+
 # ---------------------------------------------------------------- 6.6
 print("\n 6.6  the Nexus domains a manifest's slug is tried under")
 

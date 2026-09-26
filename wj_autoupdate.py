@@ -861,7 +861,10 @@ def prune_backups():
     """Drop superseded manifests once they are too old to be a useful rollback.
 
     These are whole modlist manifests - several GB each - so keeping one per
-    list forever quietly eats more space than the archives some lists need."""
+    list forever quietly eats more space than the archives some lists need.
+    A .bak's age is time since its manifest was replaced, which
+    backup_existing stamps on it; a .rejected one's is time since it was
+    downloaded, which is also when it was rejected."""
     if BACKUPS == MANIFESTS:
         return
     cutoff = time.time() - KEEP_BACKUP_DAYS * 86400
@@ -887,6 +890,13 @@ def prune_backups():
 
 
 def backup_existing(filename):
+    """Park the manifest about to be replaced as <name>.bak, stamped with
+    the moment it was superseded.
+
+    A rename keeps the file's own mtime, which says when the manifest was
+    downloaded - for a list that went months without an update, months ago.
+    prune_backups judges by mtime, so without the stamp the prune that ends
+    the run could delete a backup made minutes before."""
     src = os.path.join(MANIFESTS, filename)
     if not os.path.isfile(src):
         return
@@ -898,6 +908,12 @@ def backup_existing(filename):
         LOG.info("  Previous manifest kept as %s", os.path.basename(bak))
     except OSError as e:
         LOG.warning("  [WARN] Could not back up %s: %s", filename, e)
+        return
+    now = time.time()
+    try:
+        os.utime(bak, (now, now))
+    except OSError:
+        pass
 
 
 # ----------------------------------------------------------------------

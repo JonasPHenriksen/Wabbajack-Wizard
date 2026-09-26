@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.1 — 2026-09-26
+
+### Fixed
+
+- **A superseded manifest's backup did not last `KEEP_BACKUP_DAYS`.** An
+  update keeps the manifest it replaces in `manifest_backups\` for 14 days,
+  judged by the backup's file date - but moving the manifest aside kept the
+  date it was downloaded, so the backup of any list that had gone 14 days
+  without an update, which is most of them, counted as expired the moment it
+  was made. The unattended update run prunes as it finishes, so it deleted
+  the backup it had made minutes before; one made from the window or the
+  console wizard lasted until the next such run. A backup is now stamped
+  with the moment it was replaced, as the trash already stamps what arrives
+  in it. Found in the first real run of 1.3.0; it dates from 1.0.0.
+
+Tests: 1219 checks across 18 sandbox suites, up from 1217.
+
 ## 1.3.0 — 2026-09-25
 
 The first five additions and three fixes below were made after the 1.2.0
