@@ -8,10 +8,11 @@ across two games. It is parked, because a survey of every published collection
 found little that Wabbajack does not already serve (see [The market](#the-market)).
 This note keeps what was learned, and how to pick it up again.
 
-The code was on the branch `nexus-collections` (commit `a9410fa`, five commits
-on top of `27b43d2`). It was never merged, and the branch was deleted once
-this note was written, so nothing of the code is kept: this note is the
-record, and a return to the idea starts from it.
+The code is on the branch `nexus-collections` on GitHub (commit `a9410fa`,
+five commits on top of `27b43d2`, from before 1.3.0). It was never merged:
+the branch was deleted once this note was written, then pushed back from its
+last commit on 2026-09-26 so the code would not be lost. A return to the idea
+starts from that branch, with this note as the record of what it learned.
 
 ## What was built, on the branch
 
@@ -199,16 +200,17 @@ says 1.0.0.0 in its numeric version field; its string table says 1.5.97.0.
 
 ## Picking it up again
 
-On the machine that made it, the branch can be brought back while git still
-holds its commits, which is until its reflog entries expire and `git gc`
-prunes them, some 30 days after 2026-09-24:
+The branch is on GitHub; in a clone:
 
 ```
-.\git.bat branch nexus-collections a9410fa
+.\git.bat fetch origin
+.\git.bat switch nexus-collections
 ```
 
-Merge `main` into it if `main` has moved on since. After that, the work is
-redone from this note. The pieces are the ones in the table above: a
+Merge `main` into it first. It branched before 1.3.0, which moved the runtime
+files into `runtime\`, validates settings, and changed most of the modules the
+branch also changes, so expect conflicts in those. The pieces are the ones in
+the table above: a
 `.collection` list file the rest of the suite reads as a modlist, a fetch that
 names every file through the v1 API, a hand-over to c2mo2 for the Bethesda
 games with the workarounds in the table of its gaps, and a builder of the
@@ -220,9 +222,9 @@ a mod. For Stardew Valley VERY Expanded the steps were then:
    or the **Nexus collection** box on the Browse tab.
 2. Download what is missing: the Incomplete stage in assist mode, or
    `.python\python.exe wj_downloader.py --game StardewValley --list "Stardew Valley VERY Expanded_@@_tckf0m" --yes --nxm-assist --order smallest`.
-   The 63 archives downloaded on 2026-09-24 were left in
-   `Z:\Mod Archive\StardewValley\Master`, so unless Master has been cleared
-   since, only the files the curator has changed need a click.
+   The 63 archives downloaded on 2026-09-24 were cleared from
+   `Z:\Mod Archive\StardewValley\Master` and purged on 2026-09-25, so every
+   file needs its click again.
 3. Prepare: stage it and build the instance into a new, empty folder on a
    local disk (last time `D:\Modding\SVVE`). Mod Organizer is downloaded on the
    first build.
@@ -248,7 +250,8 @@ A Skyrim or Fallout collection needed c2mo2 as well, set up with
 Once the note was written, the session's changes were undone, apart from the
 Stardew archives kept in Master:
 
-- The `nexus-collections` branch was deleted; it had never been pushed.
+- The `nexus-collections` branch was deleted; it had never been pushed. It
+  was pushed to GitHub from its last commit on 2026-09-26.
 
 - The three `.collection` lists were deleted the Wizard's way (stage 5a), which
   emptied their pool folders into Master and rebuilt both pools. The Bustling
@@ -257,7 +260,8 @@ Stardew archives kept in Master:
 - The archives downloaded for the two Skyrim test collections, and c2mo2's
   copies of MO2, Root Builder and a bundled SKSE, went to
   `Z:\Mod Archive\Skyrim\Trash`; `deleted_Skyrim_20260924_210617.csv` and
-  `deleted_Skyrim_20260924_210643.csv` say where each went.
+  `deleted_Skyrim_20260924_210643.csv`, in `runtime\` since 1.3.0, say where
+  each went.
 - The four instances (`D:\Modding\TESTING`, `BasicEssentials`,
   `BasicEssentials (broken build)` and `SVVE`), the assembled 1.5.97 game,
   Steam's depot downloads and their manifests, the TESTING character's
@@ -265,3 +269,7 @@ Stardew archives kept in Master:
   Bin.
 - `.c2mo2`, the MO2 cache, the session's download logs and the test sandboxes
   were removed.
+- On 2026-09-25 the Stardew archives were cleared from Master too, and the
+  trash was emptied, the Skyrim archives above with it:
+  `runtime\deleted_StardewValley_20260925_110633.csv` and
+  `runtime\purged_trash_20260925_110655.csv` record both.
