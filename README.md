@@ -92,11 +92,29 @@ from the archives needs that set in `wj_settings.json`. The same goes for git: a
 [Git Credential Manager](https://github.com/git-ecosystem/git-credential-manager/releases)
 zip unpacked into its `mingw64\libexec\git-core\` (where MinGit's default
 `credential.helper = manager` finds it), and a `git.bat` in this folder in
-front of it, is a complete git for this checkout, GitHub sign-in included. Its
-settings are `.mingit\etc\gitconfig`, which also has to mark the checkout safe
-because files on a share read as foreign-owned; its token goes to Windows
-Credential Manager, so the folder itself holds no secret. Both folders and the
-wrapper are gitignored.
+front of it, is a complete git for this checkout. Its settings are
+`.mingit\etc\gitconfig`, which also has to mark the checkout safe because files
+on a share read as foreign-owned. Both folders and the wrapper are gitignored.
+
+This checkout pushes over SSH, with MinGit's own `ssh` and a GitHub deploy key:
+a key that reaches this one repository and nothing else, unlike the token the
+Credential Manager's browser sign-in keeps for an HTTPS remote, which reaches
+every repository on the account. Its private half lives in the Windows profile,
+off the share, so the folder holds no secret and a copy of it carries no push
+rights; another machine gets a key of its own. To set one up:
+
+```
+ssh-keygen -t ed25519 -N "" -f %USERPROFILE%\.ssh\wabbajack-wizard_deploy_ed25519
+git config core.sshCommand "ssh -i C:/Users/<you>/.ssh/wabbajack-wizard_deploy_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=C:/Users/<you>/.ssh/wabbajack-wizard_known_hosts -o StrictHostKeyChecking=yes"
+git remote set-url origin git@github.com:JonasPHenriksen/Wabbajack-Wizard.git
+```
+
+`ssh-keygen` is Windows' own (MinGit has none). Add the `.pub` file's line under
+the repository's Settings > Deploy keys with **Allow write access**, and put
+GitHub's host keys in the known-hosts file first, one `github.com <key>` line
+for each of the `ssh_keys` that `https://api.github.com/meta` lists, checked
+against the fingerprints GitHub publishes. `IdentitiesOnly` makes the deploy key
+the only one offered, so a key of your account never stands in for it.
 
 Either way, everything the tool writes lands in the folder you started it
 from: your settings and `modlists/` in it, and what the tools write as they
@@ -727,13 +745,12 @@ It is looked for on the command line (`--apikey`), then in `NEXUS_API_KEY`, then
 in Windows Credential Manager, then in `nexus_api_key.txt` beside the scripts
 (gitignored). The file is plain text in a folder on a share another machine
 mounts too, so the Settings tab's **Nexus API key** section can move the key
-into Credential Manager - where git's token for this checkout already goes, so
-the folder holds no secret - and deletes the file only once the stored copy
-reads back the same. It also takes a key typed in, or forgets the stored one.
+into Credential Manager, so the folder holds no secret, and deletes the file
+only once the stored copy reads back the same. It also takes a key typed in, or forgets the stored one.
 From the console, `run.bat --store-nexus-key` moves the file's key, or asks for
 one without showing it when there is no file; `--forget-nexus-key` removes it,
 and `--nexus-key-status` says where the key is found, never what it is. The
-cost is the git token's: Credential Manager keeps the key with this Windows
+cost is the deploy key's: Credential Manager keeps the key with this Windows
 account, so a copy of the folder on another machine needs it given again.
 Nothing is installed for any of this - Credential Manager is part of Windows,
 reached through its own API.
