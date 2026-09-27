@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.2 — 2026-09-27
+
+### Fixed
+
+- **A manifest could have the downloader copy a local file onto the share.**
+  Every address the tools fetch comes from someone else - a manifest, an
+  author's feed, the gallery - and each was handed to Python's URL opener,
+  which opens `file:` addresses as readily as web ones, while an archive that
+  comes with no hash is accepted on its size. So a manifest naming, say,
+  `file:///C:/Users/<you>/.ssh/<key>` at that file's size had the key copied
+  into the pool, on the share, where anyone who can open the share could take
+  it, and counted it downloaded. The CDN module, the gallery and the feed
+  reader opened such addresses too. Only `http` and `https` are fetched now,
+  anywhere; any other address is refused, and a refused archive is recorded
+  as a failure saying why. Published lists use web addresses only - the 15
+  followed here, 17,241 archives, use nothing else - so nothing that worked
+  stops working. Found in a security review; it dates from 1.0.0.
+
+Tests: 1227 checks across 18 sandbox suites, up from 1219.
+
 ## 1.3.1 — 2026-09-26
 
 ### Fixed

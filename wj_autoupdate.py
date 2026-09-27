@@ -461,6 +461,11 @@ def release_lock(fd):
 # HTTP helpers
 # ----------------------------------------------------------------------
 def http_json(url):
+    # The registry names each author's feed, and the feeds are fetched from
+    # wherever it says: only web addresses (wj_paths.web_url_problem).
+    why = wj_paths.web_url_problem(url)
+    if why:
+        raise ValueError(f"refusing {url!r}: {why}")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
                                                "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:

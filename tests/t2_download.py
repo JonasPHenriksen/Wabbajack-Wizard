@@ -927,5 +927,69 @@ check("with nobody listening and no runtime folder yet, the click is kept for --
       str(box.runtime_files()) + " " + out[-300:])
 shutil.rmtree(box.root, ignore_errors=True)
 
+# ---------------------------------------------------------------- 2.18
+print("\n 2.18  only web addresses are fetched, whatever a manifest names")
+# Found 2026-09-27 in a security review: urllib opens file: addresses too,
+# and an archive with no hash is accepted on its size, so a manifest naming
+# file:///C:/Users/<you>/.ssh/<key> had the downloader copy that file into
+# the pool, on the share, and count it downloaded.
+import gzip
+import urllib.request
+logging.getLogger("wj_cdn").setLevel(logging.CRITICAL)
+outside = os.path.join(TMP, "not-the-pool")
+os.makedirs(outside, exist_ok=True)
+secret = os.path.join(outside, "stand-in-for-a-key.txt")
+io.open(secret, "wb").write(b"-----BEGIN OPENSSH PRIVATE KEY----- stand-in -----END-----\n")
+FILE_URL = "file:" + urllib.request.pathname2url(secret)
+
+copied = os.path.join(TMP, "copied-from-disk.7z")
+for p in (copied, copied + ".part"):
+    if os.path.exists(p):
+        os.remove(p)
+ok = D.stream_download(FILE_URL, copied, expected_size=os.path.getsize(secret), retries=0)
+check("stream_download refuses a file: address, and writes nothing",
+      ok is False and not os.path.exists(copied) and not os.path.exists(copied + ".part"))
+
+pool = os.path.join(TMP, "pool-2-18", "Master")
+shutil.rmtree(os.path.dirname(pool), ignore_errors=True)
+os.makedirs(pool)
+res = {"done": 0, "failed": 0, "failures": []}
+leak = {"name": "innocent.7z", "size": os.path.getsize(secret), "hash": "",
+        "meta_text": "[General]\n", "meta": {},
+        "state": {"$type": "HttpDownloader", "Url": FILE_URL}}
+ok = D.download_one(FILE_URL, leak, pool, res)
+check("download_one refuses it too, puts nothing in the pool, and says why",
+      ok is False and res["failed"] == 1 and os.listdir(pool) == []
+      and "web address" in str(res["failures"]), str(res) + " " + str(os.listdir(pool)))
+
+on_disk = os.path.join(TMP, "cdn-on-disk")
+os.makedirs(on_disk, exist_ok=True)
+with gzip.open(os.path.join(on_disk, "definition.json.gz"), "wb") as fh:
+    fh.write(json.dumps({"Hash": "", "Size": 5, "MungedName": "x",
+                         "Parts": [{"Index": 0, "Offset": 0, "Size": 5, "Hash": ""}]}).encode())
+cdn_url = "file:" + urllib.request.pathname2url(on_disk)
+check("the CDN module reads no definition off the disk either",
+      D._CDN.looks_multipart(cdn_url) is False and D._CDN.get_definition(cdn_url) is None)
+
+box = Sandbox(os.path.join(BOXROOT, "sb2"))
+with zipfile.ZipFile(os.path.join(box.manifests, "Leak.wabbajack"), "w") as z:
+    z.writestr("modlist", json.dumps({"GameType": "Fallout4", "Archives": [
+        {"Name": "innocent.7z", "Size": os.path.getsize(secret), "Hash": "", "Meta": "",
+         "State": {"$type": "HttpDownloader, Wabbajack.Lib", "Url": FILE_URL}}]}))
+rc, out = box.run("wj_downloader.py", ["--game", "Fallout4", "--list", "Leak", "--yes",
+                                       "--skip-nexus"], env_extra=quiet)
+landed = [os.path.join(d, n) for d, _s, fs in os.walk(box.archives) for n in fs
+          if n.startswith("innocent")]
+check("a whole run on such a manifest copies nothing into the pools", landed == [],
+      str(landed) + " " + out[-400:])
+shutil.rmtree(box.root, ignore_errors=True)
+
+rule = getattr(D.wj_paths, "web_url_problem", None)
+check("the rule: http and https are web addresses, and nothing else is",
+      rule is not None and [rule(u) is None for u in (
+          "https://example.invalid/a.7z", "HTTP://example.invalid/a.7z", " https://x.invalid/ ",
+          FILE_URL, "ftp://example.invalid/a.7z", "data:,hello", "C:\\Users\\x\\key", "", None)]
+      == [True, True, True, False, False, False, False, False, False])
+
 srv.shutdown()
 sys.exit(summary())

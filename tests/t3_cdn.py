@@ -268,5 +268,25 @@ check("the build the manifest pins downloads and verifies", ok is True
 check("  byte-exact", io.open(p, "rb").read() == WHOLE)
 check("  with its .meta written", os.path.exists(p + ".meta"))
 
+print("\n      on its own, the module keeps the same rule for what it fetches")
+# wj_cdn is usable without the rest of the suite, so it carries its own copy
+# of wj_paths.web_url_problem for that case. The two must agree.
+import importlib.util
+import wj_paths
+spec = importlib.util.spec_from_file_location("wj_cdn_alone", C.__file__)
+alone = importlib.util.module_from_spec(spec)
+saved = sys.modules.get("wj_paths")
+sys.modules["wj_paths"] = None                  # makes `from wj_paths import` fail
+try:
+    spec.loader.exec_module(alone)
+finally:
+    sys.modules["wj_paths"] = saved
+urls = ("https://x.invalid/a", "HTTP://x.invalid/a", "file:///C:/x", "ftp://x.invalid/a",
+        "data:,x", "C:\\x", "", None)
+check("its inline copy is in use and agrees with wj_paths on every address",
+      alone.web_url_problem is not wj_paths.web_url_problem
+      and [alone.web_url_problem(u) is None for u in urls]
+      == [wj_paths.web_url_problem(u) is None for u in urls])
+
 srv.shutdown()
 sys.exit(summary())

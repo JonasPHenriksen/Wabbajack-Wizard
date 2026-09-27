@@ -530,5 +530,27 @@ st = G.evaluate(G.report_archives(r, WJ), {"have.7z": [("x", 9)]}, WJ)
 check("the missing archives are split by source, the one held and the game file left out",
       st["split"] == {"nexus": (1, 30), "direct": (1, 70), "manual": 1, "other": 1}, str(st["split"]))
 
+# ---------------------------------------------------------------- 11.15
+print("\n 11.15  feeds and gallery files come only from web addresses")
+# The same review as t2's 2.18: the registry and every author's feed name
+# the addresses fetched next, and urllib opens file: ones as readily.
+import urllib.request
+os.makedirs(BOX, exist_ok=True)
+local = os.path.join(BOX, "local.json")
+io.open(local, "w", encoding="utf-8").write('{"read": "off the disk"}')
+local_url = "file:" + urllib.request.pathname2url(local)
+try:
+    got = REAL_HTTP("x.json", local_url)
+except Exception as e:
+    got = e
+check("the gallery refuses a file: address rather than reading the file",
+      isinstance(got, G.GalleryError), repr(got)[:200])
+try:
+    got = REAL_HTTP_JSON(local_url)
+except Exception as e:
+    got = e
+check("  and so does the feed reader",
+      isinstance(got, Exception) and "web address" in str(got), repr(got)[:200])
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

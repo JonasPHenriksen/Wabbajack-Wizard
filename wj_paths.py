@@ -21,11 +21,14 @@ is our own exe rather than a Python. `stage_argv()` answers that too, with a
 `--wj-stage=` token the launcher intercepts before argparse ever sees it.
 
 Nothing here imports anything else of ours. It is the bottom of the stack on
-purpose, so that any module can rely on it.
+purpose, so that any module can rely on it - which is also why the one rule
+here that is not about folders lives here: which addresses the tools may
+fetch at all (web_url_problem).
 """
 
 import os
 import sys
+import urllib.parse
 
 # The token that tells a frozen exe to be one of the sibling scripts instead
 # of itself. Consumed by wj_launcher.py and never reaches an argument parser.
@@ -156,3 +159,24 @@ def own_names():
         return {GUI_EXE.lower(), CONSOLE_EXE.lower(),
                 os.path.basename(sys.executable).lower()}
     return set()
+
+
+# The only kinds of address the tools fetch. Every address fetched comes from
+# someone else - a manifest, an author's feed, the gallery - and urllib opens
+# more than the web: a file: address in a manifest had the downloader copy any
+# file this Windows account can read into the pool, on the share, and count it
+# downloaded. ftp: and data: have no business here either.
+WEB_SCHEMES = ("http", "https")
+
+
+def web_url_problem(url):
+    """Why `url` is not an address the tools may fetch, or None."""
+    if not isinstance(url, str) or not url.strip():
+        return "there is no address"
+    try:
+        scheme = urllib.parse.urlsplit(url.strip()).scheme.lower()
+    except ValueError as e:
+        return f"it is not an address ({e})"
+    if scheme not in WEB_SCHEMES:
+        return f"{scheme}: is not a web address" if scheme else "it is not a web address"
+    return None

@@ -64,6 +64,22 @@ try:
     USER_AGENT = _CFG.USER_AGENT
 except ImportError:                     # usable on its own, with a plain name
     USER_AGENT = "WabbajackWizard"
+
+try:
+    from wj_paths import web_url_problem
+except ImportError:                     # on its own: the same rule, inline
+    def web_url_problem(url):
+        """Why `url` is not an address to fetch, or None: http and https
+        only, as wj_paths.web_url_problem says at length."""
+        if not isinstance(url, str) or not url.strip():
+            return "there is no address"
+        try:
+            scheme = urllib.parse.urlsplit(url.strip()).scheme.lower()
+        except ValueError as e:
+            return f"it is not an address ({e})"
+        if scheme not in ("http", "https"):
+            return f"{scheme}: is not a web address" if scheme else "it is not a web address"
+        return None
 HTTP_TIMEOUT = 120
 PART_RETRIES = 4
 DEFAULT_WORKERS = 4
@@ -158,6 +174,11 @@ def _field(d, *names, default=None):
 
 
 def _open(url, extra_headers=None):
+    why = web_url_problem(url)
+    if why:
+        # A URLError, so every caller's handling of an unreachable CDN applies:
+        # the definition is fetched first, and its failure is not retried.
+        raise urllib.error.URLError(f"refusing {url!r}: {why}")
     headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
     if extra_headers:
         headers.update(extra_headers)

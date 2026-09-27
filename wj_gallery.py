@@ -155,9 +155,14 @@ def cache_size():
 # ----------------------------------------------------------------------
 def http_bytes(rel, url=None):
     """GET one gallery file, or any URL named outright. Asks for gzip: the
-    big reports compress 5x."""
+    big reports compress 5x. A URL named outright comes from a feed, so it
+    has to be a web address (wj_paths.web_url_problem)."""
+    target = url or (RAW_BASE + rel)
+    why = wj_paths.web_url_problem(target)
+    if why:
+        raise GalleryError(f"refusing {target!r}: {why}")
     req = urllib.request.Request(
-        url or (RAW_BASE + rel),
+        target,
         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"})
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
         raw = r.read()

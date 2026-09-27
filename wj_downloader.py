@@ -1509,6 +1509,10 @@ _MF_PATTERNS = [
 
 
 def resolve_mediafire(page_url):
+    why = wj_paths.web_url_problem(page_url)
+    if why:
+        LOG.warning("  [WARN] Not loading the MediaFire page %r: %s.", page_url, why)
+        return None
     try:
         req = urllib.request.Request(sanitize_url(page_url),
                                      headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
@@ -1558,6 +1562,10 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
     read alike, so a connection that goes silent becomes a retry rather than
     a hang. That, with the resume above, is what makes a stall cost at most
     the timeout - whether the file runs alone or beside others."""
+    why = wj_paths.web_url_problem(url)
+    if why:
+        LOG.error("  [ERROR] Not fetching %s from %r: %s.", os.path.basename(dest), url, why)
+        return "fatal"
     url = sanitize_url(url)
     part = dest + ".part"
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -1903,12 +1911,18 @@ def download_one(url, archive, dest_dir, results, quiet=False):
 
     This is where an archive's name becomes a path, so it is checked here
     too, whoever the caller: a name that is not a plain file name would put
-    the file somewhere other than `dest_dir`."""
+    the file somewhere other than `dest_dir`. And its address must be a web
+    one: a file: address in a manifest copied a local file into the pool."""
     name = archive["name"]
     why = CFG.plain_name_problem(name)
     if why:
         LOG.error("  [SKIP] %r is not a plain file name (%s); not downloaded.", name, why)
         _tally(results, False, name, f"not a plain file name: {why}")
+        return False
+    why = wj_paths.web_url_problem(url)
+    if why:
+        LOG.error("  [SKIP] %s: refusing its address %r (%s); not downloaded.", name, url, why)
+        _tally(results, False, name, f"not a web address: {why}")
         return False
     dest = os.path.join(dest_dir, name)
     # For the speed sample: a transfer that resumes a partial file moved
