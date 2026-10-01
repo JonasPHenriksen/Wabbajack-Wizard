@@ -437,6 +437,21 @@ class App:
         text += f"\n\n{undo}"
         return messagebox.askyesno(title, text, icon="warning", parent=self.root)
 
+    def _readme_read(self, stem, url):
+        """Before an install: open the list's readme and ask whether what it
+        asks is done (WB.README_WHY). False stops it before anything starts."""
+        if not url:
+            return messagebox.askyesno(
+                "No readme", f"{stem}'s manifest names no readme, so there is none to "
+                             f"open.\n\nInstall anyway?", parent=self.root)
+        why = WB.open_readme(url)
+        where = ("It is open in your browser:" if why is None
+                 else f"It could not be opened ({why}). It is at:")
+        return messagebox.askyesno(
+            f"Read {stem}'s readme first",
+            f"{where}\n{url}\n\n{WB.README_WHY}\n\nHave you read it, and done what it asks?",
+            parent=self.root)
+
     def wabbajack_clear(self, what):
         """Refuse to move archives under a running Wabbajack. Retry until it
         is closed, or give up."""
@@ -1654,7 +1669,10 @@ class App:
             if not wj or not wj.get("cli"):
                 return {"wj": wj}
             ready, detail = WB.game_ready(wj.get("cli"), game)
-            return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj)}
+            # The manifest on disk: a new version's arrives in step 1, and a
+            # list's readme stays at one address.
+            return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj),
+                    "readme": WB.manifest_readme(os.path.join(A.MANIFESTS, fn))}
 
         def checked(res):
             wj = res["wj"]
@@ -1672,6 +1690,8 @@ class App:
                     "Wabbajack is out of date", f"{upd['text']}.\n\nA modlist built for a newer "
                     f"Wabbajack can fail to install on an older one. Carry on anyway?",
                     icon="warning", parent=self.root):
+                return
+            if not self._readme_read(W.stem_of(fn), res.get("readme")):
                 return
             lines = [f"{W.stem_of(fn)}   v{inst['version'] or '?'} -> v{ent['version']}",
                      f"into {inst['path']}", ""]
@@ -1890,11 +1910,13 @@ class App:
         game = st["game"]
 
         def job():
+            readme = WB.manifest_readme(os.path.join(A.MANIFESTS, fn))
             wj = self._find_wabbajack()
             if not wj:
-                return {"wj": None, "update": WB.update_status(None)}
+                return {"wj": None, "update": WB.update_status(None), "readme": readme}
             ready, detail = WB.game_ready(wj.get("cli"), game)
-            return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj)}
+            return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj),
+                    "readme": readme}
 
         self.run_job("Checking Wabbajack", job, lambda res: self._show_install_offer(fn, st, mode, res))
 
@@ -1942,7 +1964,9 @@ class App:
             lines.append("            Run Wabbajack.exe once to let it update itself; the old "
                          "version's folder is removed from here the next time it is checked.")
         lines += [f"Modlist     {manifest}", f"Downloads   {downloads}",
-                  f"Game        {A.WJ.game_label(st['game'])}  [{mark}]   {detail}"]
+                  f"Game        {A.WJ.game_label(st['game'])}  [{mark}]   {detail}",
+                  f"Readme      {res.get('readme') or 'none named in the manifest'}"
+                  + ("   (opens when you install)" if res.get("readme") else "")]
         if st["missing"]:
             lines.append(f"Missing     {st['missing']} archive(s) ({human(st['bytes'])}) not downloaded "
                          f"yet; Wabbajack will try to fetch them itself.")
@@ -1954,7 +1978,7 @@ class App:
             lines.append("wabbajack-cli.exe was not found; set INSTALL_MODE to 'gui' to open the window.")
         self.install_info.set("\n".join(lines))
         self.install_ctx = {"fn": fn, "st": st, "wj": wj, "manifest": manifest, "downloads": downloads,
-                            "mode": mode, "ready": ready, "update": update}
+                            "mode": mode, "ready": ready, "update": update, "readme": res.get("readme")}
         remembered = (self.state.get("install") or {}).get(stem)
         if remembered:
             self.install_path.set(remembered)
@@ -1971,6 +1995,8 @@ class App:
                 f"{upd['text']}.\n\nA modlist built for a newer Wabbajack can fail to install on "
                 f"an older one. The newest release is at\n{upd['url']}\n\n"
                 f"Install with the version you have anyway?", icon="warning", parent=self.root):
+            return
+        if not self._readme_read(W.stem_of(ctx["fn"]), ctx.get("readme")):
             return
         if ctx["mode"] == "gui":
             if WB.launch_gui(ctx["wj"]["exe"]):

@@ -789,6 +789,25 @@ game is installed; the game is missing; or Wabbajack does not support that game
 at all (Dark Souls 3, for one, is not in its list). A missing CLI reports
 "unknown" rather than guessing either way.
 
+### The list's readme comes first
+
+What a list needs done before its install - Windows and Steam settings,
+programs to install first, how the game must be set up - is written in its
+readme, and only there: a manifest carries the files, the steps that rebuild
+them, the game build it starts from and a link to that readme, but no field
+for prerequisites, and every author writes them up differently. So every
+install - from Prepare, from the console's stage 4, and an update in place -
+opens the list's readme in your browser first, and waits for you to say you
+have read it and done what it asks; "not yet" stops before anything starts.
+The install panel names the readme beforehand. A list whose manifest names no
+readme says so, and asks whether to install anyway. Only a web address is
+opened: the link comes from the manifest, and the shell would start a program
+it was handed instead.
+
+What 28 lists' readmes ask, what a manifest can and cannot say about it, and
+why the install does not try to check more than this, is in
+[docs/modlist-prerequisites.md](docs/modlist-prerequisites.md).
+
 ### Installs are remembered, and updated in place
 
 When `wabbajack-cli` finishes an install, the list, the folder, the version and
@@ -799,8 +818,9 @@ older than the manifest held here, which is itself the published one.
 
 **Update the selected install** - `[i]` in the console's stage 2 - brings an
 installed list up to date in one go. It makes the checks an install makes
-(Wabbajack found, able to see the game, and whether it is current), names every
-step in one confirmation, then fetches the new manifest if one is published,
+(Wabbajack found, able to see the game, whether it is current, and the list's
+readme opened and read), names every step in one confirmation, then fetches the
+new manifest if one is published,
 downloads what that manifest is missing (a click per Nexus file in assist
 mode), stages it, and runs Wabbajack's installer into the same folder, which
 updates it in place. It stops at the first step that fails, and says which.
@@ -942,7 +962,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1227 checks across eighteen suites. None of them touch the live archive pools:
+environment instead). 1245 checks across eighteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The download suites

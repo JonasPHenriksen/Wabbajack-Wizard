@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.4.0 — 2026-10-01
+
+### Added
+
+- **The list's readme comes before its install.** What a list needs done
+  first - Windows and Steam settings, programs to install, how the game must
+  be set up - is written in its readme and nowhere a tool can read: a
+  manifest carries a link to the readme but no field for prerequisites, and
+  every author writes them up differently. So every install, from Prepare,
+  from the console's stage 4 and as an update in place, now opens the list's
+  readme in the browser and waits for you to say you have read it and done
+  what it asks; "not yet" stops before anything starts. The install panel
+  names the readme beforehand, a list whose manifest names none says so and
+  asks whether to install anyway, and only a web address is ever opened. The
+  link is found in one pass over the manifest, under 1.5 s for the largest
+  list here, rather than by parsing all of it.
+- **Notes on what lists need before an install**:
+  [docs/modlist-prerequisites.md](docs/modlist-prerequisites.md) - what 28
+  lists' readmes ask and how often, what a manifest can and cannot say, how
+  the game build is pinned and Wabbajack's own downgrade works, and the
+  checks considered and left out.
+
+Tests: 1245 checks across 18 sandbox suites, up from 1227.
+
 ## 1.3.2 — 2026-09-27
 
 ### Fixed

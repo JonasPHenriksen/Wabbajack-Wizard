@@ -26,10 +26,13 @@ have committed to it. Checking first turns that into a sentence beforehand.
 
 import csv
 import io
+import json
 import os
 import re
 import shutil
 import subprocess
+import webbrowser
+import zipfile
 
 import wj_paths
 
@@ -372,6 +375,71 @@ def check_paths(manifest, downloads, output):
     if drive and not os.path.isdir(drive + os.sep):
         problems.append("there is no drive %s on this machine" % drive)
     return problems
+
+
+# What a list asks of the PC before an install - Windows and Steam settings,
+# programs to install first, how the game must be set up - is in its readme
+# and nowhere else. A manifest carries the files, the steps that rebuild
+# them, the game build it starts from and a link to that readme, but no field
+# for prerequisites, and the readmes are prose in no common form, often
+# behind pages a tool cannot read (docs/modlist-prerequisites.md). So an
+# install opens the readme and asks, rather than guessing.
+README_WHY = ("Lists ask for things there that no tool can check: Windows and Steam "
+              "settings, programs to install first, how the game must be set up.")
+
+# The manifest's top-level Readme field. It comes after the archive list and
+# the install steps, which run to hundreds of megabytes in a large list, so
+# it is looked for in one pass over the manifest instead of by parsing all of
+# it. A quote inside a string is escaped, so a "Readme" in an archive's Meta
+# text cannot match; the last match wins all the same.
+_README_FIELD = re.compile(rb'(?<!\\)"Readme"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_README_CHUNK = 1 << 22
+_README_OVERLAP = 1 << 16
+
+
+def manifest_readme(manifest):
+    """The address of a list's readme, from its manifest, or None when it
+    names none or the file cannot be read."""
+    found = None
+    try:
+        with zipfile.ZipFile(manifest) as z:
+            member = next((m for m in z.namelist()
+                           if os.path.basename(m).lower() == "modlist"), None)
+            if member is None:
+                return None
+            tail = b""
+            with z.open(member) as fh:
+                while True:
+                    chunk = fh.read(_README_CHUNK)
+                    if not chunk:
+                        break
+                    buf = tail + chunk
+                    for m in _README_FIELD.finditer(buf):
+                        found = m.group(1)
+                    tail = buf[-_README_OVERLAP:]
+        if found is None:
+            return None
+        url = json.loads(b'"' + found + b'"')
+    except Exception:           # a missing, damaged or foreign file: no readme to name
+        return None
+    url = url.strip() if isinstance(url, str) else ""
+    return url or None
+
+
+def open_readme(url):
+    """Open a readme in the default browser. Returns None when it opened,
+    otherwise why not.
+
+    The address comes from the manifest, which anyone could have edited, and
+    the shell starts whatever it is handed: a path to a program would run it.
+    So only a web address is opened (wj_paths.web_url_problem)."""
+    why = wj_paths.web_url_problem(url)
+    if why:
+        return why
+    try:
+        return None if webbrowser.open(url) else "no browser could be started"
+    except Exception as e:      # whatever the shell raised
+        return str(e) or e.__class__.__name__
 
 
 def install_args(cli, manifest, downloads, output):

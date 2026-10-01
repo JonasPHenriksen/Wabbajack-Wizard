@@ -1080,6 +1080,59 @@ try:
 finally:
     WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready = real
 
+# ---------------------------------------------------------------- 15.22
+print("\n 15.22  the list's readme opens before an install, which waits for a yes")
+# From reading 28 readmes (docs/modlist-prerequisites.md): what a list needs
+# done before an install is only there, so the window opens it and asks.
+README = "https://example.invalid/keep/readme"
+shown, ran = [], []
+real = (WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready,
+        WB.manifest_readme, WB.open_readme)
+WB.run_install = lambda cli, manifest, downloads, into, on_line=None: ran.append(into) or 0
+WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None, "cli": "stub-cli",
+                                       "version": "4.2.3.0"}
+WB.latest_release = lambda force=False: {"version": "4.2.3.0", "url": "u", "published": ""}
+WB.game_ready = lambda cli, game: (True, "found")
+WB.manifest_readme = lambda manifest: README
+WB.open_readme = lambda url: shown.append(url)            # None: it opened
+try:
+    app._offer_install("Keep.wabbajack")
+    settle()
+    check("the install panel names the readme", README in app.install_info.get(),
+          app.install_info.get()[-300:])
+    into = os.path.join(box.root, "KeepInstall2")
+    app.install_path.set(into)
+    DLG.calls.clear()
+    DLG.answer = False
+    app.prepare_install()
+    settle()
+    check("installing opens the readme first", shown == [README], str(shown))
+    check("  and asks whether it has been read, and done",
+          any(k == "ask" and "readme" in t.lower() and README in x for k, t, x in DLG.calls),
+          str(DLG.calls))
+    check("  'no' starts nothing", ran == [], str(ran))
+    DLG.answer = True
+    shown.clear()
+    app.prepare_install()
+    settle()
+    check("  'yes' goes on to the install", shown == [README] and ran == [into], str((shown, ran)))
+    WB.manifest_readme = lambda manifest: None
+    app._offer_install("Keep.wabbajack")
+    settle()
+    shown.clear()
+    ran.clear()
+    DLG.calls.clear()
+    DLG.answer = False
+    app.prepare_install()
+    settle()
+    check("a list that names no readme says so, opens nothing, and still waits for a yes",
+          shown == [] and ran == [] and any(k == "ask" and "no readme" in x for k, t, x in DLG.calls),
+          str(DLG.calls))
+finally:
+    WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready, \
+        WB.manifest_readme, WB.open_readme = real
+    DLG.answer = True
+
 # ---- put everything back ---------------------------------------------------
 root.destroy()
 W.out = REAL_WOUT

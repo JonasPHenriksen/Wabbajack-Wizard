@@ -351,9 +351,11 @@ try:
     check("  and a list with no install folder recorded is refused outright",
           not ok and "no install folder" in message, message)
 
-    # The console's [i]: pick the list, confirm once, and the same update runs.
+    # The console's [i]: pick the list, answer the readme question (this
+    # test's manifest names none: install anyway), confirm, and the same
+    # update runs.
     import builtins
-    answers = iter(["1", "y"])
+    answers = iter(["1", "y", "y"])
     real_input = builtins.input
     builtins.input = lambda prompt="": next(answers)
     stubs = (WB.find_wabbajack, WB.prune_old_versions, WB.game_ready, WB.update_status)
@@ -373,11 +375,119 @@ try:
     check("the console's [i] runs the same update after one confirmation",
           ok is True and [c[0] for c in calls] == ["fetch", "download", "stage", "install"],
           str(calls) + " " + " | ".join(said[-6:]))
+    check("  once the readme question is answered",
+          any("names no readme" in s for s in said), " | ".join(said[-12:]))
 finally:
     A.fetch_manifest, W.download_list, W.stage_list, WB.run_install, WB.running_processes = real
     W.out = real_out
     A.HERE, A.MANIFESTS, A.WJ.ARCHIVE_ROOT, CFG.ARCHIVE_ROOT = saved_paths
     shutil.rmtree(box.root, ignore_errors=True)
+
+# ---------------------------------------------------------------- 9.9
+print("\n 9.9  before any install, the list's readme is opened and confirmed")
+# From reading 28 lists' readmes on 2026-10-01: what a list asks of the PC
+# before an install is written there and nowhere a tool can read - no
+# manifest has a field for it - so the install opens it and waits for a yes
+# (docs/modlist-prerequisites.md).
+rd = os.path.join(BOX, "readme")
+os.makedirs(rd, exist_ok=True)
+
+
+def wabbajack_file(name, doc):
+    p = os.path.join(rd, name)
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("modlist", json.dumps(doc))
+    return p
+
+
+README = "https://example.invalid/lists/readme#prerequisites"
+# Wabbajack's own field order: the archives and the install steps first - in
+# a large list hundreds of megabytes of them - and the Readme after. One
+# archive's Meta text names a "Readme" of its own, a string inside a string.
+big = wabbajack_file("Big.wabbajack", {
+    "Archives": [{"Name": "a.7z", "Size": 1, "Hash": "A=",
+                  "Meta": '[General]\n"Readme": "https://evil.invalid/meta"\n',
+                  "State": {"$type": "HttpDownloader"}}],
+    "Author": "someone", "Description": "d",
+    "Directives": [{"$type": "InlineFile", "To": "mods\\x\\%d.ini" % i, "Hash": "A=", "Size": 1}
+                   for i in range(3000)],
+    "GameType": "Fallout4", "Name": "Big", "Readme": README, "Version": "1.0"})
+check("the manifest's own Readme is found past the archives and steps, not the one in a Meta text",
+      WB.manifest_readme(big) == README, repr(WB.manifest_readme(big)))
+saved_reads = (WB._README_CHUNK, WB._README_OVERLAP)
+WB._README_CHUNK, WB._README_OVERLAP = 7, 256          # every field straddles a read
+try:
+    check("  however the reads fall across it", WB.manifest_readme(big) == README,
+          repr(WB.manifest_readme(big)))
+finally:
+    WB._README_CHUNK, WB._README_OVERLAP = saved_reads
+quoted = wabbajack_file("Quoted.wabbajack", {"Archives": [], "Readme": 'https://x.invalid/a "b"\\c'})
+check("  and the escapes in it are read back", WB.manifest_readme(quoted) == 'https://x.invalid/a "b"\\c',
+      repr(WB.manifest_readme(quoted)))
+none = wabbajack_file("None.wabbajack", {"Archives": [], "GameType": "Fallout4"})
+blank = wabbajack_file("Blank.wabbajack", {"Archives": [], "Readme": "  "})
+notzip = os.path.join(rd, "NotZip.wabbajack")
+io.open(notzip, "wb").write(b"not a zip at all")
+check("no Readme, a blank one, a damaged file and a missing one all read as none",
+      [WB.manifest_readme(p) for p in (none, blank, notzip, os.path.join(rd, "absent"))]
+      == [None, None, None, None])
+
+opened = []
+real_open = WB.webbrowser.open
+WB.webbrowser.open = lambda url, *a, **k: opened.append(url) or True
+try:
+    check("a web address is opened in the browser", WB.open_readme(README) is None
+          and opened == [README], str(opened))
+    refused = [WB.open_readme(u) for u in ("file:///C:/Windows/System32/calc.exe",
+                                           "C:\\Windows\\System32\\calc.exe", "", None)]
+    check("  anything else is refused - the shell would start it - and nothing is opened",
+          all(refused) and opened == [README], str(refused) + " " + str(opened))
+    WB.webbrowser.open = lambda url, *a, **k: False
+    check("  and a browser that will not start is said", "no browser" in (WB.open_readme(README) or ""))
+finally:
+    WB.webbrowser.open = real_open
+
+print("\n      the console waits for a yes before it installs")
+import builtins
+heard, shown, installs = [], [], []
+real_bits = (W.out, builtins.input, WB.find_wabbajack, WB.prune_old_versions, WB.game_ready,
+             WB.update_status, WB.open_readme, WB.run_install, A.MANIFESTS, W.CFG.INSTALL_MODE)
+W.CFG.INSTALL_MODE = "cli"
+W.out = lambda msg="": heard.append(str(msg))
+WB.find_wabbajack = lambda hint=None: {"dir": "d", "exe": None, "cli": "stub-cli", "version": "4.2.3.0"}
+WB.prune_old_versions = lambda wj, running=None: []
+WB.game_ready = lambda cli, game: (True, "found")
+WB.update_status = lambda wj, latest=None: {"text": "the newest release", "outdated": False, "url": ""}
+WB.open_readme = lambda url: shown.append(url)          # None: it opened
+WB.run_install = lambda cli, manifest, downloads, into, on_line=None: installs.append(into) or 0
+A.MANIFESTS = rd
+quiet_st = {"game": "Fallout4", "missing": 0, "bytes": 0}
+try:
+    answers = iter(["n"])
+    builtins.input = lambda prompt="": next(answers)
+    res = W.offer_install({}, "Big.wabbajack", quiet_st)
+    said_text = "\n".join(heard)
+    check("installing opens the list's readme first, and says where it is",
+          shown == [README] and "is open in your browser" in said_text and README in said_text,
+          said_text[-400:])
+    check("  'not yet' stops it before the install folder is even asked for",
+          res is False and installs == [] and "Where should" not in said_text, said_text[-300:])
+    heard.clear()
+    answers = iter(["y", "s"])
+    res = W.offer_install({}, "Big.wabbajack", quiet_st)
+    check("  'yes' goes on to the install's own questions",
+          "Where should" in "\n".join(heard), "\n".join(heard)[-300:])
+    heard.clear()
+    shown.clear()
+    answers = iter(["n"])
+    res = W.offer_install({}, "None.wabbajack", quiet_st)
+    said_text = "\n".join(heard)
+    check("a list that names no readme says so, opens nothing, and still waits for a yes",
+          res is False and shown == [] and "names no readme" in said_text and installs == [],
+          said_text[-300:])
+finally:
+    (W.out, builtins.input, WB.find_wabbajack, WB.prune_old_versions, WB.game_ready,
+     WB.update_status, WB.open_readme, WB.run_install, A.MANIFESTS, W.CFG.INSTALL_MODE) = real_bits
 
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

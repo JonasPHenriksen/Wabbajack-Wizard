@@ -1820,6 +1820,11 @@ def install_update_step(state, rows):
                                   ("c", "s")) == "s":
         out("  Skipped.")
         return False
+    # The readme of the manifest on disk: a new version's comes with its
+    # manifest, in step 1, and a list's readme stays at one address.
+    if not readme_read(stem_of(fn), os.path.join(A.MANIFESTS, fn)):
+        out("  Skipped.")
+        return False
     lines = [f"{stem_of(fn)}   v{inst.get('version') or '?'} -> v{ent['version']}",
              f"install folder   {inst.get('path')}", ""]
     if changed:
@@ -2233,6 +2238,24 @@ def update_install(state, row, assist, wj):
     return True, f"{stem} is installed at {target}, v{rec['version'] or '?'}"
 
 
+def readme_read(stem, manifest):
+    """Before an install: open the list's readme and ask whether what it asks
+    is done (WB.README_WHY). True to go on; anything else stops the install
+    before it starts."""
+    url = WB.manifest_readme(manifest)
+    out()
+    if not url:
+        out(f"  {stem}'s manifest names no readme, so there is none to open.")
+        return ask("   Install anyway?  [y] yes  [n] no", ("y", "n")) == "y"
+    why = WB.open_readme(url)
+    out(f"  {stem}'s readme " + ("is open in your browser:" if why is None
+                                 else f"could not be opened ({why}). It is at:"))
+    out(f"    {url}")
+    for line in textwrap.wrap(WB.README_WHY, 68):
+        out("  " + line)
+    return ask("   Read it, and done what it asks?  [y] yes  [n] not yet", ("y", "n")) == "y"
+
+
 def offer_install(state, filename, st):
     """Hand a freshly staged list to Wabbajack.
 
@@ -2292,6 +2315,9 @@ def offer_install(state, filename, st):
         if ask("   [c] carry on with this version   [s] skip", ("c", "s")) == "s":
             out("  Skipped. Nothing installed.")
             return False
+    if not readme_read(stem, manifest):
+        out("  Skipped. Nothing installed.")
+        return False
 
     if mode == "gui":
         if not wj["exe"]:
