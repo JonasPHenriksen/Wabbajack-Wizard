@@ -318,6 +318,14 @@ print("\n 2.11  assist mode with click-ahead: the next page opens while the file
 class FakeNexus:
     daily_remaining = None
     gone = {}          # (mod_id, file_id) the author has taken down -> replacement id, or None
+    archived = set()   # of those, the ones Nexus archived rather than deleted
+
+    def file_info(self, domain, mod_id, file_id):
+        if (mod_id, file_id) in self.archived:
+            return {"file_id": file_id, "category_name": "ARCHIVED"}, "ok"
+        if (mod_id, file_id) in self.gone:
+            return None, "notfound"
+        return {"file_id": file_id, "category_name": "MAIN"}, "ok"
 
     def mod_files(self, domain, mod_id):
         ids = []
@@ -532,6 +540,23 @@ try:
     check("  the file with no replacement was recorded with the reason, and not waited for",
           res["failed"] == 1 and any("no longer offers file 20 of mod 2" in (r or "") for _n, r in res["failures"])
           and time.time() - t0 < 8, str((res, f"{time.time() - t0:.1f}s")))
+
+    print("\n      a pinned file an update archived: its own page, which still offers it")
+    events.clear()
+    opened.clear()
+    pages.clear()
+    for n in ("nx1.bin", "nx2.bin"):
+        dest(n)
+    nx_items[:] = [nx_item("nx1.bin", "/ok", 1, len(BODY)), nx_item("nx2.bin", "/ok", 2, len(BODY))]
+    fn = FakeNexus()
+    fn.gone = {(1, 10): 77, (2, 20): None}      # out of the listing, as above
+    fn.archived = {(1, 10), (2, 20)}            # but archived, not deleted
+    res = {"done": 0, "failed": 0, "failures": []}
+    D.download_nexus_assist(nx_items, fn, TMP, res, TMP, args)
+    check("both archived files landed from their own pages, the replacement's passed over",
+          len(pages) == 2 and "mods/1?tab=files&file_id=10&" in pages[0]
+          and "mods/2?tab=files&file_id=20&" in pages[1] and res["done"] == 2 and res["failed"] == 0,
+          str((pages, res)))
 
     print("\n      the wait for a click ends the moment the window is closed")
     lst = D.NxmListener(TMP)

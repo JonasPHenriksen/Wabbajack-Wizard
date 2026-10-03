@@ -1048,6 +1048,21 @@ class NexusClient:
             return None, f"error:{err}"
         return (payload if isinstance(payload, dict) else {}), "ok"
 
+    def file_info(self, domain, mod_id, file_id):
+        """One file's own record. Returns (record, status), status 'ok' /
+        'notfound' / 'error:<msg>'. It answers for a file files.json has
+        stopped listing: an ARCHIVED file is left out of the listing but its
+        record still comes back, `category_name` 'ARCHIVED', while a file
+        Nexus no longer has at all is a 404 (both measured 2026-10-03)."""
+        url = f"{NEXUS_API_BASE}/games/{domain}/mods/{mod_id}/files/{file_id}.json"
+        payload, err = self._get_json(url)
+        if err is not None:
+            code = getattr(err, "code", None)
+            if code in (404, 410):
+                return None, "notfound"
+            return None, f"error:{err}"
+        return (payload if isinstance(payload, dict) else {}), "ok"
+
     @staticmethod
     def _file_ids(files):
         """The ids in a files.json listing."""
@@ -2632,7 +2647,23 @@ def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
                 continue
             page_ids = ids
             files, fstatus = nexus.mod_files(domain, ids[0])    # remembered from the resolve
-            if fstatus == "ok" and ids[1] not in NexusClient._file_ids(files):
+            gone = fstatus == "ok" and ids[1] not in NexusClient._file_ids(files)
+            if gone:
+                # The listing leaves out ARCHIVED files, and an update on
+                # Nexus archives the file it replaces - yet that file's own
+                # page still offers it, under a notice that it is an archived
+                # version. Those are the very bytes the list was built from,
+                # so that page beats any replacement's. The file's own record
+                # tells the two apart. (2026-10-03, The Bustling Valley: DSV
+                # 6.1.0 and Seed Sprites 2.3.3, archived the day before, were
+                # skipped as gone while both were still a click away.)
+                record, istatus = nexus.file_info(domain, ids[0], ids[1])
+                time.sleep(REQUEST_PAUSE_S)
+                if istatus == "ok" and (record or {}).get("category_name") == "ARCHIVED":
+                    gone = False
+                    LOG.info("  [NOTE] file %s is archived on Nexus - the mod was updated since the "
+                             "list was built - but its own page still offers it", ids[1])
+            if gone:
                 # The author has updated the mod and taken this file down
                 # since the list was built: its page would show the mod with
                 # no button for this file, the other kind of dead page. A

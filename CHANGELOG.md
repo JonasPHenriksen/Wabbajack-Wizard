@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.4.1 — 2026-10-03
+
+### Fixed
+
+- **A file the author's update archived was skipped as gone.** Updating a mod
+  on Nexus archives the file it replaces, and the listing the downloader read
+  to see whether a list's file was still offered leaves archived files out.
+  So the file looked deleted, and the run looked for a replacement by name or
+  size, found none, and skipped it with "there is no page to click" - while
+  its own page still offered it, under Nexus's notice that it is an archived
+  version, and it is the very file the list was built from. The downloader
+  now asks Nexus about the file itself, and opens that file's own page when
+  Nexus says it is archived. Found on The Bustling Valley on 2026-10-03:
+  Diverse Stardew Valley 6.1.0 and Standardized Seed Sprites 2.3.3, 168.9 MB
+  between them, were archived the day before, and neither newer upload would
+  have passed the hash check.
+
+Tests: 1246 checks across 18 sandbox suites, up from 1245.
+
 ## 1.4.0 — 2026-10-01
 
 ### Added
