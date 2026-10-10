@@ -162,13 +162,19 @@ on a share read as foreign-owned. Both folders and the wrapper are gitignored.
 This checkout pushes over SSH, with MinGit's own `ssh` and a GitHub deploy key:
 a key that reaches this one repository and nothing else, unlike the token the
 Credential Manager's browser sign-in keeps for an HTTPS remote, which reaches
-every repository on the account. Its private half lives in the Windows profile,
-off the share, so the folder holds no secret and a copy of it carries no push
-rights; another machine gets a key of its own. To set one up:
+every repository on the account. Its private half lives in `.git\ssh\`, so
+nothing this checkout needs is kept outside the folder: git never commits what
+is under `.git`, and no release includes it. The price is that a copy of the
+whole folder carries push rights, so take `.git\ssh\` out of a copy you give
+away; and the key file is cut off from the permissions it would inherit, so
+only you can read it. Another machine gets a key of its own. To set one up,
+from this folder, with `<folder>` its full path in forward slashes:
 
 ```
-ssh-keygen -t ed25519 -N "" -f %USERPROFILE%\.ssh\wabbajack-wizard_deploy_ed25519
-git config core.sshCommand "ssh -i C:/Users/<you>/.ssh/wabbajack-wizard_deploy_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=C:/Users/<you>/.ssh/wabbajack-wizard_known_hosts -o StrictHostKeyChecking=yes"
+mkdir .git\ssh
+ssh-keygen -t ed25519 -N "" -f .git\ssh\wabbajack-wizard_deploy_ed25519
+icacls .git\ssh\wabbajack-wizard_deploy_ed25519 /inheritance:r /grant:r "%USERNAME%:M" *S-1-5-18:F *S-1-5-32-544:F
+git config core.sshCommand "ssh -i <folder>/.git/ssh/wabbajack-wizard_deploy_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=<folder>/.git/ssh/wabbajack-wizard_known_hosts -o StrictHostKeyChecking=yes"
 git remote set-url origin git@github.com:JonasPHenriksen/Wabbajack-Wizard.git
 ```
 
@@ -988,13 +994,13 @@ with or without a byte order mark, or UTF-16, which is what Windows
 PowerShell 5.1's `"key" > nexus_api_key.txt` writes and which used to stop
 every lookup of the key with a decoding error. The file is plain text in a folder on a share another machine
 mounts too, so the Settings tab's **Nexus API key** section can move the key
-into Credential Manager, so the folder holds no secret, and deletes the file
+into Credential Manager, so the key is not kept in the folder, and deletes the file
 only once the stored copy reads back the same. It also takes a key typed in, or forgets the stored one.
 From the console, `run.bat --store-nexus-key` moves the file's key, or asks for
 one without showing it when there is no file; `--forget-nexus-key` removes it,
 and `--nexus-key-status` says where the key is found, never what it is. The
-cost is the deploy key's: Credential Manager keeps the key with this Windows
-account, so a copy of the folder on another machine needs it given again.
+cost: Credential Manager keeps the key with this Windows account, so a copy of
+the folder on another machine needs it given again.
 Nothing is installed for any of this - Credential Manager is part of Windows,
 reached through its own API.
 
