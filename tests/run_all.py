@@ -9,9 +9,12 @@ it - see harness.PY.
 
 Nothing here touches the live archive pools. ARCHIVE_ROOT is "../Mod Archive"
 resolved against the SCRIPT folder, so each suite copies the scripts into a
-temporary directory and they operate on a temporary pool instead. The two HTTP
-suites serve their own localhost server, so no suite needs the internet except
-where it is explicitly checking a real feed.
+temporary directory and they operate on a temporary pool instead. The suites
+that fetch serve their own localhost server - downloads, the CDN, the feeds
+and a notification endpoint among them - and the feed registry every other
+run sees is one nobody serves (harness.NO_FEEDS), so no suite needs the
+internet. Nor does any reach this account's registry or Credential Manager:
+WJ_NO_REGISTRY and WJ_NO_CREDENTIAL_STORE are set for all of them.
 
 When every suite passes, the sandboxes in %TEMP% are removed afterwards; when
 one fails they are kept, and named, for a look.
@@ -47,6 +50,7 @@ SUITES = [
     ("t16_pool.py", "laying out a pool for a game you keep nothing for"),
     ("t17_settings.py", "settings: what a value may be, and what a bad one costs"),
     ("t18_keystore.py", "the Nexus API key: where it is looked for, and Credential Manager"),
+    ("t19_safety.py", "where the code can do harm: every delete reviewed, web-only fetching"),
 ]
 
 total_pass = total_fail = 0

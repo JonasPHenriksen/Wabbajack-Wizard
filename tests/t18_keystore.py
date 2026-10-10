@@ -225,5 +225,31 @@ if os.environ.get("WJ_TEST_CREDMAN") == "1" and sys.platform == "win32":
 else:
     print("   (skipped: set WJ_TEST_CREDMAN=1 to run it against the real store)")
 
+# ---------------------------------------------------------------- 18.9
+print("\n 18.9  a key file in whatever encoding Windows wrote it in")
+# Found 2026-10-10: Windows PowerShell 5.1's  "key" > nexus_api_key.txt
+# writes UTF-16 with a byte order mark, and every lookup of the key then
+# raised a UnicodeDecodeError: the downloader, the Settings tab, the status.
+KS.STORE = KS._NO_STORE
+for raw, label in (("utf16-key\r\n".encode("utf-16"), "UTF-16 with its BOM, as PowerShell 5.1 writes"),
+                   ("le-key\r\n".encode("utf-16-le"), "UTF-16 without a BOM"),
+                   ("﻿bom-key\n".encode("utf-8"), "UTF-8 with a BOM, as Notepad once wrote"),
+                   (b"plain-key", "plain UTF-8 with no line end")):
+    with io.open(keyfile, "wb") as f:
+        f.write(raw)
+    want = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else
+                      "utf-16-le" if raw[1:2] == b"\x00" else "utf-8-sig").strip().lstrip("﻿")
+    check("%s is read" % label, KS.read_file(folder) == want, repr(KS.read_file(folder)))
+for raw, label in ((b"\xff\xfe\x00\xd8", "UTF-16 that is not text"),
+                   (b"\xc3\x28 not utf-8", "bytes that are no encoding of text"),
+                   (b"", "an empty file"), (b"\r\n\r\n", "only line ends")):
+    with io.open(keyfile, "wb") as f:
+        f.write(raw)
+    try:
+        got, raised = KS.read_file(folder), None
+    except Exception as e:
+        got, raised = None, e
+    check("%s is no key, not a crash" % label, got is None and raised is None, repr((got, raised)))
+os.remove(keyfile)
 KS.STORE = None
 sys.exit(summary())

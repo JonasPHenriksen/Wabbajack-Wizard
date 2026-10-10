@@ -4,6 +4,7 @@ ARCHIVE_ROOT is "../Mod Archive" resolved against the SCRIPT's folder, so
 copying the scripts into <sandbox>/tools/ makes them operate on
 <sandbox>/Mod Archive/ with no edits to the code under test.
 """
+import csv
 import io
 import json
 import os
@@ -11,12 +12,21 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from datetime import datetime, timedelta, timezone
 
 REAL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Neither a suite nor anything it runs reaches the Nexus key this Windows
 # account keeps in Credential Manager: a suite that wants a store puts a
-# stand-in in wj_keystore.STORE.
+# stand-in in wj_keystore.STORE. Nor the nxm:// handler this account has
+# registered: the start-up that hands back a handler a killed run left
+# behind (wj_downloader.recover_nxm_handler) stays out of the registry.
 os.environ["WJ_NO_CREDENTIAL_STORE"] = "1"
+os.environ["WJ_NO_REGISTRY"] = "1"
+# Nor do they read the published feeds: the feed registry is one nobody
+# serves, unless a suite serves its own (WJ_FEED_REGISTRY, see wj_autoupdate).
+# A run that reads the feeds then finds none, at once, rather than asking GitHub.
+NO_FEEDS = "http://127.0.0.1:9/no-feeds-in-the-test-suites/repositories.json"
+os.environ["WJ_FEED_REGISTRY"] = NO_FEEDS
 # The interpreter the suites run the scripts with: the one kept inside the
 # project when there is one, else the environment setup_env.bat made.
 PY = os.path.join(REAL, ".python", "python.exe")
@@ -51,7 +61,10 @@ class Sandbox:
 
     # -- fixture building --------------------------------------------
     def manifest(self, name, game, archives, corrupt=None):
-        """archives: [(filename, size, kind)] ; kind -> State $type"""
+        """archives: [(filename, size, kind)] ; kind -> State $type. An entry
+        may carry two more, (filename, size, kind, url, hash): where an http
+        archive is fetched from - a suite's own localhost server - and the
+        hash it must have."""
         path = os.path.join(self.manifests, name + ".wabbajack")
         if corrupt == "notzip":
             io.open(path, "wb").write(b"this is not a zip file at all")
@@ -63,14 +76,16 @@ class Sandbox:
             "manual": "ManualDownloader, Wabbajack.Lib",
         }
         entries = []
-        for i, (fn, size, kind) in enumerate(archives):
+        for i, entry in enumerate(archives):
+            fn, size, kind = entry[:3]
+            url, hsh = (tuple(entry[3:5]) + (None, None))[:2]
             entries.append({
-                "Name": fn, "Size": size, "Hash": "AAAAAAAAAAA=",
+                "Name": fn, "Size": size, "Hash": hsh or "AAAAAAAAAAA=",
                 "Meta": "[General]\ngameName=fallout4\nmodID=%d\nfileID=%d\n"
                         % (100 + i, 900 + i),
                 "State": {"$type": kinds[kind], "GameName": "Fallout4",
                           "ModID": 100 + i, "FileID": 900 + i,
-                          "Url": "https://example.invalid/%s" % fn},
+                          "Url": url or "https://example.invalid/%s" % fn},
             })
         doc = {"Archives": entries}
         if game:
@@ -85,12 +100,36 @@ class Sandbox:
                 z.writestr("modlist", body)
         return path
 
-    def pool_file(self, game, folder, name, size):
+    def pool_file(self, game, folder, name, size, data=None):
+        """A file of `size` bytes in a pool folder - or holding `data`, for a
+        suite that needs particular bytes, a build with a known hash."""
         d = os.path.join(self.archives, game, folder)
         os.makedirs(d, exist_ok=True)
         p = os.path.join(d, name)
-        io.open(p, "wb").write(b"x" * size)
+        io.open(p, "wb").write(b"x" * size if data is None else data)
         return p
+
+    def trash_record(self, game_folder, name, size, days_ago=0.0, trash="Trash"):
+        """Record a file as sent to <game_folder>/<trash> by a stage 5c
+        cleanup, `days_ago` days ago: the deletion record the purge and the
+        undo go by. A file in a trash folder with no record is one no tool
+        deletes, so a suite that puts one there by hand, standing in for an
+        earlier cleanup, writes its record too. Returns the record's path."""
+        os.makedirs(self.runtime, exist_ok=True)
+        when = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        stamp = when.astimezone().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(self.runtime, f"deleted_{game_folder}_{stamp}.csv")
+        new = not os.path.exists(path)
+        with io.open(path, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["archive", "size_bytes", "reason", "trashed_to", "master",
+                            "rule", "trashed_at"])
+            w.writerow([name, size, "recorded by a test",
+                        os.path.join(self.archives, game_folder, trash, name),
+                        os.path.join(self.archives, game_folder, "Master"),
+                        "your modlists only", when.isoformat(timespec="seconds")])
+        return path
 
     # -- running the code under test ---------------------------------
     def run(self, script, args, expect=None, env_extra=None):
@@ -98,7 +137,8 @@ class Sandbox:
         # environment's, and not the one this account keeps in Windows
         # Credential Manager (see wj_keystore).
         env = dict(os.environ, PYTHONUNBUFFERED="1",
-                   WJ_MANIFEST_DIR=self.manifests, WJ_NO_CREDENTIAL_STORE="1")
+                   WJ_MANIFEST_DIR=self.manifests, WJ_NO_CREDENTIAL_STORE="1",
+                   WJ_NO_REGISTRY="1", WJ_FEED_REGISTRY=NO_FEEDS)
         env.pop("NEXUS_API_KEY", None)
         if env_extra:
             env.update(env_extra)
@@ -151,6 +191,17 @@ class Sandbox:
                 if name in files:
                     hits.append((folder, files[name]))
         return sorted(hits)
+
+
+def wj_hash(data):
+    """The hash Wabbajack records for `data`: base64 of its xxHash64, little
+    endian - what a manifest's Hash holds and the tools check."""
+    import base64
+    import struct
+    import xxhash
+    h = xxhash.xxh64()
+    h.update(data)
+    return base64.b64encode(struct.pack("<Q", h.intdigest())).decode("ascii")
 
 
 def quiet_logging(A):

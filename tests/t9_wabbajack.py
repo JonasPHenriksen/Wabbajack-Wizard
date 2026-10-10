@@ -350,6 +350,16 @@ try:
     ok, message = W.update_install({"lists": {}}, row, False, {"cli": "stub-cli"})
     check("  and a list with no install folder recorded is refused outright",
           not ok and "no install folder" in message, message)
+    for result, says, label in (((False, None), "not downloaded", "a download refused for want of space"),
+                                ((True, 2), "exited 2", "a downloader that failed outright")):
+        calls.clear()
+        W.download_list = (lambda records, f, st, assist, r=result:
+                           calls.append(("download", f, assist)) or (r[0], r[1], st))
+        ok, message = W.update_install(state, row[:4] + (False, True), False, {"cli": "stub-cli"})
+        check("%s stops it before anything is staged or installed" % label,
+              not ok and says in message and [c[0] for c in calls] == ["download"],
+              str((message, calls)))
+    W.download_list = lambda records, f, st, assist: calls.append(("download", f, assist)) or (True, 0, st)
 
     # The console's [i]: pick the list, answer the readme question (this
     # test's manifest names none: install anyway), confirm, and the same
@@ -361,7 +371,7 @@ try:
     stubs = (WB.find_wabbajack, WB.prune_old_versions, WB.game_ready, WB.update_status)
     WB.find_wabbajack = lambda hint=None: {"dir": "d", "exe": None, "cli": "stub-cli",
                                            "version": "4.2.3.0"}
-    WB.prune_old_versions = lambda wj, running=None: []
+    WB.prune_old_versions = lambda wj, running=None, keep=(): []
     WB.game_ready = lambda cli, game: (True, "found")
     WB.update_status = lambda wj, latest=None: {"text": "the newest release", "outdated": False,
                                                 "url": ""}
@@ -455,7 +465,7 @@ real_bits = (W.out, builtins.input, WB.find_wabbajack, WB.prune_old_versions, WB
 W.CFG.INSTALL_MODE = "cli"
 W.out = lambda msg="": heard.append(str(msg))
 WB.find_wabbajack = lambda hint=None: {"dir": "d", "exe": None, "cli": "stub-cli", "version": "4.2.3.0"}
-WB.prune_old_versions = lambda wj, running=None: []
+WB.prune_old_versions = lambda wj, running=None, keep=(): []
 WB.game_ready = lambda cli, game: (True, "found")
 WB.update_status = lambda wj, latest=None: {"text": "the newest release", "outdated": False, "url": ""}
 WB.open_readme = lambda url: shown.append(url)          # None: it opened
@@ -488,6 +498,92 @@ try:
 finally:
     (W.out, builtins.input, WB.find_wabbajack, WB.prune_old_versions, WB.game_ready,
      WB.update_status, WB.open_readme, WB.run_install, A.MANIFESTS, W.CFG.INSTALL_MODE) = real_bits
+
+# ---------------------------------------------------------------- 9.10
+print("\n 9.10  only a version folder is a version, and none goes on a guess")
+# Found 2026-10-10: a folder Explorer named '4.2.3.0 - Copy (2)' was ranked by
+# every digit in its name, taken for the newest install, and the real
+# versions pruned as superseded by it; and a tasklist that did not answer
+# read as 'Wabbajack is not running'.
+import subprocess
+import types
+inst = os.path.join(BOX, "wj-copies")
+shutil.rmtree(inst, ignore_errors=True)
+for ver in ("4.2.2.1", "4.2.3.0", "4.2.3.0 - Copy (2)", "backup_20261010"):
+    os.makedirs(os.path.join(inst, ver, "cli"))
+    io.open(os.path.join(inst, ver, "Wabbajack.exe"), "wb").write(b"x")
+    io.open(os.path.join(inst, ver, "cli", "wabbajack-cli.exe"), "wb").write(b"x")
+wj = WB.find_wabbajack(hint=inst)
+check("a copy of a version folder is not taken for the newest version",
+      wj and wj["version"] == "4.2.3.0", str(wj))
+gone = WB.prune_old_versions(wj, running=[])
+check("  and pruning takes only the older real version, never a copy or a backup",
+      gone == ["4.2.2.1"] and sorted(os.listdir(inst))
+      == ["4.2.3.0", "4.2.3.0 - Copy (2)", "backup_20261010"], str((gone, sorted(os.listdir(inst)))))
+check("a newest that is not named like a version prunes nothing",
+      WB.prune_old_versions(dict(wj, version="4.2.3.0 - Copy (2)"), running=[]) == [])
+
+os.makedirs(os.path.join(inst, "4.1.0.0", "cli", "downloaded_mod_lists"))
+io.open(os.path.join(inst, "4.1.0.0", "Wabbajack.exe"), "wb").write(b"x")
+io.open(os.path.join(inst, "4.1.0.0", "cli", "wabbajack-cli.exe"), "wb").write(b"x")
+mine = os.path.join(inst, "4.1.0.0", "cli", "downloaded_mod_lists")
+check("an old version folder holding your manifests stays",
+      WB.prune_old_versions(wj, running=[], keep=[mine]) == []
+      and os.path.isdir(mine), str(sorted(os.listdir(inst))))
+
+real_sub = WB.subprocess
+
+
+def fake_tasklist(rc=0, raises=None, out=""):
+    def run(*a, **k):
+        if raises:
+            raise raises
+        return types.SimpleNamespace(returncode=rc, stdout=out)
+    return types.SimpleNamespace(run=run, DEVNULL=subprocess.DEVNULL,
+                                 SubprocessError=subprocess.SubprocessError)
+
+
+try:
+    WB.subprocess = fake_tasklist(raises=OSError(2, "tasklist is not there"))
+    missing = WB.running_processes()
+    WB.subprocess = fake_tasklist(raises=subprocess.TimeoutExpired("tasklist", 30))
+    stuck = WB.running_processes()
+    WB.subprocess = fake_tasklist(rc=1, out="ERROR: Access denied")
+    failed = WB.running_processes()
+    WB.subprocess = fake_tasklist(out='"Wabbajack.exe","4242","Console","1","300,000 K"\n'
+                                      '"explorer.exe","1","Console","1","90,000 K"\n')
+    seen = WB.running_processes()
+    check("a tasklist that is missing, stuck or failing is 'cannot tell', not 'not running'",
+          (missing, stuck, failed) == (None, None, None), str((missing, stuck, failed)))
+    check("  one that answers is read", seen == [(4242, "Wabbajack.exe")], str(seen))
+    WB.subprocess = fake_tasklist(rc=1)
+    check("and with 'cannot tell', no version folder is pruned",
+          WB.prune_old_versions(wj) == [] and os.path.isdir(os.path.join(inst, "4.1.0.0")))
+finally:
+    WB.subprocess = real_sub
+
+print("\n      an install may not go where this tooling keeps anything")
+saved_root = CFG.ARCHIVE_ROOT
+CFG.ARCHIVE_ROOT = os.path.join(BOX, "pools", "Mod Archive")
+lists = os.path.join(BOX, "lists")
+os.makedirs(lists, exist_ok=True)
+man2 = os.path.join(lists, "L.wabbajack")
+io.open(man2, "wb").write(b"stub")
+try:
+    root, tools = CFG.resolved_archive_root(), WB.wj_paths.app_dir(WB.__file__)
+    for target, label, says in (
+            (os.path.join(root, "Skyrim", "Installed"), "inside the archive root", "inside the archive root"),
+            (os.path.dirname(root), "holding the archive root", "holds the archive root"),
+            (os.path.join(tools, "Installed"), "inside the tools folder", "inside this tool's folder"),
+            (lists, "holding the modlist file", "holds the modlist file")):
+        problems = WB.check_paths(man2, dl, target)
+        check("an install %s is refused, and says so" % label,
+              any(says in p for p in problems), str(problems))
+    check("  while one of its own is not",
+          WB.check_paths(man2, dl, os.path.join(os.path.dirname(BOX), "elsewhere", "Installed")) == [],
+          str(WB.check_paths(man2, dl, os.path.join(os.path.dirname(BOX), "elsewhere", "Installed"))))
+finally:
+    CFG.ARCHIVE_ROOT = saved_root
 
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

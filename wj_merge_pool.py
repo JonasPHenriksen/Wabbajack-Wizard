@@ -42,9 +42,7 @@ lock.
 import argparse
 import csv
 import os
-import shutil
 import sys
-from datetime import datetime
 
 try:
     import wj_config as CFG
@@ -61,7 +59,7 @@ import wj_paths
 HERE = wj_paths.app_dir(__file__)
 ROOT = CFG.resolved_archive_root()
 POOLS = {p.lower() for p in CFG.POOL_FOLDERS}
-RESUME_SUFFIXES = (".part", ".parts.json")
+RESUME_SUFFIXES = WJ.RESUME_SUFFIXES
 
 
 def say(msg=""):
@@ -100,15 +98,14 @@ class Record:
     file on disk is exact at every moment however the run ends."""
 
     def __init__(self, src_name, dst_name, dry):
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.path = os.path.join(
-            wj_paths.runtime_dir(__file__),
-            f"merged_{src_name}_into_{dst_name}_{stamp}.csv")
+        self.path = None
         self.rows = 0
         self._fh = self._w = None
         if dry:
             return
-        self._fh = open(self.path, "w", newline="", encoding="utf-8")
+        # A name of its own, never an earlier merge's (wj_paths.create_stamped).
+        self.path, self._fh = wj_paths.create_stamped(
+            wj_paths.runtime_dir(__file__), f"merged_{src_name}_into_{dst_name}_")
         self._w = csv.writer(self._fh)
         self._w.writerow(["action", "archive", "size_bytes", "from",
                           "kept_or_to", "hash"])
@@ -237,9 +234,11 @@ def move_list_folder(src, dst, folder, dry):
     if dry:
         return True
     try:
-        shutil.move(s, d)
+        # A rename, never over a folder already there and never as a copy
+        # and a delete, which a held file could leave half done.
+        wj_paths.move_folder(s, d)
         return True
-    except (OSError, shutil.Error) as e:
+    except OSError as e:
         say(f"    could not move {folder}: {e}")
         return False
 
@@ -269,23 +268,24 @@ def merge_pool(src_dir, dst_dir, rec, dry):
                          name, size, s, d, "")
                 suffixed += 1
             if not dry:
-                shutil.move(s, d)
+                wj_paths.move_file(s, d)
                 if meta:
                     target = d + ".meta"
-                    if os.path.isfile(target):
-                        os.remove(target)
-                    shutil.move(os.path.join(src_dir, meta), target)
+                    if os.path.lexists(target):
+                        # A sidecar with no archive of its own: kept, aside.
+                        wj_paths.move_file(target, unique_path(target))
+                    wj_paths.move_file(os.path.join(src_dir, meta), target)
             moved += 1
-        except (OSError, shutil.Error) as e:
+        except OSError as e:
             say(f"    could not move {name}: {e}")
             errors += 1
     for m in list(metas.values()):
         try:
             if not dry:
-                shutil.move(os.path.join(src_dir, m),
-                            unique_path(os.path.join(dst_dir, m)))
+                wj_paths.move_file(os.path.join(src_dir, m),
+                                   unique_path(os.path.join(dst_dir, m)))
             moved += 1
-        except (OSError, shutil.Error) as e:
+        except OSError as e:
             say(f"    could not move {m}: {e}")
             errors += 1
     return moved, suffixed, errors

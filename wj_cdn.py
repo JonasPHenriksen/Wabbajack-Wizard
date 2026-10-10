@@ -26,6 +26,10 @@ WabbajackCDNDownloader).
 Resume: completed part indices are recorded in a small "<dest>.parts.json"
 sidecar, so an interrupted 4 GB download picks up where it stopped instead of
 starting over. The sidecar is removed on success.
+
+Memory: only a few parts are fetched or held at once (WINDOW_PER_WORKER per
+worker), however many the file has. Holding every finished part until the
+end held the whole file in memory - 4.7 GB for the largest manifest here.
 """
 
 import os
@@ -37,6 +41,8 @@ import time
 import base64
 import struct
 import logging
+import threading
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -66,8 +72,8 @@ except ImportError:                     # usable on its own, with a plain name
     USER_AGENT = "WabbajackWizard"
 
 try:
-    from wj_paths import web_url_problem
-except ImportError:                     # on its own: the same rule, inline
+    from wj_paths import web_url_problem, urlopen as _urlopen, publish as _publish
+except ImportError:                     # on its own: the same rules, inline
     def web_url_problem(url):
         """Why `url` is not an address to fetch, or None: http and https
         only, as wj_paths.web_url_problem says at length."""
@@ -80,9 +86,40 @@ except ImportError:                     # on its own: the same rule, inline
         if scheme not in ("http", "https"):
             return f"{scheme}: is not a web address" if scheme else "it is not a web address"
         return None
+
+    def _urlopen(request, timeout=None):
+        """urllib's own opener: the address is checked by the caller. A
+        redirect is followed as urllib follows it - wj_paths.urlopen, which
+        refuses any but a web one, is what the suite itself uses."""
+        return urllib.request.urlopen(request, timeout=timeout)
+
+    def _publish(part, dest, same=None):
+        """wj_paths.publish, inline: a different file already at `dest` is
+        moved to the first free 'Name~N.ext' beside it, never replaced."""
+        aside = None
+        if os.path.lexists(dest) and not (same is not None and same(dest)):
+            root, ext = os.path.splitext(dest)
+            i = 1
+            while (os.path.lexists(f"{root}~{i}{ext}")
+                   or os.path.lexists(f"{root}~{i}{ext}.meta")):
+                i += 1
+            aside = f"{root}~{i}{ext}"
+            # Sidecar first, so the two move together or not at all.
+            if os.path.isfile(dest + ".meta"):
+                os.rename(dest + ".meta", aside + ".meta")
+            os.rename(dest, aside)
+        os.replace(part, dest)
+        return aside
 HTTP_TIMEOUT = 120
 PART_RETRIES = 4
 DEFAULT_WORKERS = 4
+# Parts fetched or held at once, per worker: enough to keep every worker
+# busy while one part is being written, and no more.
+WINDOW_PER_WORKER = 2
+
+# Set when the run is to stop: Ctrl+C, or the window asking. Every part
+# fetch looks at it, so a stop costs a part's wait, not the rest of the file.
+STOP = threading.Event()
 
 _PROGRESS_BROKEN = False
 
@@ -183,7 +220,7 @@ def _open(url, extra_headers=None):
     if extra_headers:
         headers.update(extra_headers)
     req = urllib.request.Request(sanitize(url), headers=headers)
-    return urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
+    return _urlopen(req, timeout=HTTP_TIMEOUT)
 
 
 # ----------------------------------------------------------------------
@@ -206,15 +243,25 @@ def get_definition(url):
     """Fetch and parse <url>/definition.json.gz. Returns the dict or None."""
     base = public_url(url).rstrip("/")
     target = base + "/definition.json.gz"
-    try:
-        with _open(target) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as e:
-        LOG.error("  [ERROR] CDN definition returned HTTP %s for %s", e.code, base)
-        return None
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        LOG.error("  [ERROR] Could not reach the CDN for %s: %s", base, e)
-        return None
+    raw = None
+    for attempt in range(1, PART_RETRIES + 1):
+        try:
+            with _open(target) as resp:
+                raw = resp.read()
+            break
+        except urllib.error.HTTPError as e:
+            LOG.error("  [ERROR] CDN definition returned HTTP %s for %s", e.code, base)
+            return None
+        except http.client.HTTPException as e:
+            # The connection dropped mid-body: worth another try, as a part is.
+            if attempt == PART_RETRIES or STOP.is_set():
+                LOG.error("  [ERROR] The CDN definition for %s kept arriving cut short: %s",
+                          base, e)
+                return None
+            STOP.wait(min(20, 3 * attempt))
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            LOG.error("  [ERROR] Could not reach the CDN for %s: %s", base, e)
+            return None
 
     # The endpoint is gzipped, but urllib may transparently decode it if the
     # server sends Content-Encoding: gzip, so handle both.
@@ -235,7 +282,38 @@ def get_definition(url):
     if not isinstance(parts, list) or not parts:
         LOG.error("  [ERROR] CDN definition for %s lists no parts.", base)
         return None
+    why = parts_problem(definition)
+    if why:
+        LOG.error("  [ERROR] CDN definition for %s cannot be used: %s.", base, why)
+        return None
     return definition
+
+
+def parts_problem(definition):
+    """Why a definition's parts cannot be laid out as a file, or None.
+
+    The definition is the server's word, and each part is written at the
+    offset it gives: a negative or fractional one, a part reaching past the
+    file's stated size, or two parts claiming one index would write
+    somewhere that is not this file, or crash half-way through."""
+    total = _field(definition, "Size")
+    if total is not None and (not isinstance(total, int) or isinstance(total, bool)
+                              or total < 0):
+        return f"its Size {total!r} is not a byte count"
+    seen = set()
+    for p in _field(definition, "Parts", default=[]):
+        idx = _field(p, "Index")
+        offset = _field(p, "Offset", default=0)
+        size = _field(p, "Size")
+        for label, v in (("Index", idx), ("Offset", offset), ("Size", size)):
+            if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                return f"a part's {label} is {v!r}"
+        if idx in seen:
+            return f"part {idx} is listed twice"
+        seen.add(idx)
+        if total is not None and offset + size > total:
+            return f"part {idx} reaches past the file's end"
+    return None
 
 
 def definition_summary(definition):
@@ -244,8 +322,21 @@ def definition_summary(definition):
 
 
 # ----------------------------------------------------------------------
-def _fetch_part(base, part, attempt_log):
-    """Download one part, verifying its hash. Returns (index, offset, bytes)."""
+def _pause(seconds, cancel=None):
+    """Wait before a retry, ending at once on a stop or on `cancel`."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if STOP.is_set() or (cancel is not None and cancel.is_set()):
+            return
+        STOP.wait(min(0.25, max(0.0, end - time.time())))
+
+
+def _fetch_part(base, part, cancel=None):
+    """Download one part, verifying its hash. Returns (index, offset, bytes).
+
+    `cancel` is set when the download this part belongs to has ended - a
+    part that failed, a full disk: a part then gives up at its next attempt
+    rather than going on retrying for a download nobody is waiting for."""
     idx = _field(part, "Index")
     offset = _field(part, "Offset", default=0) or 0
     size = _field(part, "Size")
@@ -254,23 +345,28 @@ def _fetch_part(base, part, attempt_log):
 
     last = None
     for attempt in range(1, PART_RETRIES + 1):
+        if STOP.is_set() or (cancel is not None and cancel.is_set()):
+            raise RuntimeError("stopped; the download resumes next run")
         try:
             with _open(url) as resp:
                 data = resp.read()
         except (urllib.error.HTTPError, urllib.error.URLError,
-                TimeoutError, OSError) as e:
+                TimeoutError, OSError, http.client.HTTPException) as e:
+            # HTTPException is a body that stopped short (IncompleteRead):
+            # the same transient failure as a reset connection, which used to
+            # fail the whole archive at once instead of being retried.
             last = e
-            time.sleep(min(20, 3 * attempt))
+            _pause(min(20, 3 * attempt), cancel)
             continue
         if size is not None and len(data) != size:
             last = RuntimeError(f"part {idx} is {len(data)} bytes, expected {size}")
-            time.sleep(min(20, 3 * attempt))
+            _pause(min(20, 3 * attempt), cancel)
             continue
         if want and _HAVE_XXHASH:
             got = wj_hash(data)
             if got != want:
                 last = RuntimeError(f"part {idx} hash {got} != {want}")
-                time.sleep(min(20, 3 * attempt))
+                _pause(min(20, 3 * attempt), cancel)
                 continue
         return idx, offset, data
     raise RuntimeError(f"part {idx} failed after {PART_RETRIES} attempts: {last}")
@@ -315,10 +411,13 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
     completion, so a partial file never appears under the real name.
 
     strict_hash=True refuses, before fetching a single part, a definition
-    whose whole-file Hash differs from `expected_hash`. The definition
-    describes what the CDN serves today; the caller's hash pins what it needs.
-    When they differ the download can only produce a file the caller will
-    reject, so the multi-GB transfer is better not started.
+    whose whole-file Hash differs from `expected_hash`, or whose Size differs
+    from `expected_size`. The definition describes what the CDN serves today;
+    the caller's hash and size pin what it needs. When they differ the
+    download can only produce a file the caller will reject, so the multi-GB
+    transfer is better not started - and a file already under the name that
+    holds the bytes the CDN serves is not replaced by a copy of itself only
+    for the caller to discard it.
     """
     # detail=True changes the return type, so every exit has to go through
     # this. Updating only the success path left the failure paths returning a
@@ -336,6 +435,11 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
 
     # Cross-check against whatever the caller was told to expect.
     if expected_size is not None and total_size is not None and total_size != expected_size:
+        if strict_hash:
+            LOG.error("  [ERROR] The CDN is serving a different build: its definition says "
+                      "%s bytes, the manifest/feed wants %s. Not downloading a file that "
+                      "would fail verification.", total_size, expected_size)
+            return done_(False)
         LOG.warning("  [WARN] CDN says %s bytes but the manifest/feed says %s. "
                     "Trusting the CDN definition.", total_size, expected_size)
     if expected_hash and total_hash and expected_hash != total_hash:
@@ -387,28 +491,57 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
         LOG.error("  [ERROR] Cannot open %s for writing: %s", part_file, e)
         return done_(False)
 
-    todo = [p for p in parts if _field(p, "Index") not in done]
+    todo = iter([p for p in parts if _field(p, "Index") not in done])
     written = sum(_field(p, "Size", default=0) or 0
                   for p in parts if _field(p, "Index") in done)
     started = time.time()
     failed = None
 
+    # A few parts in flight, never the whole file. Every finished part used
+    # to stay referenced until the last one arrived - peak memory the size of
+    # the file - and an error writing one, a full disk say, or Ctrl+C, left
+    # every queued part to be fetched before it took effect.
+    window = max(2, WINDOW_PER_WORKER * max(1, workers))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers))
+    in_flight = {}
+    # Set when this download ends, however it ends: a part still running
+    # then gives up at its next attempt instead of retrying on for nobody,
+    # which with the network down kept the process from exiting for minutes.
+    cancel = threading.Event()
+
+    def top_up():
+        while len(in_flight) < window and not STOP.is_set() and failed is None:
+            p = next(todo, None)
+            if p is None:
+                return
+            in_flight[pool.submit(_fetch_part, base, p, cancel)] = p
+
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {pool.submit(_fetch_part, base, p, None): p for p in todo}
-            for fut in concurrent.futures.as_completed(futures):
+        top_up()
+        while in_flight and failed is None:
+            finished, _pending = concurrent.futures.wait(
+                list(in_flight), timeout=1.0,
+                return_when=concurrent.futures.FIRST_COMPLETED)
+            if STOP.is_set():
+                failed = RuntimeError("stopped; the download resumes next run")
+                break
+            for fut in finished:
+                in_flight.pop(fut, None)
                 try:
                     idx, offset, data = fut.result()
                 except Exception as e:        # part exhausted its retries
                     failed = e
-                    for f in futures:
-                        f.cancel()
                     break
-                fh.seek(offset)
-                fh.write(data)
-                fh.flush()
+                try:
+                    fh.seek(offset)
+                    fh.write(data)
+                    fh.flush()
+                except OSError as e:          # a full disk, a share gone away
+                    failed = e
+                    break
                 done.add(idx)
                 written += len(data)
+                del data
                 if len(done) % 25 == 0:
                     _save_sidecar(dest, base, total_size, done)
                 if progress and total_size:
@@ -417,15 +550,22 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
                     say_progress(f"\r    {pct:5.1f}%  {written / (1 << 20):.0f}/"
                                  f"{total_size / (1 << 20):.0f} MiB  "
                                  f"{len(done)}/{n_parts} parts  {rate:.1f} MiB/s   ")
+            top_up()
     finally:
+        # Whatever ended the loop - a failed part, a failed write, Ctrl+C -
+        # nothing queued is fetched after it, and what has been written is
+        # recorded for the resume.
+        cancel.set()
+        for fut in in_flight:
+            fut.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
         try:
             fh.close()
         except OSError:
             pass
+        _save_sidecar(dest, base, total_size, done)
         if progress:
             say_progress("\r" + " " * 78 + "\r")
-
-    _save_sidecar(dest, base, total_size, done)
 
     if failed is not None:
         LOG.error("  [ERROR] %s", failed)
@@ -451,6 +591,12 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
     if total_hash and _HAVE_XXHASH:
         got = hash_file(part_file)
         verified = got
+        if got is None:
+            # Not read is not checked: the file is held open elsewhere, or
+            # the share dropped. Kept, with its sidecar, for the next try.
+            LOG.error("  [ERROR] The assembled file could not be read to hash it; "
+                      "not publishing it. Re-run to try again.")
+            return done_(False)
         if got != total_hash:
             LOG.error("  [ERROR] Assembled file hash %s != definition %s. "
                       "Discarding and clearing resume state.", got, total_hash)
@@ -461,13 +607,24 @@ def download(url, dest, workers=DEFAULT_WORKERS, progress=True,
                 pass
             return done_(False)
 
+    # A different file already under this name - another list's build of
+    # it - is set aside under a '~N' name and kept, never replaced. One
+    # holding these very bytes is simply replaced.
+    def same(existing):
+        try:
+            if total_size is not None and os.path.getsize(existing) != total_size:
+                return False
+        except OSError:
+            return False
+        return bool(verified) and hash_file(existing) == verified
     try:
-        if os.path.exists(dest):
-            os.remove(dest)
-        os.replace(part_file, dest)
+        aside = _publish(part_file, dest, same=same)
     except OSError as e:
         LOG.error("  [ERROR] Could not finalise %s: %s", dest, e)
         return done_(False)
+    if aside:
+        LOG.warning("  [KEPT] A different build of %s was already there; it is kept as %s "
+                    "rather than replaced.", os.path.basename(dest), os.path.basename(aside))
 
     _drop_sidecar(dest)
     # detail=True hands back the hash we just computed, so a caller that also

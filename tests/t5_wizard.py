@@ -187,5 +187,29 @@ check("an orphaned sidecar is reported", "Ghost.wabbajack.metadata" in orphans,
       str(orphans))
 check("  and a sidecar with its manifest present is not",
       "Keep_@@_y.wabbajack.metadata" not in orphans, str(orphans))
+os.makedirs(os.path.join(A.MANIFESTS, "Folder.wabbajack.metadata", "inside"))
+check("  nor a folder that merely has a sidecar's name, which the sweep would take whole",
+      "Folder.wabbajack.metadata" not in W.orphan_sidecars(), str(W.orphan_sidecars()))
+
+# ---------------------------------------------------------------- 5.10
+print("\n 5.10  an unexpected error in the wizard is exit 4, not Python's 1")
+real = (A.bootstrap, A.load_state)
+
+
+def broken_state():
+    raise RuntimeError("a bug, standing in for any")
+
+
+A.bootstrap = lambda **k: 0
+A.load_state = broken_state
+try:
+    rc = quiet(W.run, no_lock=True)[0]
+    raised = None
+except Exception as e:
+    rc, raised = None, e
+finally:
+    A.bootstrap, A.load_state = real
+check("the wizard returns 4, the code the README gives an unhandled error",
+      rc == 4 and raised is None, repr((rc, raised)))
 
 sys.exit(summary())

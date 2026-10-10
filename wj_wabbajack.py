@@ -79,16 +79,21 @@ def parse_tasklist(text):
 
 
 def running_processes():
-    """Wabbajack processes running right now, as (pid, image). Empty when
-    there are none, and also when tasklist itself is unavailable - which is
-    reported as 'not running' because a check that cannot run must not stop
-    every operation forever."""
+    """Wabbajack processes running right now, as (pid, image): empty when
+    there are none, and None when that could not be told - tasklist missing,
+    stuck, or failing. None is not "not running": it used to be, and then a
+    check that could not run waved through the deletion of Wabbajack's own
+    version folders. Each caller decides: the console and the window ask
+    the person, an unattended run does not move archives, and pruning
+    Wabbajack's folders does not happen."""
     try:
         proc = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
                               capture_output=True, text=True, errors="replace",
                               timeout=30, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
+    if proc.returncode != 0:
+        return None
     return parse_tasklist(proc.stdout)
 
 
@@ -150,8 +155,13 @@ def find_wabbajack(hint=None):
         versions = []
         try:
             for name in os.listdir(root):
+                # Only a folder named like a version is one. 'Copy of
+                # 4.2.3.0', a 'backup_20261010' holding the CLI, a folder
+                # Explorer named '4.2.3.0 - Copy (2)' - each would have been
+                # ranked by every digit in its name, taken for the newest,
+                # and had the real versions pruned as superseded by it.
                 cli = os.path.join(root, name, "cli", "wabbajack-cli.exe")
-                if os.path.isfile(cli):
+                if _VERSION_DIR.match(name) and os.path.isfile(cli):
                     versions.append((version_key(name), name, cli))
         except OSError:
             pass
@@ -186,27 +196,34 @@ def is_version_dir(root, name):
         or os.path.isfile(os.path.join(path, "cli", "wabbajack-cli.exe")))
 
 
-def prune_old_versions(wj, running=None):
+def prune_old_versions(wj, running=None, keep=()):
     """Remove the version folders an update has superseded. Returns their
     names.
 
     Wabbajack's launcher downloads each new version into its own folder and
     leaves the old ones where they were, at some 700 MB each. Only folders
-    that are version-named and hold the program go, only ones older than the
-    newest, and never while a Wabbajack process is running: the launcher
-    itself is one, and while it runs the newest folder may still be arriving.
-    The newest folder has to be whole - program and CLI both - before anything
-    older is judged superseded by it."""
+    that are version-named and hold the program go, only ones older than a
+    newest that is itself version-named, and never while a Wabbajack process
+    is running - or while that cannot be told: the launcher itself is one,
+    and while it runs the newest folder may still be arriving. The newest
+    folder has to be whole - program and CLI both - before anything older is
+    judged superseded by it. A folder holding any path in `keep` stays
+    whatever its age: MANIFEST_DIR may follow Wabbajack's own versioned
+    downloaded_mod_lists, and fall back to an older version's while the
+    newest is still empty, and that folder is the user's manifests."""
     if not wj or not wj.get("version") or not wj.get("dir"):
         return []
     root, newest = wj["dir"], wj["version"]
+    if not _VERSION_DIR.match(str(newest)):
+        return []
     if not (os.path.isfile(os.path.join(root, newest, "Wabbajack.exe"))
             and os.path.isfile(os.path.join(root, newest, "cli", "wabbajack-cli.exe"))):
         return []
     if running is None:
         running = running_processes()
-    if running:
+    if running is None or running:
         return []
+    kept = [os.path.normcase(os.path.abspath(p)) for p in keep if p]
     removed = []
     try:
         names = os.listdir(root)
@@ -216,6 +233,9 @@ def prune_old_versions(wj, running=None):
         if name == newest or not is_version_dir(root, name):
             continue
         if version_key(name) >= version_key(newest):
+            continue
+        folder = os.path.normcase(os.path.abspath(os.path.join(root, name)))
+        if any(k == folder or k.startswith(folder + os.sep) for k in kept):
             continue
         try:
             shutil.rmtree(os.path.join(root, name))
@@ -370,11 +390,43 @@ def check_paths(manifest, downloads, output):
     elif os.path.normcase(dl_abs).startswith(os.path.normcase(out_abs) + os.sep):
         problems.append("the downloads folder is inside the install path; "
                         "they have to be separate")
+    else:
+        # Wabbajack owns the folder it installs into. Inside the archive root
+        # it would be read as a game's pools, or a stray to park, or Master's
+        # content to reclaim; holding the archive root, the tools or the
+        # manifests, it would be installing over them. Only this list's own
+        # downloads folder used to be checked.
+        for what, place in _places_not_to_install():
+            p = os.path.normcase(os.path.abspath(place))
+            o = os.path.normcase(out_abs)
+            if o == p or o.startswith(p.rstrip("\\/") + os.sep):
+                problems.append("the install path is inside %s (%s); install somewhere "
+                                "of its own" % (what, place))
+                break
+            if p.startswith(o.rstrip("\\/") + os.sep):
+                problems.append("the install path holds %s (%s); install somewhere "
+                                "of its own" % (what, place))
+                break
+        if not problems and manifest:
+            m_dir = os.path.normcase(os.path.dirname(os.path.abspath(manifest)))
+            if m_dir == os.path.normcase(out_abs) or m_dir.startswith(
+                    os.path.normcase(out_abs).rstrip("\\/") + os.sep):
+                problems.append("the install path holds the modlist file itself; "
+                                "install somewhere of its own")
 
     drive = os.path.splitdrive(out_abs)[0]
     if drive and not os.path.isdir(drive + os.sep):
         problems.append("there is no drive %s on this machine" % drive)
     return problems
+
+
+def _places_not_to_install():
+    """(what, path) for the folders an install may neither be in nor hold."""
+    places = []
+    if CFG is not None:
+        places.append(("the archive root", CFG.resolved_archive_root()))
+    places.append(("this tool's folder", wj_paths.app_dir(__file__)))
+    return places
 
 
 # What a list asks of the PC before an install - Windows and Steam settings,

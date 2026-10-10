@@ -164,7 +164,7 @@ def http_bytes(rel, url=None):
     req = urllib.request.Request(
         target,
         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"})
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+    with wj_paths.urlopen(req, timeout=HTTP_TIMEOUT) as r:
         raw = r.read()
         if r.headers.get("Content-Encoding") == "gzip":
             raw = gzip.decompress(raw)
@@ -184,30 +184,51 @@ def lenient_json(text):
         return json.loads(re.sub(r",(\s*[}\]])", r"\1", text))
 
 
+def _parse(raw, lenient):
+    """JSON from bytes, or None when it is not JSON at all."""
+    try:
+        text = raw.decode("utf-8-sig")
+        return lenient_json(text) if lenient else json.loads(text)
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
 def fetch_json(rel, ttl=INDEX_TTL, force=False, lenient=False, url=None):
     """A gallery file as Python, from the cache when it is fresh enough.
 
     Falls back to a stale cached copy if the network is down, because a
     slightly old gallery is far more useful than no gallery. `url` names a
     file outside the gallery repository - Wabbajack's own release feed - which
-    is then kept in this cache under `rel` like everything else."""
+    is then kept in this cache under `rel` like everything else.
+
+    A reply is parsed before it is cached, and one that is not JSON - a
+    captive portal's page, an upstream file with a typo in it - is a
+    GalleryError, never cached and never let out as a ValueError the callers
+    do not catch. It used to be cached first, for six hours, or fourteen
+    days for a report, and every read of it then crashed stage 1."""
     age = cache_age(rel)
     if not force and age is not None and age < ttl:
         raw = _read_cache(rel)
-        if raw is not None:
-            return (lenient_json(raw.decode("utf-8-sig")) if lenient
-                    else json.loads(raw.decode("utf-8-sig")))
+        data = _parse(raw, lenient) if raw is not None else None
+        if data is not None:
+            return data
     try:
         raw = http_bytes(rel) if url is None else http_bytes(rel, url)
     except Exception as e:
         stale = _read_cache(rel)
-        if stale is not None:
-            return (lenient_json(stale.decode("utf-8-sig")) if lenient
-                    else json.loads(stale.decode("utf-8-sig")))
+        data = _parse(stale, lenient) if stale is not None else None
+        if data is not None:
+            return data
         raise GalleryError("%s: %s" % (rel, e))
+    data = _parse(raw, lenient)
+    if data is None:
+        stale = _read_cache(rel)
+        old = _parse(stale, lenient) if stale is not None else None
+        if old is not None:
+            return old
+        raise GalleryError("%s: the reply is not JSON" % rel)
     _write_cache(rel, raw)
-    return (lenient_json(raw.decode("utf-8-sig")) if lenient
-            else json.loads(raw.decode("utf-8-sig")))
+    return data
 
 
 # ----------------------------------------------------------------------
@@ -296,10 +317,26 @@ def pool_key(token):
     return g.lower()
 
 
+def in_pools(token, pools):
+    """Do the lists a feed tags with this `game` token draw from one of these
+    pool folders (pool_key() values)?
+
+    By the folder the token maps onto, and by every other spelling of the
+    same game (wj_config.game_aliases): the feeds call Vampire: The
+    Masquerade - Bloodlines 'vtmb' while a manifest can say
+    VampireTheMasqueradeBloodlines, and read apart, the feeds' lists for it
+    protected nothing in its pool, without saying so."""
+    if pool_key(token) in pools:
+        return True
+    if CFG is None or not hasattr(CFG, "game_aliases"):
+        return False
+    return any(pool_key(alias) in pools for alias in CFG.game_aliases(canonical_game(token)))
+
+
 def game_label(token):
     g = canonical_game(token)
     if CFG is not None and hasattr(CFG, "game_label"):
-        return CFG.game_label(g)
+        return CFG.game_label(g) or "?"
     return g or "?"
 
 
@@ -401,6 +438,21 @@ def report_status(rep):
 def report_is_empty(rep):
     """True when a report exists but carries no archives to compare against."""
     return not (rep or {}).get("Archives")
+
+
+def report_unreadable(rep):
+    """How many of a report's Archives[] entries cannot be read: not an
+    object, no Original object in it, or no Name. All 310,228 entries of the
+    232 reports cached here could be, on 2026-10-10. A format that moved on
+    would make them all unreadable, and the list would then protect nothing
+    while being counted as checked - the short answer the "any known
+    modlist" rule exists to refuse on."""
+    bad = 0
+    for item in (rep or {}).get("Archives") or []:
+        a = item.get("Original") if isinstance(item, dict) else None
+        if not isinstance(a, dict) or not a.get("Name"):
+            bad += 1
+    return bad
 
 
 def report_archives(rep, wj):
@@ -541,7 +593,7 @@ UNVALIDATED = "not yet validated (no summary row)"
 UNREADABLE = "report unreadable or not cached"
 
 
-def published_builds(pools, feeds, summary, wj, progress=None):
+def published_builds(pools, feeds, summary, wj, progress=None, behind=None):
     """Every archive build any published list for these pool folders asks for.
 
     `pools` is a set of pool_key() values. Returns (want, checked, unchecked)
@@ -549,7 +601,7 @@ def published_builds(pools, feeds, summary, wj, progress=None):
     wanted_builds() produces, `checked` is how many lists contributed, and
     `unchecked` maps each list that could not to the reason - PULLED,
     UNVALIDATED, UNREADABLE, or a description of an empty report that is not
-    ForcedDown.
+    ForcedDown, or of one whose entries cannot be read.
 
     `unchecked` is the important return value. This set is used to decide what
     is safe to DELETE, so an incomplete answer is not a smaller answer - it is
@@ -557,8 +609,16 @@ def published_builds(pools, feeds, summary, wj, progress=None):
     knows to be short, rather than quietly reclaiming a few more gigabytes.
     Every published list for the pools is named here, including those with no
     summary row: a list the validator has not seen yet wants things too, and
-    silently leaving it out is exactly the short answer this guards against."""
-    keys = [k for k, e in feeds.items() if pool_key(e.get("game")) in pools]
+    silently leaving it out is exactly the short answer this guards against.
+
+    A cached report is up to REPORT_TTL old, and the list may have published a
+    new build since: its report then names the old build's archives. When the
+    report's ModListHash is not the feed's hash, it is fetched again. If the
+    validator has not caught up with the new build yet, the last report is
+    the best there is and is used - not refused on, which would block the
+    rule every time an author published - and the list is added to `behind`,
+    a list if one is given, for the caller to name."""
+    keys = [k for k, e in feeds.items() if in_pools(e.get("game"), pools)]
     want = {}
     checked, unchecked = 0, {}
     for i, key in enumerate(keys, 1):
@@ -581,10 +641,22 @@ def published_builds(pools, feeds, summary, wj, progress=None):
         if rep is None:
             unchecked[key] = UNREADABLE
             continue
+        want_hash = feeds[key].get("hash")
+        if want_hash and rep.get("ModListHash") and rep.get("ModListHash") != want_hash:
+            fresh = load_report(key, force=True)
+            if fresh is not None and not report_is_empty(fresh):
+                rep = fresh
+            if rep.get("ModListHash") != want_hash and behind is not None:
+                behind.append(key)
         if report_is_empty(rep):
             st = report_status(rep)
             unchecked[key] = (PULLED if st == "ForcedDown"
                               else "report lists no archives (status %s)" % st)
+            continue
+        bad = report_unreadable(rep)
+        if bad:
+            unchecked[key] = ("%d of its report's %d archive entries cannot be read"
+                              % (bad, len(rep.get("Archives") or [])))
             continue
         checked += 1
         for a in report_archives(rep, wj):

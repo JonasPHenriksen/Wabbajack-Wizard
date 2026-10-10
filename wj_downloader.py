@@ -86,6 +86,8 @@ import zipfile
 import logging
 import argparse
 import platform
+import _thread
+import email.utils
 import http.client
 import queue
 import threading
@@ -237,11 +239,12 @@ NEXUS_DOMAIN_FALLBACKS = {
 
 # Free-account nxm capture --------------------------------------------
 NXM_LISTEN_HOST   = "127.0.0.1"
-# These three live in the runtime folder (wj_paths.RUNTIME_DIR), where the
-# run and the nxm:// handler it registered both find them.
+# These live in the runtime folder (wj_paths.RUNTIME_DIR), where the run and
+# the nxm:// handler it registered both find them.
 NXM_PORT_FILE     = ".nxm_listener_port"   # the listener's port, for the handler
 NXM_PREV_HANDLER  = ".nxm_prev_handler"    # saved previous nxm:// command
 NXM_FALLBACK_FILE = "nxm_captured.txt"     # forwarder appends here if no listener
+NXM_KEPT_FILE     = ".nxm_taken_on_purpose"  # --register-nxm: kept until --unregister-nxm
 # The download window's Skip button is an nxm:// link under this host, so it
 # travels the same way a click does whichever path catches it.
 NXM_SKIP_PREFIX   = "nxm://wabbajackwizard/"
@@ -306,17 +309,20 @@ def banner(title):
 # ----------------------------------------------------------------------
 # Small helpers
 # ----------------------------------------------------------------------
+# The layout itself is wj_config's, read live, so a change of GAME_FOLDERS
+# reaches this module the moment it is made. Only the archive root is this
+# module's own: it is fixed at start-up, as the Settings tab says, and the
+# sandboxed test suites move it.
 def game_folder(game):
-    return GAME_FOLDERS.get(game, game)
+    return CFG.game_folder(game)
 
 
 def game_label(game):
-    return GAME_DISPLAY.get(game, game)
+    return CFG.game_label(game)
 
 
 def resolve_game_dirs(game):
-    base = os.path.join(ARCHIVE_ROOT, game_folder(game))
-    return base, os.path.join(base, "Master"), os.path.join(base, "Shared")
+    return CFG.resolve_game_dirs(game, ARCHIVE_ROOT)
 
 
 # Shared with the sorter and the wizard through wj_config, re-exported here
@@ -372,6 +378,19 @@ def is_junk_name(name):
     low = name.lower()
     return low.startswith("._") or low in (
         ".ds_store", "thumbs.db", "desktop.ini", ".localized")
+
+
+# A download in progress, or stopped to resume: the partial file, and the CDN
+# downloader's record of which parts it holds. Neither is an archive, and the
+# two belong together - the sorter used to park the record in Master as an
+# archive nobody wanted, and the next attempt then started the file afresh.
+RESUME_SUFFIXES = (".part", ".parts.json")
+
+
+def is_resume_file(name):
+    """Is `name` a partial download or its resume record, never to be indexed,
+    moved or reclaimed?"""
+    return str(name).lower().endswith(RESUME_SUFFIXES)
 
 
 def list_manifest_files(directory):
@@ -844,7 +863,7 @@ def index_existing(game_base, known_lists=None):
                 for e in it:
                     name = e.name
                     low = name.lower()
-                    if low.endswith(".meta") or low.endswith(".part"):
+                    if low.endswith(".meta") or is_resume_file(low):
                         continue
                     if is_junk_name(name):
                         continue
@@ -910,6 +929,12 @@ def wabbajack_hash(path):
 
 
 def verify_file(path, expected_size, expected_hash):
+    """(ok, why) for a file against what its manifest says.
+
+    A hash that could not be read is a failure, not a pass: the file is
+    held open by another process, or the share dropped mid-read. Passing it
+    used to accept whatever was there - a right-size file with the wrong
+    bytes included - and count it downloaded."""
     try:
         actual = os.path.getsize(path)
     except OSError as e:
@@ -918,7 +943,9 @@ def verify_file(path, expected_size, expected_hash):
         return False, f"size {actual} != expected {expected_size}"
     if expected_hash and _HAVE_XXHASH:
         got = wabbajack_hash(path)
-        if got and got != expected_hash:
+        if got is None:
+            return False, "the file could not be read to hash it"
+        if got != expected_hash:
             return False, "hash mismatch"
     return True, "ok"
 
@@ -926,6 +953,24 @@ def verify_file(path, expected_size, expected_hash):
 # ----------------------------------------------------------------------
 # Nexus API
 # ----------------------------------------------------------------------
+def _retry_after(headers):
+    """The seconds a Retry-After header asks for - a number, or an HTTP date,
+    both of which the standard allows - capped at five minutes. None when
+    there is none, or it cannot be read; the caller then backs off on its
+    own. An HTTP date used to raise out of the request and end the run."""
+    value = (headers or {}).get("Retry-After")
+    if not value:
+        return None
+    try:
+        secs = int(str(value).strip())
+    except ValueError:
+        try:
+            secs = int(email.utils.parsedate_to_datetime(str(value)).timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError, IndexError):
+            return None
+    return max(1, min(300, secs))
+
+
 class NexusClient:
     def __init__(self, api_key):
         self.api_key = api_key
@@ -957,24 +1002,38 @@ class NexusClient:
         self.hourly_remaining = geti("X-RL-Hourly-Remaining")
 
     def _get_json(self, url):
+        """(payload, None), or (None, error) - never raises.
+
+        Every caller branches on the error rather than catching anything, so
+        one dropped connection in a two-hour assist session must not escape
+        as a traceback: a connection reset, a body cut short and a reply that
+        is not JSON are retried like a timeout, and a 502/503/504 like a 429.
+        Only a definite answer - 401, 403, 404 - goes straight back."""
         req = urllib.request.Request(url, headers=self._headers())
+        last = None
         for attempt in range(4):
             try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with wj_paths.urlopen(req, timeout=60) as resp:
                     self._note_limits(resp.headers)
                     return json.load(resp), None
             except urllib.error.HTTPError as e:
                 self._note_limits(e.headers or {})
-                if e.code == 429:
-                    wait = int((e.headers or {}).get("Retry-After", 0) or 0) or (5 * (attempt + 1))
-                    LOG.warning("  [RATE] 429 from Nexus; waiting %ds...", wait)
+                if e.code in (429, 502, 503, 504):
+                    wait = (_retry_after(e.headers) if e.code == 429 else None) \
+                        or (5 * (attempt + 1))
+                    LOG.warning("  [RATE] %s from Nexus; waiting %ds...", e.code, wait)
+                    last = e
                     time.sleep(wait)
                     continue
                 return None, e   # let caller interpret 401/403/404 etc.
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+                    http.client.HTTPException) as e:
+                # OSError covers a reset connection; ValueError a reply that is
+                # not JSON; HTTPException a body that stopped short.
                 LOG.warning("  [RETRY] Nexus request failed (%s, attempt %d)", e, attempt + 1)
+                last = e
                 time.sleep(3 * (attempt + 1))
-        return None, RuntimeError("gave up after repeated Nexus API failures")
+        return None, RuntimeError(f"gave up after repeated Nexus API failures ({last})")
 
     def validate(self):
         """Confirm the key and detect Premium. Returns True on success."""
@@ -1240,34 +1299,101 @@ def nxm_handler_command():
     return f'"{exe}" "{script}" --nxm "%1"'
 
 
-def register_nxm(run_dir):
+_NXM_CMD_KEY = r"Software\Classes\nxm\shell\open\command"
+
+
+def _is_our_handler(cmd):
+    """Is this nxm:// command one this tool registered - from source or from
+    a build, by python.exe or pythonw.exe, from this folder or a copy of it?
+    Recognised by what it runs. Compared as an exact string, as it used to
+    be, our own command written by a run started another way read as some
+    other program's, was saved as the handler to restore, and was then
+    'restored' over the real one, which was lost."""
+    low = str(cmd or "").lower()
+    return "--nxm" in low and ("--wj-stage=wj_downloader" in low or "wj_downloader.py" in low)
+
+
+def _current_nxm_command():
+    """The nxm:// command registered for this Windows account, or None."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _NXM_CMD_KEY) as k:
+            value, _ = winreg.QueryValueEx(k, None)
+            return value
+    except OSError:
+        return None
+
+
+def _listener_alive(run_dir):
+    """Is an assist session listening for clicks now? Asked by connecting to
+    the port its listener wrote, which only a live one answers."""
+    try:
+        with open(os.path.join(run_dir, NXM_PORT_FILE), encoding="utf-8") as f:
+            port = int(f.read().strip())
+        with socket.create_connection((NXM_LISTEN_HOST, port), timeout=1):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def recover_nxm_handler(run_dir):
+    """Hand the nxm:// handler back when a run that took it ended without
+    doing so - killed, its console window closed, the power lost - and no
+    session is listening for clicks now. Every start of the tool asks, so a
+    handler left behind is put right at the next one rather than sending
+    every mod manager's clicks into a file until someone notices. A handler
+    taken on purpose with --register-nxm, to collect clicks for a later
+    --nxm-file, is left as it is until --unregister-nxm. Returns True when
+    it was handed back. Never touches the registry when WJ_NO_REGISTRY is
+    set, as the test suites set it - nor does registering or handing back
+    the handler."""
+    if not _HAVE_WINREG or os.environ.get("WJ_NO_REGISTRY"):
+        return False
+    if os.path.exists(os.path.join(run_dir, NXM_KEPT_FILE)):
+        return False
+    if not _is_our_handler(_current_nxm_command()) or _listener_alive(run_dir):
+        return False
+    LOG.warning("[NOTE] The nxm:// handler was still this tool's, left registered by a run "
+                "that ended without handing it back. Handing it back now.")
+    return unregister_nxm(run_dir)
+
+
+def register_nxm(run_dir, keep=False):
     """Register this script as the nxm:// handler under HKCU, saving whatever
-    was there before (e.g. Wabbajack) so --unregister-nxm can restore it."""
+    was there before (e.g. Wabbajack) so --unregister-nxm can restore it.
+
+    `keep` is --register-nxm's: the handler is taken on purpose, to collect
+    clicks for a later --nxm-file, and stays this tool's until
+    --unregister-nxm - a start of the tool does not take it for one a killed
+    run left behind (recover_nxm_handler)."""
     if not _HAVE_WINREG:
         LOG.error("[ERROR] nxm registration is Windows-only.")
         return False
+    if os.environ.get("WJ_NO_REGISTRY"):
+        # Set by the test suites: nothing they run may take this account's
+        # handler, whatever path a run takes to assist mode.
+        LOG.error("[ERROR] WJ_NO_REGISTRY is set, so the nxm:// handler is left as it is.")
+        return False
     base = r"Software\Classes\nxm"
-    cmd_key = base + r"\shell\open\command"
+    cmd_key = _NXM_CMD_KEY
     # Save the previous command (if any) so we can restore it later.
-    prev = None
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cmd_key) as k:
-            prev, _ = winreg.QueryValueEx(k, None)
-    except OSError:
-        prev = None
+    prev = _current_nxm_command()
     # Only record a previous handler that is not already us. Registering twice
     # without unregistering in between would otherwise save OUR command as the
     # "previous" one, and --unregister-nxm would then restore the hijack
     # permanently instead of giving Wabbajack its handler back.
     ours = nxm_handler_command()
-    if prev and os.path.normcase(prev.strip()) == os.path.normcase(ours.strip()):
+    if prev and _is_our_handler(prev):
         LOG.debug("nxm handler is already ours; keeping the saved previous handler.")
     else:
         try:
             with open(os.path.join(run_dir, NXM_PREV_HANDLER), "w", encoding="utf-8") as f:
                 f.write(prev or "")
-        except OSError:
-            pass
+        except OSError as e:
+            # Without the backup, handing the handler back could only remove
+            # it: whatever was registered before would be lost. Not taken.
+            LOG.error("[ERROR] Could not save the current nxm:// handler (%s), so it is "
+                      "not replaced.", e)
+            return False
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "URL:NXM Protocol")
@@ -1279,8 +1405,15 @@ def register_nxm(run_dir):
         return False
     _associations_changed()
     LOG.info("[OK] Registered this script as the nxm:// handler: %s", ours)
-    if prev and os.path.normcase(prev.strip()) != os.path.normcase(ours.strip()):
+    if prev and not _is_our_handler(prev):
         LOG.info("     Previous handler saved; --unregister-nxm restores it.")
+    if keep:
+        try:
+            with open(os.path.join(run_dir, NXM_KEPT_FILE), "w", encoding="utf-8") as f:
+                f.write("taken with --register-nxm; kept until --unregister-nxm\n")
+        except OSError as e:
+            LOG.warning("[WARN] Could not note that the handler is taken on purpose (%s); the "
+                        "next start of the tool may hand it back.", e)
     return True
 
 
@@ -1325,13 +1458,26 @@ def unregister_nxm(run_dir):
     if not _HAVE_WINREG:
         LOG.error("[ERROR] nxm registration is Windows-only.")
         return False
-    cmd_key = r"Software\Classes\nxm\shell\open\command"
+    if os.environ.get("WJ_NO_REGISTRY"):
+        return False
+    cmd_key = _NXM_CMD_KEY
+    backup = os.path.join(run_dir, NXM_PREV_HANDLER)
+    current = _current_nxm_command()
+    if current is not None and not _is_our_handler(current):
+        # Something else - a mod manager - registered itself since we did.
+        # It is the handler now, and is left exactly as it is.
+        LOG.info("[OK] The nxm:// handler is not this tool's any more; left as it is.")
+        _forget_backup(backup)
+        _forget_backup(os.path.join(run_dir, NXM_KEPT_FILE))
+        return True
     prev = None
     try:
-        with open(os.path.join(run_dir, NXM_PREV_HANDLER), encoding="utf-8") as f:
+        with open(backup, encoding="utf-8") as f:
             prev = f.read().strip()
     except OSError:
         prev = None
+    if prev and _is_our_handler(prev):
+        prev = None             # a backup of ourselves is no handler to restore
     try:
         if prev:
             with winreg.CreateKey(winreg.HKEY_CURRENT_USER, cmd_key) as k:
@@ -1351,7 +1497,18 @@ def unregister_nxm(run_dir):
         LOG.error("[ERROR] Could not restore nxm handler: %s", e)
         return False
     _associations_changed()
+    # Spent: a backup left lying about would be "restored" again by a later
+    # --unregister-nxm, over whatever had registered itself in between.
+    _forget_backup(backup)
+    _forget_backup(os.path.join(run_dir, NXM_KEPT_FILE))
     return True
+
+
+def _forget_backup(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def forward_nxm(url, run_dir):
@@ -1531,7 +1688,7 @@ def resolve_mediafire(page_url):
     try:
         req = urllib.request.Request(sanitize_url(page_url),
                                      headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with wj_paths.urlopen(req, timeout=60) as resp:
             html = resp.read().decode("utf-8", "replace")
     except Exception as e:
         LOG.warning("  [WARN] Could not load MediaFire page: %s", e)
@@ -1546,11 +1703,87 @@ def resolve_mediafire(page_url):
 # ----------------------------------------------------------------------
 # Generic streaming download with resume + progress
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Stopping: Ctrl+C, or the window asking a download it started to stop
+# ----------------------------------------------------------------------
+# Set when the run is to stop. Every transfer loop looks at it between
+# chunks, so stopping costs one chunk's wait rather than the rest of a
+# multi-gigabyte file: the pool used to wait for every download in flight,
+# and the CDN for every part it had queued. A transfer stopped this way
+# keeps its .part, and the next run resumes it.
+_STOP = threading.Event()
+
+# The window or browser assist mode is showing pages in, while it is: a stop
+# closes it, so the capture loop ends the way a person closing it ends it -
+# the nxm:// handler handed back, the summary written.
+_ACTIVE_OPENER = None
+
+
+def request_stop():
+    """Ask every transfer in this process to stop at its next chunk, and the
+    assist window, if one is open, to close."""
+    _STOP.set()
+    stop = getattr(_CDN, "STOP", None) if _CDN is not None else None
+    if stop is not None:
+        stop.set()
+    opener = _ACTIVE_OPENER
+    if opener is not None:
+        close = getattr(opener, "close", None)
+        if close is not None:
+            close()
+        else:
+            opener.closed.set()
+
+
+def watch_stop_file(path, interval=0.5):
+    """Stop this run when `path` appears. It is how the window asks a
+    download it started to stop: there is no console to send Ctrl+C to.
+
+    With an assist window open, closing that window is the stop, as it is
+    for a person. Otherwise the main thread is interrupted exactly as Ctrl+C
+    interrupts it, so the run winds down the way it always has."""
+    def watch():
+        while not os.path.exists(path):
+            time.sleep(interval)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        LOG.info("\n[STOP] Asked to stop; stopping at the next safe point. What has "
+                 "downloaded is kept, and a file cut short resumes next run.")
+        assisting = _ACTIVE_OPENER is not None
+        request_stop()
+        if not assisting:
+            _thread.interrupt_main()
+    threading.Thread(target=watch, daemon=True, name="stop-watch").start()
+
+
 def stream_download(url, dest, expected_size=None, retries=DOWNLOAD_RETRIES, quiet=False):
-    """Download with resume-aware retries. Each attempt resumes from the .part
-    file the previous attempt left behind, so a dropped connection on a large
-    file doesn't restart from zero. A clean HTTP error (e.g. 403/404) is not
-    retried; only transient connection/timeout/write failures are.
+    """Download `url` to `dest`, resuming through a .part file, and give the
+    file its name. Whatever already had that name is set aside under a '~N'
+    name rather than replaced (wj_paths.publish). A download that has to be
+    verified before it may take its name uses fetch_part() and publishes it
+    itself, as download_one() does."""
+    if not fetch_part(url, dest, expected_size, retries=retries, quiet=quiet):
+        return False
+    try:
+        aside = wj_paths.publish(dest + ".part", dest)
+    except OSError as e:
+        LOG.error("  [ERROR] Could not finalise %s: %s", os.path.basename(dest), e)
+        return False
+    if aside:
+        _note_set_aside(dest, aside)
+    return True
+
+
+def fetch_part(url, dest, expected_size=None, retries=DOWNLOAD_RETRIES, quiet=False):
+    """Download `url` into `dest + ".part"` with resume-aware retries. True
+    once the .part holds the whole file; it does not take its real name here.
+
+    Each attempt resumes from the .part the previous one left behind, so a
+    dropped connection on a large file doesn't restart from zero. A clean
+    HTTP error (e.g. 403/404) is not retried; only transient
+    connection/timeout/write failures are.
 
     `quiet` suppresses the per-file progress line, for a download that runs
     beside others: several streams writing carriage returns to one console
@@ -1561,17 +1794,24 @@ def stream_download(url, dest, expected_size=None, retries=DOWNLOAD_RETRIES, qui
         status = _stream_download_once(url, dest, expected_size, quiet=quiet)
         if status is True:
             return True
-        if status == "fatal" or attempt > retries:
+        if status in ("fatal", "stopped") or attempt > retries or _STOP.is_set():
             return False
         wait = min(30, 3 * attempt)
         LOG.warning("  [RETRY] %s: transient failure, retrying in %ds (%d/%d)...",
                     os.path.basename(dest), wait, attempt, retries)
-        time.sleep(wait)
+        _STOP.wait(wait)
 
 
-def _stream_download_once(url, dest, expected_size=None, quiet=False):
-    """One download attempt. Returns True on success, 'fatal' on an
-    unrecoverable HTTP error, or False on a transient failure worth retrying.
+def _range_start(resp):
+    """Where a 206 response's Content-Range says its bytes begin, or None."""
+    m = re.match(r"\s*bytes\s+(\d+)-", str(resp.headers.get("Content-Range") or ""))
+    return int(m.group(1)) if m else None
+
+
+def _stream_download_once(url, dest, expected_size=None, quiet=False, _again=False):
+    """One download attempt into `dest + ".part"`. Returns True when the
+    .part is complete, 'fatal' on an unrecoverable error, 'stopped' when the
+    run is stopping, or False on a transient failure worth retrying.
 
     STREAM_TIMEOUT bounds every wait on the socket, the connect and each
     read alike, so a connection that goes silent becomes a retry rather than
@@ -1593,15 +1833,23 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        resp = urllib.request.urlopen(req, timeout=STREAM_TIMEOUT)
+        resp = wj_paths.urlopen(req, timeout=STREAM_TIMEOUT)
     except urllib.error.HTTPError as e:
-        if e.code == 416:
-            try:
-                os.remove(part)
-            except OSError:
-                pass
-            return _stream_download_once(url, dest, expected_size, quiet=quiet)
-        LOG.error("  [ERROR] HTTP %s downloading %s", e.code, os.path.basename(dest))
+        if e.code == 416 and existing:
+            # Nothing past the end: the .part may simply be the whole file
+            # already, which verification then judges. Otherwise it is
+            # started again once - and only once, where this used to recurse
+            # for as long as the .part could not be removed.
+            if expected_size is not None and existing == expected_size:
+                return True
+            if not _again:
+                try:
+                    os.remove(part)
+                except OSError:
+                    return "fatal"
+                return _stream_download_once(url, dest, expected_size, quiet=quiet, _again=True)
+        LOG.error("  [ERROR] HTTP %s downloading %s%s", e.code, os.path.basename(dest),
+                  f" ({e.reason})" if e.reason else "")
         return "fatal"
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         LOG.error("  [ERROR] Connection failed for %s: %s", os.path.basename(dest), e)
@@ -1609,6 +1857,17 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
 
     with resp:
         if existing and resp.status == 206:
+            # A resume is only a resume if the bytes start where the .part
+            # stops. A server that answers with another range - or a file
+            # changed at the same address - would be spliced onto it.
+            if _range_start(resp) != existing:
+                LOG.warning("  [WARN] %s: the server resumed at a different place than "
+                            "asked; starting the file again.", os.path.basename(dest))
+                try:
+                    os.remove(part)
+                except OSError:
+                    return "fatal"
+                return False
             mode = "ab"
         else:
             existing = 0
@@ -1622,11 +1881,22 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
         try:
             with open(part, mode) as f:
                 while True:
+                    if _STOP.is_set():
+                        if not quiet:
+                            say_progress("\n")
+                        LOG.info("  [STOP] %s stopped at %s; it resumes next run.",
+                                 os.path.basename(dest), human_bytes(downloaded))
+                        return "stopped"
                     chunk = resp.read(DOWNLOAD_CHUNK)
                     if not chunk:
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
+                    if expected_size is not None and downloaded > expected_size:
+                        # More than the manifest says the file is: whatever is
+                        # being sent is not that file, and it would go on
+                        # filling the disk for as long as the server liked.
+                        break
                     now = time.time()
                     if not quiet and now - last_print > 0.5:
                         last_print = now
@@ -1648,6 +1918,16 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
     if not quiet:
         say_progress("\r" + " " * 110 + "\r")
 
+    if expected_size is not None and downloaded > expected_size:
+        LOG.error("  [ERROR] %s: the server sent more than the %s the manifest says "
+                  "the file is; it is not that file. Discarded.",
+                  os.path.basename(dest), human_bytes(expected_size))
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        return "fatal"
+
     # A connection that closes cleanly part-way through looks exactly like a
     # finished download: read() returns b"" and nothing raises. Without this
     # check the short .part was renamed into place and reported as SUCCESS, so
@@ -1663,14 +1943,43 @@ def _stream_download_once(url, dest, expected_size=None, quiet=False):
                     os.path.basename(dest), human_bytes(downloaded),
                     human_bytes(want))
         return False
+    return True
 
+
+def _note_set_aside(dest, aside):
+    """Say that a download found a different build under its name, and kept
+    it rather than replacing it. It was how a build another list still
+    needed was lost: a list staged for Wabbajack holds the shared archives
+    in its own folder, and when that list moved to a new build of one of
+    them, the download deleted the old build in its way."""
+    LOG.warning("  [KEPT] A different build of %s was already in %s; it is kept as %s, "
+                "for whichever list wants it, rather than replaced.",
+                os.path.basename(dest), os.path.basename(os.path.dirname(dest)) or dest,
+                os.path.basename(aside))
+    invalidate_existing_cache()
+
+
+def _place(part, dest, archive):
+    """Give a verified download its real name (wj_paths.publish): a file
+    already there that holds these very bytes - the same size, and the
+    manifest's hash - is simply replaced; anything else is set aside under a
+    '~N' name and kept. True when the file is in place."""
+    size, want = archive.get("size"), archive.get("hash")
+
+    def same(existing):
+        try:
+            if size is not None and os.path.getsize(existing) != size:
+                return False
+        except OSError:
+            return False
+        return bool(want and _HAVE_XXHASH and wabbajack_hash(existing) == want)
     try:
-        if os.path.exists(dest):
-            os.remove(dest)
-        os.replace(part, dest)
+        aside = wj_paths.publish(part, dest, same=same)
     except OSError as e:
         LOG.error("  [ERROR] Could not finalise %s: %s", os.path.basename(dest), e)
         return False
+    if aside:
+        _note_set_aside(dest, aside)
     return True
 
 
@@ -1993,21 +2302,31 @@ def download_one(url, archive, dest_dir, results, quiet=False):
         _tally(results, False, name, "wj_cdn.py missing")
         return False
 
-    if not stream_download(url, dest, expected_size=archive["size"], quiet=quiet):
-        _tally(results, False, name, "download failed")
+    if not fetch_part(url, dest, expected_size=archive["size"], quiet=quiet):
+        _tally(results, False, name, "stopped; it resumes next run" if _STOP.is_set()
+               else "download failed")
         return False
     if fresh:
         note_speed(kind, archive["size"], time.time() - t0)
-    good, reason = verify_file(dest, archive["size"], archive["hash"])
+    # Verified while it is still a .part, before it may take the archive's
+    # name: a download that fails here leaves whatever already had that name
+    # exactly as it was. It used to be put in place first, over that file,
+    # and only then checked - so a failed download lost both.
+    part = dest + ".part"
+    good, reason = verify_file(part, archive["size"], archive["hash"])
     if not good:
         # Previously this still counted as done and wrote a .meta, which left a
         # junk file in the pool for the sorter to shuffle around. Discard it.
-        LOG.error("  [ERROR] %s failed verification: %s - discarding.", name, reason)
+        LOG.error("  [ERROR] %s failed verification: %s - discarding the download.",
+                  name, reason)
         try:
-            os.remove(dest)
+            os.remove(part)
         except OSError:
             pass
         _tally(results, False, name, f"verify: {reason}")
+        return False
+    if not _place(part, dest, archive):
+        _tally(results, False, name, "could not be put in place")
         return False
     write_meta(dest, archive["meta_text"])
     run_done_one(archive["size"])
@@ -2222,6 +2541,12 @@ class _DirectPool:
                     self.large_running = True
             while self.running:
                 self._reap(0.5)
+        except KeyboardInterrupt:
+            # The transfers in flight stop at their next chunk and keep their
+            # .part; without this the shutdown below waited for every one of
+            # them, a 4 GB file included, before Ctrl+C took effect.
+            request_stop()
+            raise
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
             if self.printed:
@@ -2556,6 +2881,45 @@ def _wait_click(listener, timeout, stop=None, skip=None):
             return url
 
 
+def _await_page_click(listener, page_ids, opener, skip, handled, on_other):
+    """The click for the page on screen: its parsed nxm link, SKIPPED, or None
+    on the timeout or the window closing.
+
+    A link for anything else is not this page's click, and does not end the
+    wait. Whichever link arrived first used to be taken for the page on
+    screen, so a second click on one page - the window shows no reaction
+    while the file downloads, and people click again - was taken for the
+    next file: that page was replaced within a second, never clicked, and
+    its file neither downloaded nor recorded. Now a second click for a file
+    already taken is ignored, and a click for another file this list is
+    waiting for goes to `on_other`; either way the wait for this page goes
+    on, for what is left of its time."""
+    deadline = time.time() + NXM_CLICK_TIMEOUT
+    while True:
+        left = deadline - time.time()
+        if left <= 0:
+            return None
+        url = _wait_click(listener, left, opener.closed, skip)
+        if url is SKIPPED or url is None:
+            return url
+        link = parse_nxm(url)
+        if not link:
+            LOG.warning("  [WARN] Caught something that is not an nxm:// link; still waiting.")
+            continue
+        ids = (link["mod_id"], link["file_id"])
+        if ids == page_ids:
+            return link
+        if ids in handled:
+            LOG.info("  (a second click for a file already taken; ignored, still waiting "
+                     "for this page)")
+            continue
+        # Taking the other file can mean downloading it, there and then: the
+        # time that takes is not this page's, which keeps what it had left.
+        started = time.time()
+        on_other(link)
+        deadline += time.time() - started
+
+
 def download_nexus_assist(items, nexus, dest_dir, results, run_dir, args, opener=None):
     """Interactive free-account capture: show each page, catch the nxm click.
 
@@ -2581,8 +2945,10 @@ def download_nexus_assist(items, nexus, dest_dir, results, run_dir, args, opener
 
 
 def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
+    global _ACTIVE_OPENER
     by_ids = {nexus_ids(a): a for a in items}
     fetched = set()
+    handled = set()             # every file a click has been taken for this run
     learned_domains = {}
 
     # Make sure we are the nxm handler (so clicks reach us).
@@ -2590,7 +2956,15 @@ def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
         LOG.error("[ERROR] Could not register the nxm handler; aborting assist mode.")
         return
 
-    listener = NxmListener(run_dir)
+    try:
+        listener = NxmListener(run_dir)
+    except OSError as e:
+        # Registered, and nothing listening: hand the handler straight back,
+        # or every mod manager's click would land in a file until next time.
+        LOG.error("[ERROR] Could not start the click listener (%s); aborting assist mode.", e)
+        unregister_nxm(run_dir)
+        return
+    _ACTIVE_OPENER = opener
     if hasattr(opener, "on_link"):
         # The window catches the nxm:// link itself and hands it here; the
         # registered handler above is only the fallback should it not.
@@ -2599,12 +2973,36 @@ def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
              "click the mod-manager download button.", NXM_LISTEN_HOST, listener.port)
     LOG.info("(The Nexus site shows a short timer for free downloads; wait for it, then click.)")
     worker = None
-    if CLICK_AHEAD:
-        worker = _AssistDownloader(dest_dir, results, fetched, nexus, QUEUE_DEPTH)
-        LOG.info("Click-ahead is on: the next page opens while the current file downloads%s.",
-                 f", with up to {QUEUE_DEPTH} clicked files waiting behind it" if QUEUE_DEPTH > 1 else "")
     skip = getattr(opener, "skip", None)      # the window's Skip button; the browser has none
+
+    def take(link):
+        """Resolve one click's link and fetch its file: at once, or through
+        the click-ahead worker."""
+        handled.add((link["mod_id"], link["file_id"]))
+        if worker is None:
+            _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched)
+            return
+        resolved = _resolve_nxm(link, nexus, by_ids, results, fetched)
+        if resolved is not None:
+            worker.submit(*resolved, link)
+
+    def other_click(link):
+        """A click for some other file than the page on screen."""
+        a = by_ids.get((link["mod_id"], link["file_id"]))
+        if a is None:
+            LOG.info("  (a click for mod %s file %s, which this list is not waiting for; ignored)",
+                     link["mod_id"], link["file_id"])
+            return
+        LOG.info("  (a click for %s, which comes later in the list; taken now, and still "
+                 "waiting for this page)", a["name"])
+        take(link)
+
     try:
+        if CLICK_AHEAD:
+            worker = _AssistDownloader(dest_dir, results, fetched, nexus, QUEUE_DEPTH)
+            LOG.info("Click-ahead is on: the next page opens while the current file downloads%s.",
+                     f", with up to {QUEUE_DEPTH} clicked files waiting behind it"
+                     if QUEUE_DEPTH > 1 else "")
         pending = list(items)
         for idx, a in enumerate(pending, 1):
             if opener.closed.is_set():
@@ -2618,7 +3016,7 @@ def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
                 LOG.info("  [STOP] Reached --limit; stopping.")
                 break
             ids = nexus_ids(a)
-            if ids in fetched:
+            if ids in fetched or ids in handled:
                 continue
             if not (nexus_domain(a) and ids[0] and ids[1]):
                 LOG.error("  [SKIP] %s: incomplete Nexus identifiers.", a["name"])
@@ -2693,28 +3091,22 @@ def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
                               f"{a['name']}  ·  click Slow download")
             LOG.info("  Waiting up to %ds for your click... (Ctrl+C to stop%s)", NXM_CLICK_TIMEOUT,
                      "; Skip in the window's banner moves on" if skip is not None else "")
-            url = _wait_click(listener, NXM_CLICK_TIMEOUT, opener.closed, skip)
-            if url is SKIPPED:
+            link = _await_page_click(listener, page_ids, opener, skip, handled, other_click)
+            if link is SKIPPED:
                 LOG.warning("  [SKIP] You skipped %s; moving on.", a["name"])
                 _tally(results, False, a["name"], "skipped in the download window")
                 continue
-            if not url:
+            if link is None:
                 if opener.closed.is_set():
                     continue                    # the loop's head says why, and stops
                 LOG.warning("  [TIMEOUT] No click captured for %s; moving on.", a["name"])
-                with _RESULTS_LOCK:
-                    results["failures"].append((a["name"], "no nxm click captured"))
+                # A failure like any other, so the run's exit code says so: it
+                # used to be listed in the report but not counted, and a run
+                # whose every page timed out exited 0.
+                _tally(results, False, a["name"],
+                       f"no nxm click captured within {NXM_CLICK_TIMEOUT}s")
                 continue
-            link = parse_nxm(url)
-            if not link:
-                LOG.warning("  [WARN] Captured a non-nxm URL; skipping.")
-                continue
-            if worker is None:
-                _resolve_and_download_nxm(link, nexus, by_ids, dest_dir, results, fetched)
-                continue
-            resolved = _resolve_nxm(link, nexus, by_ids, results, fetched)
-            if resolved is not None:
-                worker.submit(*resolved, link)
+            take(link)
         if worker is not None:
             if worker.in_flight():
                 LOG.info("  Every page has been clicked; finishing %d download(s) in flight.",
@@ -2723,9 +3115,11 @@ def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
             worker = None
     except KeyboardInterrupt:
         LOG.info("\n[ABORT] Capture interrupted by user.")
+        request_stop()
         if worker is not None:
             _abort_worker(worker)
     finally:
+        _ACTIVE_OPENER = None
         listener.close()
         # Hand the nxm:// handler back to whatever owned it (normally
         # Wabbajack). Without this, every "download with manager" click on
@@ -2820,10 +3214,13 @@ def main():
 
     wj_paths.adopt_runtime(script_dir)          # makes run_dir, and fills it from an older layout
     log_path = setup_logging(run_dir, verbose=args.verbose)
+    # The window that started this run asks it to stop through this file.
+    if os.environ.get("WJ_STOP_FILE"):
+        watch_stop_file(os.environ["WJ_STOP_FILE"])
 
     # --- Standalone handler (un)registration.
     if args.register_nxm:
-        register_nxm(run_dir)
+        register_nxm(run_dir, keep=True)
         return
     if args.unregister_nxm:
         unregister_nxm(run_dir)
@@ -2890,11 +3287,12 @@ def main():
     record = next(r for r in in_scope if r["name"] == target)
 
     # The list's folder is named after it, so a list called "Master" would
-    # download straight into the Master pool. The sorter refuses these names;
-    # so does this.
-    if target.lower() in reserved_list_names():
-        LOG.error("[TERMINATED] Modlist '%s' clashes with a reserved pool folder "
-                  "name. Rename the .wabbajack file.", target)
+    # download straight into the Master pool - and so would 'Master.', which
+    # Windows reads as Master. The sorter refuses these names; so does this.
+    why = CFG.list_name_problem(target)
+    if why:
+        LOG.error("[TERMINATED] Modlist '%s' cannot have a folder of its own: %s. "
+                  "Rename the .wabbajack file.", target, why)
         sys.exit(2)
 
     # A name that is not a plain file name is never Wabbajack's doing: the
@@ -3105,5 +3503,6 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        request_stop()
         LOG.info("\n[ABORT] Interrupted by user.")
         sys.exit(130)

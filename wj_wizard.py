@@ -70,6 +70,7 @@ from datetime import datetime, timezone
 import wj_autoupdate as A
 import wj_wabbajack as WB
 import wj_gallery as G
+import wj_paths
 
 try:
     import wj_config as CFG
@@ -508,8 +509,10 @@ def park_unmanaged_dir(game_dir, folder):
     store = os.path.join(game_dir, name)
     dst = unique_path(os.path.join(store, folder))
     try:
-        os.makedirs(store, exist_ok=True)
-        shutil.move(src, dst)
+        # A rename, never a copy and a delete: a folder that will not move -
+        # a file in it held open, say - stays whole where it was, instead of
+        # being half copied and half deleted.
+        wj_paths.move_folder(src, dst)
     except OSError as e:
         out(f"    could not move {folder}: {e}")
         return None
@@ -523,13 +526,17 @@ def park_unmanaged(game, folder):
 
 
 
-def gallery_protection(pools, progress=True):
+def gallery_protection(pools, progress=True, info=None):
     """What every published list drawing from these pool folders wants, or
     None if that cannot be known.
 
     `pools` is a set of folder keys (wj_config.folder_key). Returns
     (want, note, pulled). A None want means the picture is incomplete and the
-    caller must not delete on the strength of it.
+    caller must not delete on the strength of it. `info`, a dict if given,
+    is filled with the keys behind the answer - `hidden`, `pulled`, and
+    `behind`, the lists whose report was validated for an older build than
+    the feed now publishes - so a caller can tell later whether the answer
+    it confirmed is still the answer.
 
     `pulled` names the published lists whose authors have taken them down.
     The validator does not walk those, so their report carries an empty
@@ -556,12 +563,12 @@ def gallery_protection(pools, progress=True):
     # here, so it protects nothing and a missing report for it blocks
     # nothing. Named in the note, because it changes what is deleted.
     hidden = sorted(k for k, e in feeds.items()
-                    if G.pool_key(e.get("game")) in pools and G.is_hidden(k))
+                    if G.in_pools(e.get("game"), pools) and G.is_hidden(k))
     if hidden:
         drop = set(hidden)
         feeds = {k: e for k, e in feeds.items() if k not in drop}
 
-    keys = [k for k, e in feeds.items() if G.pool_key(e.get("game")) in pools]
+    keys = [k for k, e in feeds.items() if G.in_pools(e.get("game"), pools)]
     missing = [k for k in keys if k in summary and not G.have_report(k)]
     if missing:
         return None, (f"{len(missing)} of {len(keys)} published list(s) have no "
@@ -570,8 +577,9 @@ def gallery_protection(pools, progress=True):
 
     if progress:
         out(f"  Reading what {len(keys)} published list(s) want ...")
+    behind = []
     want, checked, unchecked = G.published_builds(
-        set(pools), feeds, summary, A.WJ)
+        set(pools), feeds, summary, A.WJ, behind=behind)
     pulled = sorted(k for k, why in unchecked.items() if why == G.PULLED)
     gaps = sorted((k, why) for k, why in unchecked.items() if why != G.PULLED)
     if gaps:
@@ -589,6 +597,14 @@ def gallery_protection(pools, progress=True):
     if hidden:
         note += (f"; {len(hidden)} hidden list(s) ignored ({', '.join(hidden[:3])}"
                  f"{' ...' if len(hidden) > 3 else ''})")
+    if behind:
+        # Fetched again already; the validator has simply not caught up with
+        # the new build. Its last report is the best there is, and is used.
+        note += (f"; {len(behind)} validated for an older build than the feed now "
+                 f"publishes ({', '.join(sorted(behind)[:3])}"
+                 f"{' ...' if len(behind) > 3 else ''}), protected as last validated")
+    if info is not None:
+        info.update(hidden=hidden, pulled=pulled, behind=sorted(behind))
     return want, note, pulled
 
 
@@ -680,14 +696,15 @@ def trash_folder_for(game):
 
 def send_to_trash(path, trash):
     """Move one file into `trash`, stamped with the moment it arrived.
+    Returns the destination, suffixed if the name was taken.
 
     A rename keeps the file's own mtime, which says when the archive was
-    built, not when it was reclaimed. The purge judges by arrival, so the
-    stamp is set here. Returns the destination, suffixed if the name was
-    taken."""
-    os.makedirs(trash, exist_ok=True)
-    dst = unique_path(os.path.join(trash, os.path.basename(path)))
-    shutil.move(path, dst)
+    built, not when it was reclaimed, so the stamp is set here - for the
+    tables to show. The purge does not go by it: it goes by the deletion
+    record the caller writes (A.trash_contents), because a stamp that could
+    not be set left a file with its build date, and the next start purged it
+    with no grace period at all."""
+    dst = wj_paths.move_file(path, unique_path(os.path.join(trash, os.path.basename(path))))
     now = time.time()
     try:
         os.utime(dst, (now, now))
@@ -728,7 +745,10 @@ def master_report(game, records, extra_want=None, label=None):
         with os.scandir(master) as it:
             for x in it:
                 try:
-                    if not x.is_file() or x.name.lower().endswith(".meta"):
+                    # A partial download and its resume record are no archive
+                    # anybody could want, nor anything to reclaim.
+                    if (not x.is_file() or x.name.lower().endswith(".meta")
+                            or A.WJ.is_resume_file(x.name)):
                         continue
                     size = x.stat().st_size
                 except OSError:
@@ -788,15 +808,9 @@ def measure_masters(records, extra_want=None):
 
 
 
-def unique_path(path):
-    """`path` if free, else insert ~1, ~2 ... before the extension."""
-    if not os.path.exists(path):
-        return path
-    root, ext = os.path.splitext(path)
-    i = 1
-    while os.path.exists(f"{root}~{i}{ext}"):
-        i += 1
-    return f"{root}~{i}{ext}"
+# `path`, or the first free 'Name~N.ext' beside it: wj_paths' one
+# implementation, which every tool uses.
+unique_path = wj_paths.unique_path
 
 
 # ----------------------------------------------------------------------
@@ -1048,9 +1062,9 @@ def set_hide_nsfw(hide):
     window's box and the console's [n] are one setting."""
     if CFG is None:
         return False
-    values = CFG.current_settings()
-    values["HIDE_NSFW"] = bool(hide)
-    CFG.save_settings(values)
+    # This one setting, over the file as it is now: anything else edited
+    # there since this process started is kept, not written back over.
+    CFG.update_settings({"HIDE_NSFW": bool(hide)})
     A.reload_settings()
     return bool(CFG.HIDE_NSFW)
 
@@ -1256,14 +1270,17 @@ def set_list_hidden(key, hidden):
     if CFG is None:
         return []
     low = str(key).strip().lower()
-    kept = [k for k in CFG.HIDDEN if str(k).strip().lower() != low]
-    if hidden:
-        kept.append(str(key))
-    values = CFG.current_settings()
-    values["HIDDEN"] = kept
-    CFG.save_settings(values)
+
+    def change(now):
+        # Made to HIDDEN as the file holds it now, so a flag set from another
+        # window, or typed into the file, since this one started is kept.
+        kept = [k for k in now.get("HIDDEN") or [] if str(k).strip().lower() != low]
+        if hidden:
+            kept.append(str(key))
+        return {"HIDDEN": kept}
+    CFG.update_settings(change)
     A.reload_settings()
-    return kept
+    return list(CFG.HIDDEN)
 
 
 def show_hidden_lists(hidden):
@@ -1375,12 +1392,12 @@ def create_game_pool(game, folder=None):
     # that changes nothing.
     mapped = False
     if os.path.normcase(folder) != os.path.normcase(str(game)):
-        values = CFG.current_settings()
-        mapping = dict(values.get("GAME_FOLDERS") or {})
-        if mapping.get(game) != folder:
-            mapping[game] = folder
-            values["GAME_FOLDERS"] = mapping
-            CFG.save_settings(values)
+        if CFG.GAME_FOLDERS.get(game) != folder:
+            def change(now):
+                mapping = dict(now.get("GAME_FOLDERS") or {})
+                mapping[game] = folder
+                return {"GAME_FOLDERS": mapping}
+            CFG.update_settings(change)
             A.reload_settings()
             mapped = True
 
@@ -1804,7 +1821,7 @@ def install_update_step(state, rows):
     if not wj or not wj.get("cli"):
         out("  wabbajack-cli.exe was not found, so the install cannot be driven from here.")
         return False
-    for name in WB.prune_old_versions(wj):
+    for name in WB.prune_old_versions(wj, keep=[A.MANIFESTS]):
         out(f"    Removed Wabbajack {name}, superseded by {wj['version']}.")
     game = (load_records().get(fn) or {}).get("game")
     ready, detail = WB.game_ready(wj.get("cli"), game)
@@ -1929,12 +1946,13 @@ def delete_modlists(state, records, chosen):
     for x in chosen:
         out(f"  Deleting {stem_of(x['file'])}...")
         keep = wanted_builds(survivors, x["game"]) if x["game"] else None
-        moved, redundant, freed = delete_modlist(state, x, keep=keep)
+        moved, parked, freed = delete_modlist(state, x, keep=keep)
         total_moved += moved
         total_freed += freed
-        out(f"    {moved} archive(s) moved to Master, "
-            f"{redundant} redundant copy(ies) removed, "
-            f"manifest freed {human(freed)}")
+        out(f"    {moved} archive(s) moved to Master"
+            + (f", {parked} of them beside a file of the same name, under a '~N' name"
+               if parked else "")
+            + f"; manifest freed {human(freed)}")
     A.save_state(state)
     refresh_known_dirs()
     out(f"  Manifests freed {human(total_freed)}; "
@@ -1988,8 +2006,23 @@ def clear_masters(records, chosen, mode, wide_want):
     for Wabbajack."""
     rule_name = "any known modlist" if mode == "a" else "your modlists only"
     grand = 0
+    # The refusals once more, against the records this clear goes by: they
+    # are read again right before it, and a manifest rewritten since the
+    # table was measured - copied over by hand, or read back damaged off the
+    # share - protects nothing while it cannot be read, or lists nothing.
+    unreadable, empty = demand_problems(records)
+    if unreadable:
+        out(f"  Not clearing any Master: {len(unreadable)} manifest(s) could not be read "
+            f"({', '.join(unreadable[:4])}{' ...' if len(unreadable) > 4 else ''}). Re-download "
+            f"or remove it, and measure again.")
+        return grand
     for m in chosen:
         game = m["game"]
+        if A.WJ.folder_key(game) in empty:
+            out(f"  Not clearing Master for {m['label']}: "
+                f"{', '.join(empty[A.WJ.folder_key(game)])} lists no archives at all, so its "
+                f"demand is unknown.")
+            continue
         # Recomputed here rather than reused from the table: a cleanup pass
         # may have moved files since, and the whole point of this map is
         # that it is current.
@@ -1999,6 +2032,14 @@ def clear_masters(records, chosen, mode, wide_want):
         out(f"  Clearing Master for {m['label']} "
             f"({len(keep)} archive name(s) wanted and protected)...")
         record = DeletionRecord(game, rule_name, m["path"])
+        if not record.ok:
+            # The record is what puts a cleanup back, and what the purge goes
+            # by: a file sent to the trash without one could be neither.
+            out(f"    Not clearing Master for {m['label']}: its deletion record could not "
+                f"be written, and without it nothing sent to the trash could be put "
+                f"back or purged.")
+            record.close()
+            continue
         deleted, kept, freed = clear_master(game, keep, on_delete=record.note)
         rec = record.close()
         grand += freed
@@ -2060,9 +2101,10 @@ def stage_incomplete(records, assist):
             out(f"                bytes the manifest says it should be ({total_stale} of them).")
             out(f"                Wabbajack verifies every archive before installing, so")
             out(f"                those would be rejected at install time - they count as")
-            out(f"                missing. Mostly downloads cut short by an older version")
-            out(f"                of these scripts. Fetching the list overwrites them; you")
-            out(f"                do not have to do anything about them yourself.")
+            out(f"                missing. Often another list's build of the same name.")
+            out(f"                Fetching the list downloads the right one; a different")
+            out(f"                build in its way is kept beside it under a '~N' name,")
+            out(f"                never written over, for whichever list wants it.")
 
     out()
     out(f"  COMPLETE ({len(complete)})")
@@ -2212,12 +2254,28 @@ def update_install(state, row, assist, wj):
         return False, "the manifest could not be read"
     if st["missing"]:
         out(f"  2/4  Downloading {st['missing']} missing archive(s), {human(st['bytes'])} ...")
-        download_list(records, fn, st, assist)
+        ran, rc, _after = download_list(records, fn, st, assist)
+        # Stops at the first step that fails: a download refused for want of
+        # space, or one that could not run, leaves nothing to stage and
+        # install over the folder Wabbajack keeps the list in.
+        if not ran:
+            return False, ("the missing archives were not downloaded (not enough free "
+                           "space); nothing else was done")
+        if rc not in (0, 1):
+            return False, (f"the download step failed (the downloader exited {rc}); "
+                           f"nothing else was done")
         A.WJ.invalidate_existing_cache()
         st = list_status(load_records().get(fn) or entry) or st
+        if st["missing"]:
+            out(f"       {st['missing']} archive(s) are still missing; Wabbajack will try to "
+                f"fetch those itself.")
     else:
         out("  2/4  Every archive it needs is already here.")
-    if WB.running_processes():
+    procs = WB.running_processes()
+    if procs is None:
+        return False, ("whether Wabbajack is running could not be checked, and staging "
+                       "would move archives it may be reading")
+    if procs:
         return False, "Wabbajack is running, and staging would move archives under it"
     out(f"  3/4  Staging {stem} ...")
     rc = stage_list(state, fn, st)
@@ -2278,7 +2336,7 @@ def offer_install(state, filename, st):
         out("  Wabbajack was not found. Set WABBAJACK_DIR in wj_settings.json if")
         out("  it is installed somewhere other than in or beside this folder.")
         return False
-    for name in WB.prune_old_versions(wj):
+    for name in WB.prune_old_versions(wj, keep=[A.MANIFESTS]):
         out(f"    Removed Wabbajack {name}, superseded by {wj['version']}.")
 
     downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
@@ -2413,6 +2471,10 @@ def orphan_sidecars():
     for n in names:
         if not n.lower().endswith(".metadata"):
             continue
+        # A sidecar is a file. A folder named like one is something else,
+        # and the sweep that deletes orphans would have taken it whole.
+        if not os.path.isfile(os.path.join(A.MANIFESTS, n)):
+            continue
         if not os.path.isfile(os.path.join(A.MANIFESTS, n[:-len(".metadata")])):
             out_list.append(n)
     return sorted(out_list)
@@ -2472,18 +2534,18 @@ def show_space(lists, masters):
               for x in lists], 4) + 2
     out(f"    {'#':>3}  {'modlist':<{nw}}{'game':<{gw}}{'manifest':>10}"
         f"{'its archives':>14}")
-    reserved = A.WJ.reserved_list_names()
     flagged = False
     for i, x in enumerate(lists, 1):
-        mark = "!" if stem_of(x["file"]).lower() in reserved else " "
+        mark = "!" if CFG and CFG.list_name_problem(stem_of(x["file"])) else " "
         flagged = flagged or mark == "!"
         out(f"  {mark} {i:>3}  {stem_of(x['file']):<{nw}}"
             f"{(A.WJ.game_label(x['game']) if x['game'] else '?'):<{gw}}"
             f"{human(x['manifest_bytes']):>10}"
             f"{human(x['folder_bytes']) + ' ' if x['folder_files'] else '- ':>14}")
     if flagged:
-        out("    !  named after a pool folder, so its 'folder' IS that pool. It")
-        out("       cannot be deleted here; rename the .wabbajack file.")
+        out("    !  named after a pool folder - or so Windows reads the name - so")
+        out("       its 'folder' IS that pool. It cannot be deleted here; rename")
+        out("       the .wabbajack file.")
     orphans = orphan_sidecars()
     if orphans:
         out()
@@ -2508,20 +2570,28 @@ def show_space(lists, masters):
 
 
 def _empty_into_master(folder, master, keep):
-    """Move every file in a deleted list's folder into Master.
+    """Move every file in a deleted list's folder into Master. Nothing is
+    deleted here.
 
-    Returns (archives moved, archives dropped as redundant). Sidecar .meta
-    files travel with their archive, under whatever name the archive ends up
-    with, so 5c can still judge each one by its owner.
+    Returns (archives moved, archives parked beside a same-named file).
+    Sidecar .meta files travel with their archive, under whatever name the
+    archive ends up with, so 5c can still judge each one by its owner.
 
-    The hard case is a name already taken in Master by a DIFFERENT build. Both
-    files are kept, but only one can keep the name, and both the sorter and
-    the cleanup find files by name. `keep` - what the surviving lists want -
-    decides: a build a survivor wants keeps the name, and the other is parked
-    under a '~N' suffix. Before this the incoming copy was always the one
-    suffixed, which is how a build another list still needed came to be the
-    one deleted: the rebuild handed that list the junk under the real name,
-    and 5c removed the suffixed file as something nobody asked for."""
+    The hard case is a name already taken in Master. Both files are kept, but
+    only one can keep the name, and both the sorter and the cleanup find files
+    by name. `keep` - what the surviving lists want - decides: a build a
+    survivor wants keeps the name, and the other is parked under a '~N'
+    suffix. Before this the incoming copy was always the one suffixed, which
+    is how a build another list still needed came to be the one deleted: the
+    rebuild handed that list the junk under the real name, and 5c removed the
+    suffixed file as something nobody asked for.
+
+    A same-named file of the same SIZE is parked like any other. It used to
+    be deleted on the spot as a redundant copy - with no hash, no trash and
+    no record - and a same-size file is not a same file: when the bytes
+    differed, the build a surviving list wanted was gone for good. Parked,
+    it is a duplicate for 5c, which reads both copies in full and removes
+    one only when their xxHash64 agree, into the trash, with a record."""
     try:
         names = sorted(os.listdir(folder))
     except OSError as e:
@@ -2530,7 +2600,7 @@ def _empty_into_master(folder, master, keep):
     files = [n for n in names if os.path.isfile(os.path.join(folder, n))]
     metas = {n.lower(): n for n in files if n.lower().endswith(".meta")}
     archives = [n for n in files if not n.lower().endswith(".meta")]
-    moved = redundant = 0
+    moved = parked = 0
 
     def take_meta(owner):
         return metas.pop((owner + ".meta").lower(), None)
@@ -2538,10 +2608,11 @@ def _empty_into_master(folder, master, keep):
     def place_meta(meta_name, owner_dst):
         target = owner_dst + ".meta"
         try:
-            if os.path.isfile(target):
-                os.remove(target)          # an orphan left from something else
-            shutil.move(os.path.join(folder, meta_name), target)
-        except (OSError, shutil.Error) as e:
+            if os.path.lexists(target):
+                # An orphan left from something else: kept, under another name.
+                wj_paths.move_file(target, unique_path(target))
+            wj_paths.move_file(os.path.join(folder, meta_name), target)
+        except OSError as e:
             out(f"    could not move {meta_name}: {e}")
 
     for name in archives:
@@ -2549,45 +2620,34 @@ def _empty_into_master(folder, master, keep):
         dst = os.path.join(master, name)
         try:
             size = os.path.getsize(src)
-            if os.path.isfile(dst):
+            if os.path.lexists(dst):
                 there = os.path.getsize(dst)
-                if there == size:
-                    # An identical copy already in Master makes this one
-                    # redundant; keeping both would just be litter for 5c.
-                    os.remove(src)
-                    m = take_meta(name)
-                    if m:
-                        os.remove(os.path.join(folder, m))
-                    redundant += 1
-                    continue
                 inc_wanted = keep is not None and is_wanted(keep, name, size)
                 old_wanted = keep is not None and is_wanted(keep, name, there)
                 if inc_wanted and not old_wanted:
                     # The survivors want THIS build. The one already there
                     # gives up the name and is parked, sidecar and all.
-                    aside = unique_path(dst)
-                    shutil.move(dst, aside)
-                    if os.path.isfile(dst + ".meta"):
-                        shutil.move(dst + ".meta", aside + ".meta")
+                    wj_paths.set_aside(dst)
                 else:
                     dst = unique_path(dst)
-            shutil.move(src, dst)
+                    parked += 1
+            wj_paths.move_file(src, dst)
             m = take_meta(name)
             if m:
                 place_meta(m, dst)
             moved += 1
-        except (OSError, shutil.Error) as e:
+        except OSError as e:
             out(f"    could not move {name}: {e}")
 
     # Sidecars whose archive was not in the folder go along anyway; 5c judges
     # a .meta by its archive and removes an orphan.
     for m in list(metas.values()):
         try:
-            shutil.move(os.path.join(folder, m),
-                        unique_path(os.path.join(master, m)))
-        except (OSError, shutil.Error) as e:
+            wj_paths.move_file(os.path.join(folder, m),
+                               unique_path(os.path.join(master, m)))
+        except OSError as e:
             out(f"    could not move {m}: {e}")
-    return moved, redundant
+    return moved, parked
 
 
 def delete_modlist(state, entry, keep=None):
@@ -2601,17 +2661,18 @@ def delete_modlist(state, entry, keep=None):
     `keep` is what the SURVIVING lists want, as wanted_builds() shapes it; see
     _empty_into_master() for what it settles. Without it the old behaviour
     applies: an incoming build that collides with a different one in Master is
-    the one that gets the suffix."""
+    the one that gets the suffix. Returns (moved, parked, manifest bytes)."""
     fn = entry["file"]
     stem = stem_of(fn)
-    if stem.lower() in A.WJ.reserved_list_names():
-        # Its "folder" is a pool. Emptying it into Master would remove every
-        # file in Master as a redundant copy of itself.
-        out(f"    refusing to delete '{stem}': it is named after a pool folder, "
-            f"so its folder IS that pool.")
+    why = CFG.list_name_problem(stem) if CFG else None
+    if why:
+        # Its "folder" would be a pool - 'Master', or 'Master.', which
+        # Windows opens as Master - or no folder of its own at all. Emptying
+        # it into Master would move Master into itself.
+        out(f"    refusing to delete '{stem}': {why}.")
         out("    Rename the .wabbajack file instead.")
         return 0, 0, 0
-    moved = redundant = 0
+    moved = parked = 0
     if entry["game"]:
         base, master, _s = A.WJ.resolve_game_dirs(entry["game"])
         folder = os.path.join(base, stem)
@@ -2620,7 +2681,7 @@ def delete_modlist(state, entry, keep=None):
                 os.makedirs(master, exist_ok=True)
             except OSError:
                 pass
-            moved, redundant = _empty_into_master(folder, master, keep)
+            moved, parked = _empty_into_master(folder, master, keep)
             try:
                 os.rmdir(folder)
             except OSError:
@@ -2651,7 +2712,7 @@ def delete_modlist(state, entry, keep=None):
         if v.get("file") == fn:
             del state["lists"][k]
     state.get("map", {}).pop(fn.lower(), None)
-    return moved, redundant, freed
+    return moved, parked, freed
 
 
 def clear_master(game, keep_builds, on_delete=None):
@@ -2694,10 +2755,12 @@ def clear_master(game, keep_builds, on_delete=None):
         out(f"    cannot read {master}: {e}")
         return deleted, kept, freed
     # One listing carries every size; nothing below stats a file to learn it.
+    # A partial download and its resume record are left where they are: the
+    # next attempt resumes from them.
     sizes = {}
     for e in entries:
         try:
-            if e.is_file():
+            if e.is_file() and not A.WJ.is_resume_file(e.name):
                 sizes[e.name] = e.stat().st_size
         except OSError:
             continue
@@ -2749,19 +2812,23 @@ def clear_master(game, keep_builds, on_delete=None):
         if dst is None:
             continue
         freed += sizes[name]
-        # Its sidecar goes with it, under whatever name it ended up with.
+        # Its sidecar goes with it, under whatever name it ended up with -
+        # which send_to_trash() chose free for the sidecar as well.
         meta = name + ".meta"
         if not is_meta and meta in sizes and meta not in gone:
+            mdst = dst + ".meta"
             try:
-                mdst = dst + ".meta"
-                if os.path.isfile(mdst):
-                    os.remove(mdst)
-                shutil.move(os.path.join(master, meta), mdst)
-                now = time.time()
-                os.utime(mdst, (now, now))
-            except (OSError, shutil.Error) as ex:
+                wj_paths.move_file(os.path.join(master, meta), mdst)
+            except OSError as ex:
                 out(f"    could not move {meta} to the trash: {ex}")
                 continue
+            # Moved, so recorded, whether or not the stamp below takes: the
+            # record is what the purge and the undo go by.
+            try:
+                now = time.time()
+                os.utime(mdst, (now, now))
+            except OSError:
+                pass
             gone.add(meta)
             deleted.append((meta, sizes[meta]))
             freed += sizes[meta]
@@ -2780,43 +2847,63 @@ class DeletionRecord:
     restore by hand needs."""
 
     def __init__(self, game, rule, master):
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.path = A.runtime_path(f"deleted_{A.WJ.game_folder(game)}_{stamp}.csv")
         self.rule, self.master, self.rows = rule, master, 0
-        self._fh = self._w = None
+        self.path = self._fh = self._w = None
+        self._mine = False          # this record made the file at self.path
         try:
-            self._fh = open(self.path, "w", newline="", encoding="utf-8")
+            # A name of its own: never another record's, even one written in
+            # the same second (wj_paths.create_stamped).
+            self.path, self._fh = wj_paths.create_stamped(
+                A.runtime_path(), f"deleted_{A.WJ.game_folder(game)}_")
+            self._mine = True
             self._w = csv.writer(self._fh)
+            # trashed_at: when the file went, for the purge to count from. A
+            # record written before 1.5.0 has none, and its name's stamp is
+            # used instead.
             self._w.writerow(["archive", "size_bytes", "reason", "trashed_to",
-                              "master", "rule"])
+                              "master", "rule", "trashed_at"])
             self._fh.flush()
         except OSError as e:
             out(f"    could not open the deletion record: {e}")
-            self._fh = None
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+            self._fh = self._w = None
+
+    @property
+    def ok(self):
+        """Is the record being written? Without it a file sent to the trash
+        could be neither put back nor purged, so nothing is sent."""
+        return self._w is not None
 
     def note(self, name, size, reason="", to=""):
         self.rows += 1
         if self._w is None:
             return
         try:
-            self._w.writerow([name, size, reason, to, self.master, self.rule])
+            self._w.writerow([name, size, reason, to, self.master, self.rule,
+                              datetime.now(timezone.utc).isoformat(timespec="seconds")])
             self._fh.flush()
         except OSError as e:
             out(f"    could not write to the deletion record: {e}")
 
     def close(self):
         """Close, dropping the file if nothing was deleted. Returns the path
-        of a record that has rows, else None."""
+        of a record that has rows, else None. Only a file this record made is
+        ever dropped."""
         if self._fh is not None:
             try:
                 self._fh.close()
             except OSError:
                 pass
         if self.rows == 0:
-            try:
-                os.remove(self.path)
-            except OSError:
-                pass
+            if self._mine:
+                try:
+                    os.remove(self.path)
+                except OSError:
+                    pass
             return None
         return self.path if self._fh is not None else None
 
@@ -2907,6 +2994,7 @@ def restore_cleanup(record):
     trash = os.path.join(base, CFG.TRASH_FOLDER if CFG else "Trash")
     rows = _record_rows(record["path"])
     result = {"restored": [], "already": [], "gone": 0, "failed": []}
+    _HASH_CACHE.clear()          # a path read on an earlier pass may hold other bytes now
     placed = {}                                  # archive name -> where it went
     archives = [r for r in rows if not r["archive"].lower().endswith(".meta")]
     metas = [r for r in rows if r["archive"].lower().endswith(".meta")]
@@ -2922,17 +3010,19 @@ def restore_cleanup(record):
             dst = placed[name[:-5]] + ".meta"       # beside its archive, under its name
         else:
             dst = os.path.join(master, name)
-            if os.path.exists(dst):
+            if os.path.lexists(dst):
                 # The same build is back already; or, for a sidecar whose
                 # archive did not come back, the one beside it is its own.
-                if is_meta or os.path.getsize(dst) == size:
+                # Same size is not same bytes: only a matching hash says the
+                # build is back. Anything else comes back beside it under a
+                # '~N' name, rather than staying in the trash to be purged.
+                if is_meta or (os.path.getsize(dst) == size and _same_content(src, dst)):
                     result["already"].append(name)
                     continue
                 dst = unique_path(dst)
         try:
-            os.makedirs(master, exist_ok=True)
-            shutil.move(src, dst)
-        except (OSError, shutil.Error) as e:
+            wj_paths.move_file(src, dst)
+        except OSError as e:
             result["failed"].append((name, str(e)))
             continue
         if not is_meta:
@@ -2977,6 +3067,14 @@ def wait_for_wabbajack(what):
     at the prompt stops the wizard, as everywhere else."""
     while True:
         procs = WB.running_processes()
+        if procs is None:
+            # tasklist did not answer, so "none running" would be a guess.
+            # Asked, rather than assumed either way.
+            out()
+            out("  Whether Wabbajack is running could not be checked (tasklist did not answer).")
+            out(f"  {what} moves archives it may be reading. Make sure it is closed.")
+            ask("   [c] it is closed, go on   [q] quit", ("c",))
+            return True
         if not procs:
             return True
         out()
@@ -2987,35 +3085,26 @@ def wait_for_wabbajack(what):
 
 
 def trash_report():
-    """(game_folder, files, bytes, oldest_arrival) per non-empty trash."""
-    name = CFG.TRASH_FOLDER if CFG else "Trash"
+    """(game_folder, files, bytes, oldest_arrival) per trash, counting the
+    files a cleanup put there: what the purge, and emptying the trash, act
+    on. The arrival is the deletion record's, as the purge's is."""
     rows = []
-    try:
-        games = sorted(os.listdir(A.WJ.ARCHIVE_ROOT))
-    except OSError:
-        return rows
-    for g in games:
-        t = os.path.join(A.WJ.ARCHIVE_ROOT, g, name)
-        if not os.path.isdir(t):
-            continue
-        total = files = 0
-        oldest = None
-        try:
-            with os.scandir(t) as it:
-                for e in it:
-                    try:
-                        if not e.is_file():
-                            continue
-                        st = e.stat()
-                    except OSError:
-                        continue
-                    total += st.st_size
-                    files += 1
-                    oldest = st.st_mtime if oldest is None else min(oldest, st.st_mtime)
-        except OSError:
-            continue
-        if files:
-            rows.append((g, files, total, oldest))
+    for g, items in A.trash_contents().items():
+        rec = [it for it in items if it[3] is not None]
+        if rec:
+            rows.append((g, len(rec), sum(it[2] for it in rec), min(it[3] for it in rec)))
+    return rows
+
+
+def unrecorded_trash():
+    """(game_folder, files, bytes) per trash for the files there that no
+    deletion record accounts for - put there by hand, or recorded in a CSV
+    that has since gone. Nothing here deletes those; they are yours."""
+    rows = []
+    for g, items in A.trash_contents().items():
+        loose = [it for it in items if it[3] is None]
+        if loose:
+            rows.append((g, len(loose), sum(it[2] for it in loose)))
     return rows
 
 
@@ -3037,6 +3126,23 @@ JUNK_NAMES = (".ds_store", "thumbs.db", "desktop.ini")
 LEFTOVER_SKIP_DIRS = (".git", ".venv-win", ".venv-build", ".venv", "dist", "build",
                       "node_modules", ".gallery-cache", "manifest_backups", "__pycache__",
                       ".python", ".mingit", "_internal", "wabbajack")
+
+
+def _leads_elsewhere(path):
+    """A symlink or a junction - any reparse point. os.walk follows a
+    junction on Windows, so a sweep of this folder could have deleted
+    desktop.ini and Thumbs.db wherever one pointed, outside the archive root
+    altogether. None is entered; a folder that cannot be looked at is not
+    entered either."""
+    try:
+        if os.path.islink(path):
+            return True
+        is_junction = getattr(os.path, "isjunction", None)
+        if is_junction is not None and is_junction(path):
+            return True
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & 0x400)
+    except OSError:
+        return True
 
 
 def _is_junk_file(name):
@@ -3085,9 +3191,10 @@ def leftover_report(roots=None):
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames
                            if d.lower() not in LEFTOVER_SKIP_DIRS
-                           and d.lower() not in A.WJ.EXCLUDE_POOL_DIRS]
+                           and d.lower() not in A.WJ.EXCLUDE_POOL_DIRS
+                           and not _leads_elsewhere(os.path.join(dirpath, d))]
             for n in filenames:
-                if _is_junk_file(n):
+                if _is_junk_file(n) and os.path.isfile(os.path.join(dirpath, n)):
                     add("OS metadata", os.path.join(dirpath, n))
 
     for n in orphan_sidecars():
@@ -3098,15 +3205,19 @@ def leftover_report(roots=None):
 
 
 def remove_leftovers(rows, on_delete=None):
-    """Delete what leftover_report() found. Returns (count, bytes, failures)."""
+    """Delete what leftover_report() found. Returns (count, bytes, failures).
+
+    Files only: every leftover is one. A folder that turns up here - a
+    directory named like a sidecar, say - is left alone and reported, rather
+    than removed with everything in it."""
     count = total = 0
     failures = []
     for cat, path, size in rows:
         try:
-            if os.path.isdir(path) and not os.path.islink(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
+            if os.path.isdir(path) or os.path.islink(path):
+                failures.append((path, "not a plain file; left alone"))
+                continue
+            os.remove(path)
         except OSError as e:
             failures.append((path, str(e)))
             continue
@@ -3130,10 +3241,14 @@ def leftover_step():
     out("      operating-system metadata, and Wabbajack's .metadata sidecar for")
     out("      a modlist that is gone. No archive is ever in this list.")
     out()
-    by_cat = {}
-    for cat, _p, b in rows:
-        n, t = by_cat.get(cat, (0, 0))
-        by_cat[cat] = (n + 1, t + b)
+    def tally(rows_):
+        by = {}
+        for cat, _p, b in rows_:
+            n, t = by.get(cat, (0, 0))
+            by[cat] = (n + 1, t + b)
+        return by
+
+    by_cat = tally(rows)
     cw = fit(list(by_cat), 4) + 2
     out(f"    {'what':<{cw}}{'items':>7}{'size':>11}")
     for cat in sorted(by_cat):
@@ -3148,12 +3263,30 @@ def leftover_step():
             ("d", "s"))
     if a == "s":
         return False
-    verdict = confirm_destructive(
-        "About to delete leftovers",
-        [f"{cat}: {n} item(s), {human(t)}" for cat, (n, t) in sorted(by_cat.items())],
-        total=total, total_label="Total", undo="This cannot be undone.")
-    if not verdict:
-        return False
+    # The second of the two asks. Only a plain yes deletes: the answer is a
+    # word, and "no" and "change" are words too - testing it for truth (as
+    # this step once did, behind a crash that hid it) read both as yes.
+    while True:
+        verdict = confirm_destructive(
+            "About to delete leftovers",
+            [f"{cat}: {n} item(s), {human(t)}" for cat, (n, t) in sorted(by_cat.items())],
+            total_bytes=total, total_label="Total", undo="This cannot be undone.")
+        if verdict == "yes":
+            break
+        if verdict != "change":
+            out("  Left alone.")
+            return False
+        cats = sorted(by_cat)
+        for i, cat in enumerate(cats, 1):
+            out(f"    {i:>3}  {cat}")
+        picks = choose(len(cats), "kinds")
+        if picks is None:
+            out("  Left alone.")
+            return False
+        keep = {cats[i] for i in picks}
+        rows = [r for r in rows if r[0] in keep]
+        by_cat = tally(rows)
+        total = sum(b for _c, _p, b in rows)
     count, freed, failures = remove_leftovers(rows, lambda c, p, b: out(f"    {p}"))
     out(f"  {count} item(s) deleted, {human(freed)} freed.")
     for p, err in failures:
@@ -3198,9 +3331,12 @@ def undo_step(state, records, undoable):
 
 def trash_step(state=None, records=None):
     """5d: what the trash holds, and the offer to empty it now, or to put a
-    cleanup back."""
+    cleanup back. A trash holding only files no record accounts for is
+    shown too - those are never purged, so somebody has to know they are
+    there - with nothing offered for them."""
     rows = trash_report()
-    if not rows:
+    loose = unrecorded_trash()
+    if not rows and not loose:
         return False
     days = keep_days()
     out()
@@ -3210,11 +3346,21 @@ def trash_step(state=None, records=None):
     out("      the start of a run. Until then a cleanup can be put back, [u], and")
     out("      the rebuild after it sorts each file home.")
     out()
-    gw = fit([g for g, _f, _b, _o in rows], 4) + 2
-    out(f"    {'game folder':<{gw}}{'files':>7}{'size':>11}   purged from")
-    for g, files, byts, oldest in rows:
-        due = datetime.fromtimestamp(oldest + days * 86400).strftime("%Y-%m-%d")
-        out(f"    {g:<{gw}}{files:>7}{human(byts):>11}   {due}")
+    if rows:
+        gw = fit([g for g, _f, _b, _o in rows], 4) + 2
+        out(f"    {'game folder':<{gw}}{'files':>7}{'size':>11}   purged from")
+        for g, files, byts, oldest in rows:
+            due = datetime.fromtimestamp(oldest + days * 86400).strftime("%Y-%m-%d")
+            out(f"    {g:<{gw}}{files:>7}{human(byts):>11}   {due}")
+    if loose:
+        if rows:
+            out()
+        out(f"    {sum(f for _g, f, _b in loose)} file(s) in a trash folder are in no deletion")
+        out("    record - put there by hand, or their record is gone - and are")
+        out("    never purged or emptied from here: "
+            + ", ".join(f"{g} ({f})" for g, f, _b in loose) + ".")
+    if not rows:
+        return False
     total = sum(b for _g, _f, b, _o in rows)
     undoable = ([r for r in cleanup_records() if r["waiting"]]
                 if state is not None and records is not None else [])
@@ -3303,7 +3449,6 @@ def stage_space(state, records):
     out("      any of it is deleted in 5c.")
     deleted_any = False
     failed_rebuilds = {}          # folder key -> the sorter's exit code
-    reserved = A.WJ.reserved_list_names()
     while True:
         picks = choose(len(lists), "modlists")
         if picks is None:
@@ -3311,7 +3456,7 @@ def stage_space(state, records):
             break
         chosen = [lists[i] for i in picks]
         named = [stem_of(x["file"]) for x in chosen
-                 if stem_of(x["file"]).lower() in reserved]
+                 if CFG and CFG.list_name_problem(stem_of(x["file"]))]
         if named:
             out(f"  Cannot delete {', '.join(named)}: a manifest named after a "
                 f"pool folder claims")
@@ -3405,17 +3550,35 @@ def stage_space(state, records):
             out("      still published, and could just be adopted back.")
             out()
         out("      Nothing is deleted here - the folder is moved intact.")
-        picks = choose(len(strays), "folders")
-        if picks is None:
-            out("  Skipped. Left where they are.")
-        else:
-            for i in picks:
-                game, name, files, byts = strays[i]
+        store = CFG.UNMANAGED_FOLDER if CFG else "Unmanaged"
+        while True:
+            picks = choose(len(strays), "folders")
+            if picks is None:
+                out("  Skipped. Left where they are.")
+                break
+            chosen = [strays[i] for i in picks]
+            verdict = confirm_destructive(
+                f"About to park {len(chosen)} folder(s)",
+                [f"{g} / {n}   {f} file(s), {human(b)}" for g, n, f, b in chosen],
+                total_bytes=sum(b for _g, _n, _f, b in chosen), total_label="Total moving",
+                undo=(f"Nothing is deleted: each folder moves intact into that game's "
+                      f"'{store}' folder, and moves back by hand."))
+            if verdict == "change":
+                continue
+            if verdict != "yes":
+                out("  Skipped. Left where they are.")
+                break
+            # A folder an install is reading from will not rename, and is left
+            # where it is; but nothing that moves archives starts under a
+            # running Wabbajack in the first place.
+            wait_for_wabbajack("Parking folders")
+            for game, name, files, byts in chosen:
                 dst = park_unmanaged_dir(os.path.join(A.WJ.ARCHIVE_ROOT, game),
                                          name)
                 if dst:
                     out(f"    {name} -> {dst}")
             A.WJ.invalidate_existing_cache()
+            break
 
     cleared = clear_master_step(records, masters, failed_rebuilds)
     trash_step(state, records)
@@ -3479,10 +3642,10 @@ def clear_master_step(records, masters, failed_rebuilds):
     out("          another list wants them.")
     mode = ask("      Which?", ("y", "a"))
 
-    wide_want, pulled = None, []
+    wide_want, pulled, info = None, [], {}
     if mode == "a":
         pools = {m["folder"] for m in masters}
-        wide_want, note, pulled = gallery_protection(pools)
+        wide_want, note, pulled = gallery_protection(pools, info=info)
         if wide_want is None:
             out()
             out(f"  Cannot do that safely: {note}.")
@@ -3570,6 +3733,17 @@ def clear_master_step(records, masters, failed_rebuilds):
                     lines.append(f"   ... and {len(pulled) - 6} more")
                 lines.append("If you hold archives for one of those and no "
                              "manifest for it, they are not protected.")
+            behind = info.get("behind") or []
+            if behind:
+                lines.append("")
+                lines.append(f"{len(behind)} published list(s) were last validated for an "
+                             f"older build than their feed")
+                lines.append("now publishes, so what only the new build wants is not "
+                             "protected yet:")
+                for k in behind[:6]:
+                    lines.append(f"   {k}")
+                if len(behind) > 6:
+                    lines.append(f"   ... and {len(behind) - 6} more")
         else:
             lines.append("Protected by: your modlists only. Archives a "
                          "published list wants WILL be deleted.")
@@ -3662,5 +3836,11 @@ def run(verbose=False, nexus_mode=None, allow_size_only=False, no_lock=False):
         out()
         out("Stopped. Nothing further was changed.")
         return 0
+    except Exception:
+        # Into the log with its traceback, and the exit code the README
+        # gives an unhandled error, rather than Python's own 1, which reads
+        # as "finished with problems".
+        A.LOG.exception("[TERMINATED] Unhandled error; see the traceback above.")
+        return 4
     finally:
         A.release_lock(lock_fd)

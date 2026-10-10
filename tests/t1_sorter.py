@@ -209,13 +209,25 @@ check("one copy of the shared build goes to Shared, the identical extra to Maste
       str(s.where("shared.7z")))
 check("  which the log calls a redundant copy", "redundant copy" in out)
 
-print("\n      copies of OTHER sizes are not touched")
+print("\n      copies of OTHER sizes: another list's build stays, nobody's goes to Master")
 s = fresh()
 s.pool_file(G, "ListB", "a1.7z", 111)         # a different build nobody wants
 rc, out = s.run("wj_sorter.py",
                 ["--game", G, "--cleanup-only", "--yes"], expect=0)
-check("a different-size copy stays where it was",
-      s.where("a1.7z") == [("ListA", 100), ("ListB", 111)], str(s.where("a1.7z")))
+check("a build of the name that no list wants goes to Master, where 5c can judge it",
+      s.where("a1.7z") == [("ListA", 100), ("Master", 111)], str(s.where("a1.7z")))
+s = Sandbox(BOX)
+s.manifest("ListA", G, [("a1.7z", 100, "nexus")])
+s.manifest("ListB", G, [("a1.7z", 111, "nexus")])
+s.pool_file(G, "ListA", "a1.7z", 100)
+s.pool_file(G, "ListB", "a1.7z", 111)
+s.pool_file(G, "ListA", "a1~1.7z", 122)       # set aside by a download; no list wants it
+rc, out = s.run("wj_sorter.py", ["--game", G, "--cleanup-only", "--yes"], expect=0)
+check("  while each build a list wants keeps a home outside Master",
+      sorted(sz for f, sz in s.where("a1.7z") if f != "Master") == [100, 111],
+      str(s.where("a1.7z")))
+check("  and the set-aside build nobody wants is parked in Master",
+      s.where("a1~1.7z") == [("Master", 122)], str(s.where("a1~1.7z") + s.where("a1.7z")))
 
 # ---------------------------------------------------------------- 1.13
 print("\n 1.13  manifests are read once, then served from the shared cache")
@@ -231,5 +243,158 @@ rc, out2 = s.run("wj_sorter.py",
 check("the second run opens no manifest at all", "2 manifest(s); 2 read from the cache" in out2,
       str([l for l in out2.split(chr(10)) if "manifest(s);" in l]))
 check("  and plans the same moves", out1.count("[MOVE]") == out2.count("[MOVE]"))
+
+# ---------------------------------------------------------------- 1.14
+print("\n 1.14  a list name Windows reads as a pool, or as another folder, aborts the run")
+# Windows drops a trailing dot: a manifest called 'Master..wabbajack' is the
+# list 'Master.', whose folder is Master. Compared as text it was not
+# 'master', so it passed - and deleting that list emptied the Master pool.
+for stem, why in (("Master.", "ends in a dot"), ("Trash", "reserved"), ("Unmanaged", "reserved")):
+    s = fresh()
+    s.manifest(stem, G, [("m1.7z", 10, "nexus")])
+    before = s.files()
+    rc, out = s.run("wj_sorter.py", ["--game", G, "--list", "ListA", "--yes"], expect=1)
+    check("a list called %r aborts the run (exit 1)" % stem, rc == 1)
+    check("  moving nothing, and saying why", s.files() == before and why in out, out[-300:])
+
+# ---------------------------------------------------------------- 1.15
+print("\n 1.15  staging never hands a list another build of a file under its name")
+# Reproduced 2026-10-10 against 1.4.1: with no copy at the size a list wants,
+# staging moved whichever copy there was into the list's folder and reported
+# nothing missing, so Wabbajack was handed the wrong bytes.
+s = Sandbox(BOX)
+s.manifest("ListA", G, [("a1.7z", 100, "nexus"), ("shared.7z", 200, "nexus")])
+s.manifest("ListB", G, [("b1.7z", 150, "nexus"), ("shared.7z", 111, "nexus")])
+s.pool_file(G, "ListA", "a1.7z", 100)
+s.pool_file(G, "ListB", "b1.7z", 150)
+s.pool_file(G, "ListB", "shared.7z", 111)          # ListB's build; ListA's is nowhere
+rc, out = s.run("wj_sorter.py", ["--game", G, "--list", "ListA", "--yes"], expect=0)
+check("ListB's build is not moved into ListA's folder",
+      s.where("shared.7z") == [("Shared", 111)], str(s.where("shared.7z")))
+check("  and ListA's own build is reported missing, with both sizes",
+      "only a DIFFERENT build" in out and "wants 200; on disk at 111" in out
+      and "1 missing" in out, out[-700:])
+
+s = fresh()
+os.remove(os.path.join(s.archives, G, "ListA", "shared.7z"))
+s.pool_file(G, "ListB", "shared.7z", 111)          # a build neither list pins
+rc, out = s.run("wj_sorter.py", ["--game", G, "--list", "ListA", "--yes"], expect=0)
+check("a build no list here pins is parked in Master, not handed to a list",
+      s.where("shared.7z") == [("Master", 111)], str(s.where("shared.7z")))
+check("  the cleanup says why", "a build no list here wants" in out)
+
+# ---------------------------------------------------------------- 1.16
+print("\n 1.16  a move never lands on a file, and a collision it cannot settle loses nothing")
+import logging
+s = fresh()
+sys.path.insert(0, s.tools)
+import wj_sorter as S
+S.LOG.setLevel(logging.CRITICAL)
+S.MASTER_ARCHIVE_DIR = os.path.join(s.archives, G, "Master")
+master = S.MASTER_ARCHIVE_DIR
+lista = os.path.join(s.archives, G, "ListA")
+
+
+def size(p):
+    return os.path.getsize(p) if os.path.isfile(p) else None
+
+
+src = s.pool_file(G, "ListB", "x.7z", 10)
+dst = s.pool_file(G, "ListA", "x.7z", 20)
+try:
+    S._raw_move(src, dst)
+    raised = None
+except OSError as e:
+    raised = e
+check("a move onto a file that is there refuses, where it used to delete that file",
+      isinstance(raised, FileExistsError) and size(src) == 10 and size(dst) == 20, repr(raised))
+
+counters = {"moved": 0, "meta": 0, "parked": 0, "errors": 0}
+real_park = S.park_in_master
+S.park_in_master = lambda path, counters, dry_run, why: False    # Master would not take it
+try:
+    S.resolve_collision(src, dst, "x.7z", {"x.7z": {10}}, counters, False)
+finally:
+    S.park_in_master = real_park
+check("a wrong build that cannot be parked keeps its place, and the right one waits",
+      size(src) == 10 and size(dst) == 20, str((size(src), size(dst))))
+
+y = s.pool_file(G, "ListB", "y.7z", 5)
+s.pool_file(G, "ListB", "y.7z.meta", 3)
+s.pool_file(G, "Master", "y.7z", 7)
+s.pool_file(G, "Master", "y~1.7z.meta", 2)         # a sidecar whose archive is gone
+ok = S.park_in_master(y, counters, False, "a test")
+check("parking finds a name free for the archive AND its sidecar, and keeps them paired",
+      ok and size(os.path.join(master, "y~2.7z")) == 5 and size(os.path.join(master, "y~2.7z.meta")) == 3
+      and size(os.path.join(master, "y~1.7z.meta")) == 2, str(sorted(os.listdir(master))))
+
+z = s.pool_file(G, "ListB", "z.7z", 4)
+s.pool_file(G, "ListB", "z.7z.meta", 6)
+s.pool_file(G, "ListA", "z.7z.meta", 9)            # left by something else, with no archive
+S.move_with_meta(z, os.path.join(lista, "z.7z"), counters, False)
+check("a sidecar already at the destination is kept under another name, not written over",
+      size(os.path.join(lista, "z.7z")) == 4 and size(os.path.join(lista, "z.7z.meta")) == 6
+      and 9 in [size(os.path.join(lista, n)) for n in os.listdir(lista) if n.startswith("z.7z~")],
+      str(sorted(os.listdir(lista))))
+
+# ---------------------------------------------------------------- 1.17
+print("\n 1.17  a stop is taken between two moves, each of them whole")
+# Found 2026-10-10 in review: the window's stop interrupted the sort wherever
+# it was, which could be between an archive and its sidecar.
+import time
+pending = []
+for n in ("m1.7z", "m2.7z", "m3.7z"):
+    p = s.pool_file(G, "ListB", n, 7)
+    s.pool_file(G, "ListB", n + ".meta", 2)
+    pending.append({"src": p, "dst": os.path.join(lista, n), "name": n, "reason": "a test"})
+real_mwm = S.move_with_meta
+
+
+def stop_arrives_mid_move(src, dst, counters, dry_run):
+    S._STOP.set()                                  # while this move is under way
+    real_mwm(src, dst, counters, dry_run)
+
+
+S.move_with_meta = stop_arrives_mid_move
+try:
+    c = S.execute_plan(pending, {}, False)
+finally:
+    S.move_with_meta = real_mwm
+    S._STOP.clear()
+check("the move under way finishes whole, its sidecar with it, and no other starts",
+      size(os.path.join(lista, "m1.7z")) == 7 and size(os.path.join(lista, "m1.7z.meta")) == 2
+      and not os.path.exists(os.path.join(lista, "m2.7z")) and c["stopped"] and c["moved"] == 1,
+      str((c, sorted(os.listdir(lista)))))
+S._MOVING.set()
+stop_path = os.path.join(s.tools, "stop-the-sort")
+interrupted = False
+try:
+    S.watch_stop_file(stop_path, interval=0.05)
+    with open(stop_path, "w") as f:
+        f.write("stop")
+    deadline = time.time() + 5
+    while not S._STOP.is_set() and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.3)                                # an interrupt, had one come, lands here
+except KeyboardInterrupt:
+    interrupted = True
+finally:
+    S._MOVING.clear()
+check("a stop that comes while files move sets the flag, and interrupts nothing",
+      S._STOP.is_set() and not interrupted and not os.path.exists(stop_path))
+S._STOP.clear()
+
+# ---------------------------------------------------------------- 1.18
+print("\n 1.18  a download stopped half-way keeps its resume record through a sort")
+# Found 2026-10-10 in review: the sorter skipped a .part but took the CDN
+# downloader's <archive>.parts.json for an archive nobody wanted, and parked
+# it in Master; the next attempt then started the file afresh.
+s = fresh()
+s.pool_file(G, "ListA", "big.7z.part", 300)
+s.pool_file(G, "ListA", "big.7z.parts.json", 40)
+rc, out = s.run("wj_sorter.py", ["--game", G, "--cleanup-only", "--yes"], expect=0)
+check("the partial file and its record stay together where they were",
+      s.where("big.7z.part") == [("ListA", 300)] and s.where("big.7z.parts.json") == [("ListA", 40)],
+      str(s.where("big.7z.part") + s.where("big.7z.parts.json")))
 
 sys.exit(summary())

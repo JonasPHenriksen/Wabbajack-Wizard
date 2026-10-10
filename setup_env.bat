@@ -17,11 +17,14 @@ REM                  requirements.txt goes into that. A venv records where
 REM                  its Python is, so it is rebuilt by running this again
 REM                  whenever Python moves or is upgraded.
 REM
-REM  Run once. Safe to run again.
+REM  Run once. Safe to run again. Exits 0 when everything is in place, 1
+REM  when something could not be done.
 REM ---------------------------------------------------------------------
 
+setlocal
+set "RC=1"
 pushd "%~dp0"
-echo Folder: %CD%
+echo Folder: "%CD%"
 echo.
 
 if exist ".python\python.exe" goto inproject
@@ -70,6 +73,7 @@ if errorlevel 1 goto pipfail
 
 echo.
 echo Done. run.bat will use %VPY% automatically.
+set "RC=0"
 goto end
 
 REM ---------------------------------------------------------------------
@@ -102,5 +106,10 @@ goto end
 
 :end
 popd
+REM Wait only for someone at a console (see run.bat).
+if defined WJ_NO_PAUSE goto done
+timeout /t 0 >nul 2>nul || goto done
 echo.
 pause
+:done
+exit /b %RC%

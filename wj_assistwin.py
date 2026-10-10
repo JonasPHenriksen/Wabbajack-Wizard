@@ -207,6 +207,17 @@ class AssistWindow:
     def _on_closed(self):
         self.closed.set()
 
+    def close(self):
+        """Close the window from any thread: the run being told to stop, which
+        ends it the way a person closing the window does - the capture loop
+        notices `closed`, hands the nxm:// handler back, and returns."""
+        self.closed.set()
+        try:
+            if self.window is not None:
+                self.window.destroy()
+        except Exception:
+            pass
+
     def _on_loaded(self):
         self._hook_navigation()
         self._inject()

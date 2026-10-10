@@ -56,12 +56,15 @@ import time
 import shutil
 import base64
 import struct
+import zipfile
 import logging
 import logging.handlers
 import argparse
+import itertools
 import importlib.util
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
@@ -116,9 +119,12 @@ SORTER_IGNORES_PART = True
 # a modlist from tracking for good.
 NEGATIVE_MATCH_TTL_DAYS = 14
 
-# Wabbajack's registry of metadata feeds.
-REPOSITORIES_URL = ("https://raw.githubusercontent.com/wabbajack-tools/"
-                    "mod-lists/master/repositories.json")
+# Wabbajack's registry of metadata feeds. WJ_FEED_REGISTRY names another one:
+# the test suites serve their own on localhost, so a whole unattended run can
+# be checked without reaching GitHub. Fetched like every feed, so it too has
+# to be a web address.
+REPOSITORIES_URL = os.environ.get("WJ_FEED_REGISTRY") or (
+    "https://raw.githubusercontent.com/wabbajack-tools/mod-lists/master/repositories.json")
 
 HTTP_TIMEOUT = 30
 USER_AGENT   = CFG.USER_AGENT
@@ -129,6 +135,12 @@ LOCK_FILE    = ".wj_autoupdate.lock"
 NEWLINE = chr(10)
 HERE = wj_paths.app_dir(__file__)
 LOG = logging.getLogger("wj_autoupdate")
+
+# --dry-run: plan everything, change nothing. Set by main(); while it is
+# set, nothing is written - not the state file, not a to-do CSV - nothing
+# is pruned or purged, and no notification is sent. A dry run used to
+# delete expired backups and send a "fetched" report like a real one.
+DRY_RUN = False
 
 
 def runtime_path(name=None, make=True):
@@ -468,13 +480,33 @@ def http_json(url):
         raise ValueError(f"refusing {url!r}: {why}")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
                                                "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+    with wj_paths.urlopen(req, timeout=HTTP_TIMEOUT) as r:
         raw = r.read()
     return json.loads(raw.decode("utf-8-sig"))
 
 
+def _without_credentials(text, url):
+    """`text` with the user and password `url` carries, if any, masked: an
+    error about the URL quotes it, and the log sits on a share."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return text
+    secret = parts.netloc.rpartition("@")[0]
+    return text.replace(secret, "***") if secret else text
+
+
+# Set when a run has sent its own report, so main() does not send a second.
+_NOTIFIED = False
+
+
 def notify(title, body):
-    if not NOTIFY_URL:
+    global _NOTIFIED
+    if not NOTIFY_URL or DRY_RUN:
+        return
+    why = wj_paths.web_url_problem(NOTIFY_URL)
+    if why:
+        LOG.warning("[WARN] NOTIFY_URL is not used: %s.", why)
         return
     try:
         if "discord.com" in NOTIFY_URL or "discordapp.com" in NOTIFY_URL:
@@ -484,11 +516,13 @@ def notify(title, body):
             payload = body.encode("utf-8")
             headers = {"Title": title, "User-Agent": USER_AGENT}
         req = urllib.request.Request(NOTIFY_URL, data=payload, headers=headers)
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT):
+        with wj_paths.urlopen(req, timeout=HTTP_TIMEOUT):
             pass
+        _NOTIFIED = True
         LOG.debug("Notification sent.")
     except Exception as e:
-        LOG.warning("[WARN] Notification failed: %s", e)
+        LOG.warning("[WARN] Notification failed: %s",
+                    _without_credentials(f"{type(e).__name__}: {e}", NOTIFY_URL))
 
 
 # ----------------------------------------------------------------------
@@ -570,12 +604,48 @@ def normalise(entry, repo):
 # stage then asks for the handful of repos it tracks; without this the second
 # ask re-fetches feeds the first one already has, and 149 requests is the part
 # of a run that visibly takes time.
-_FEED_CACHE = {"all": None, "complete": False}
+#
+# Reused for FEED_SNAPSHOT_TTL at most. The window can stay open all day, and
+# a snapshot that never expired meant "Check the feeds" never saw a version
+# published after its first look - nor did the "any known modlist" rule. A
+# snapshot with a feed missing is reused only FEED_RETRY_S, so the next ask
+# tries that feed again instead of refusing until a restart. The window's
+# refresh buttons start a fresh one (reset_feed_cache).
+FEED_SNAPSHOT_TTL = 6 * 3600
+FEED_RETRY_S = 300
+_FEED_CACHE = {"all": None, "complete": False, "at": None, "failed": None}
 
 
 def reset_feed_cache():
     _FEED_CACHE["all"] = None
     _FEED_CACHE["complete"] = False
+    _FEED_CACHE["at"] = None
+    _FEED_CACHE["failed"] = None
+
+
+def _snapshot_fresh():
+    at = _FEED_CACHE.get("at")
+    if at is None:          # put there by hand - as the test suites do - and kept
+        return True
+    limit = FEED_SNAPSHOT_TTL if _FEED_CACHE["complete"] else FEED_RETRY_S
+    return time.time() - at < limit
+
+
+def _feed_shape_ok(data):
+    """Does a feed have a shape iter_entries() reads in full? A list of
+    entries - an empty one included, since an author can publish nothing -
+    one bare entry, or an object wrapping lists of them. Anything else, or a
+    list holding something that is not an entry, is a feed whose lists could
+    not all be read, which the "any known modlist" rule must not take for a
+    feed with nothing in it."""
+    if isinstance(data, list):
+        return all(isinstance(e, dict) for e in data)
+    if isinstance(data, dict):
+        if any(k in data for k in ("links", "download_metadata", "machineURL")):
+            return True
+        lists = [v for v in data.values() if isinstance(v, list)]
+        return bool(lists) and all(isinstance(e, dict) for v in lists for e in v)
+    return False
 
 
 def load_feeds(repo_names=None):
@@ -584,7 +654,7 @@ def load_feeds(repo_names=None):
     any feed failed to load. A caller must not draw a negative conclusion - "no
     published list matches this file" - from an incomplete picture, because one
     flaky request would then untrack a modlist for good."""
-    if _FEED_CACHE["all"] is not None:
+    if _FEED_CACHE["all"] is not None and _snapshot_fresh():
         cached, complete = _FEED_CACHE["all"], _FEED_CACHE["complete"]
         if repo_names is None:
             return dict(cached), complete
@@ -596,6 +666,12 @@ def load_feeds(repo_names=None):
                         ", ".join(sorted(missing)))
         LOG.info("Reusing this run's feed snapshot (%d of %d list(s)).",
                  len(subset), len(cached))
+        # Complete for these feeds, when it is known which ones failed: one
+        # of the other 149 failing used to make a run whose every tracked
+        # feed answered say that not all of them had, and exit 1.
+        failed = _FEED_CACHE.get("failed")
+        if not complete and failed is not None:
+            complete = not (want & failed)
         return subset, complete
 
     LOG.info("Fetching feed registry...")
@@ -641,15 +717,29 @@ def load_feeds(repo_names=None):
                 LOG.warning("[WARN] Feed '%s' unavailable: %s", repo, err)
                 failed.append(repo)
                 continue
-            n = 0
-            short = False
+            n = unread = 0
+            # A feed that answered is not a feed that was read. Its shape, or
+            # an entry in it, may be one this version cannot read - a format
+            # that moved on drops the machineURL, say - and then its lists are
+            # missing from the picture exactly as a feed that timed out is.
+            # Counted as a feed that did not answer, so the "any known
+            # modlist" rule refuses rather than deleting on the gap.
+            short = not _feed_shape_ok(data)
             for raw in iter_entries(data):
                 ent = normalise(raw, repo)
                 if ent:
                     out[ent["key"]] = ent
                     n += 1
-                elif CFG.plain_name_problem(str(entry_field(raw, "machineURL") or "x")):
-                    short = True            # refused by normalise(), not merely empty
+                else:
+                    unread += 1
+            if unread:
+                LOG.warning("[WARN] Feed '%s' has %d entr%s this version cannot read; it "
+                            "counts as a feed that did not answer.", repo, unread,
+                            "y" if unread == 1 else "ies")
+                short = True
+            elif short:
+                LOG.warning("[WARN] Feed '%s' is not shaped as a feed this version reads; it "
+                            "counts as a feed that did not answer.", repo)
             if short:
                 failed.append(repo)
             LOG.debug("  %-28s %d list(s)", repo, n)
@@ -664,6 +754,8 @@ def load_feeds(repo_names=None):
     if repo_names is None:
         _FEED_CACHE["all"] = dict(out)
         _FEED_CACHE["complete"] = not failed
+        _FEED_CACHE["at"] = time.time()
+        _FEED_CACHE["failed"] = {str(r) for r in failed}
     return out, not failed
 
 
@@ -714,6 +806,9 @@ def load_state():
 
 
 def save_state(state):
+    if DRY_RUN:
+        LOG.debug("State not saved: a dry run changes nothing.")
+        return
     p = runtime_path(STATE_FILE)
     tmp = p + ".tmp"
     try:
@@ -755,12 +850,20 @@ def CDN_LOOKS_NEEDED(url):
 
 
 def verify_manifest(path, size, hash_b64, known_hash=None):
-    """Check a manifest against the feed's Size and Hash.
+    """Check a manifest against the feed's Size and Hash. (ok, why).
 
     known_hash is the file's hash if something already computed it while
     writing the file - the CDN downloader hashes every assembled file before
     it renames it. Reusing that saves re-reading a multi-GB file off the share
-    for no new information."""
+    for no new information.
+
+    Nothing to compare is not a match, and neither is a hash that could not
+    be read: both used to pass. A feed entry with neither size nor hash then
+    had any local file adopted as its published build - an old version
+    included, which was never updated again - and one the file could not be
+    hashed for was taken on trust."""
+    if size is None and not hash_b64:
+        return False, "the feed gives no size or hash to compare it with"
     try:
         actual = os.path.getsize(path)
     except OSError as e:
@@ -773,13 +876,29 @@ def verify_manifest(path, size, hash_b64, known_hash=None):
         return True, "ok (hashed while downloading)"
     if hash_b64 and getattr(WJ, "_HAVE_XXHASH", False):
         got = WJ.wabbajack_hash(path)
-        if got and got != hash_b64:
-            return False, "hash mismatch"
         if got is None:
-            return True, "ok (hash unavailable)"
+            return False, "the file could not be read to hash it"
+        if got != hash_b64:
+            return False, "hash mismatch"
     elif hash_b64:
         return True, "ok (size only; install xxhash for hash checks)"
     return True, "ok"
+
+
+def manifest_problem(path):
+    """Why the file at `path` is not a readable .wabbajack, or None.
+
+    A manifest is a zip holding a 'modlist' member. A host that answers with
+    an error page and a 200, or a download that stopped short, is neither -
+    and a feed that states no size or hash leaves this the only check there
+    is before it replaces the manifest you have."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            if not any(os.path.basename(m).lower() == "modlist" for m in z.namelist()):
+                return "it holds no 'modlist' manifest"
+    except (zipfile.BadZipFile, OSError, ValueError) as e:
+        return f"it is not a readable .wabbajack ({e})"
+    return None
 
 
 def fetch_manifest(entry, filename):
@@ -804,12 +923,25 @@ def fetch_manifest(entry, filename):
     LOG.info("  Downloading %s v%s (%s)", filename, entry["version"],
              WJ.human_bytes(entry["size"]) if entry["size"] else "size unknown")
 
+    # A staging copy an interrupted run left behind is ours, and was never
+    # verified: it goes, rather than being kept beside the new download.
+    if os.path.isfile(staging):
+        try:
+            os.remove(staging)
+        except OSError as e:
+            LOG.error("  [ERROR] Could not clear %s left by an earlier run: %s",
+                      os.path.basename(staging), e)
+            return False
+
     # Nearly every published manifest lives on the Wabbajack CDN, which needs
     # the multi-part protocol rather than a plain GET.
     cdn_hash = None
     if _HAVE_CDN and (CDN.is_cdn_url(url) or CDN.looks_multipart(url)):
+        # strict_hash: a CDN serving another build than the feed describes is
+        # refused before the transfer, not after several GB of it.
         ok, cdn_hash = CDN.download(url, staging, expected_size=entry["size"],
-                                    expected_hash=entry["hash"], detail=True)
+                                    expected_hash=entry["hash"], detail=True,
+                                    strict_hash=bool(entry["hash"]))
     else:
         if not _HAVE_CDN and CDN_LOOKS_NEEDED(url):
             LOG.error("  [ERROR] %s is a Wabbajack CDN URL but wj_cdn.py "
@@ -823,8 +955,15 @@ def fetch_manifest(entry, filename):
                   "(your existing copy is untouched)", filename)
         return False
 
-    ok, why = verify_manifest(staging, entry["size"], entry["hash"],
-                              known_hash=cdn_hash)
+    if entry["size"] is None and not entry["hash"]:
+        ok, why = True, "the feed states no size or hash; the file is checked as a manifest only"
+    else:
+        ok, why = verify_manifest(staging, entry["size"], entry["hash"],
+                                  known_hash=cdn_hash)
+    if ok:
+        bad = manifest_problem(staging)
+        if bad:
+            ok, why = False, bad
     if not ok:
         LOG.error("  [ERROR] %s failed verification: %s - discarding.", filename, why)
         quarantine = os.path.join(BACKUPS, filename + ".rejected")
@@ -843,18 +982,28 @@ def fetch_manifest(entry, filename):
 
     LOG.info("  Verified: %s", why)
 
-    # Only now is the existing manifest touched. Both steps are renames on the
-    # same volume, so the window where neither file is in place is as close to
-    # zero as the filesystem allows.
-    backup_existing(filename)
+    # Only now is the existing manifest touched, and only once it is kept: a
+    # manifest whose backup cannot be made is not replaced. It used to be
+    # replaced all the same, with no backup at all - every time, wherever the
+    # manifests and manifest_backups sat on different volumes.
+    try:
+        kept = backup_existing(filename)
+    except OSError as e:
+        LOG.error("  [ERROR] %s is not replaced: the version you have could not be kept as "
+                  "a backup first (%s). The download is discarded; the next run tries "
+                  "again.", filename, e)
+        try:
+            os.remove(staging)
+        except OSError:
+            pass
+        return False
     try:
         os.replace(staging, dest)
     except OSError as e:
         LOG.error("  [ERROR] Could not put %s in place: %s", filename, e)
-        bak = os.path.join(BACKUPS, filename + ".bak")
-        if os.path.isfile(bak):
+        if kept and not os.path.lexists(dest):
             try:
-                os.replace(bak, dest)
+                wj_paths.move_file(kept, dest)
                 LOG.info("  Restored the previous manifest.")
             except OSError:
                 pass
@@ -870,7 +1019,7 @@ def prune_backups():
     A .bak's age is time since its manifest was replaced, which
     backup_existing stamps on it; a .rejected one's is time since it was
     downloaded, which is also when it was rejected."""
-    if BACKUPS == MANIFESTS:
+    if BACKUPS == MANIFESTS or DRY_RUN:
         return
     cutoff = time.time() - KEEP_BACKUP_DAYS * 86400
     freed = 0
@@ -896,29 +1045,37 @@ def prune_backups():
 
 def backup_existing(filename):
     """Park the manifest about to be replaced as <name>.bak, stamped with
-    the moment it was superseded.
+    the moment it was superseded. Returns where it was kept, or None when
+    there was none to keep; raises OSError when it could not be kept, and
+    then nothing has changed.
 
-    A rename keeps the file's own mtime, which says when the manifest was
+    It moves by wj_paths.move_file, which copies across volumes: MANIFEST_DIR
+    may point into Wabbajack's own folder under %LOCALAPPDATA% while
+    manifest_backups sits beside the tools, on another drive or a share, and
+    a rename alone failed there every time. It goes to a name of its own
+    first, so the previous .bak gives way only once this one is safe.
+
+    A move keeps the file's own mtime, which says when the manifest was
     downloaded - for a list that went months without an update, months ago.
     prune_backups judges by mtime, so without the stamp the prune that ends
     the run could delete a backup made minutes before."""
     src = os.path.join(MANIFESTS, filename)
     if not os.path.isfile(src):
-        return
+        return None
     bak = os.path.join(BACKUPS, filename + ".bak")
+    kept = wj_paths.move_file(src, wj_paths.unique_path(bak + ".new"))
     try:
-        if os.path.exists(bak):
-            os.remove(bak)
-        os.replace(src, bak)
-        LOG.info("  Previous manifest kept as %s", os.path.basename(bak))
+        os.replace(kept, bak)              # one folder: only the previous .bak gives way
+        kept = bak
     except OSError as e:
-        LOG.warning("  [WARN] Could not back up %s: %s", filename, e)
-        return
+        LOG.warning("  [WARN] Could not replace the previous backup of %s (%s).", filename, e)
+    LOG.info("  Previous manifest kept as %s", os.path.basename(kept))
     now = time.time()
     try:
-        os.utime(bak, (now, now))
+        os.utime(kept, (now, now))
     except OSError:
         pass
+    return kept
 
 
 # ----------------------------------------------------------------------
@@ -971,14 +1128,107 @@ def trash_name_problem():
     return None
 
 
+# The record stage 5c writes of each file it sends to a trash.
+_DELETED_RECORD = re.compile(r"^deleted_(.+)_(\d{8}_\d{6})\.csv$", re.I)
+
+
+def trash_records():
+    """{normcased path in a trash: (arrived, size)} from every deleted_*.csv
+    record in the runtime folder: where each file stage 5c reclaimed went,
+    at what size, and when. The trash is found through the layout as it
+    stands, not the path the record wrote, so a share mapped to another
+    letter since still finds its files. The latest record for a path wins: a
+    file put back and reclaimed again counts from the second time."""
+    out = {}
+    folder = runtime_path(make=False)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out
+    trash_name = WJ.CFG.TRASH_FOLDER
+    for n in names:
+        m = _DELETED_RECORD.match(n)
+        if not m:
+            continue
+        try:
+            fallback = datetime.strptime(m.group(2), "%Y%m%d_%H%M%S").timestamp()
+        except ValueError:
+            continue
+        trash = os.path.join(WJ.ARCHIVE_ROOT, m.group(1), trash_name)
+        try:
+            with open(os.path.join(folder, n), newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+        except (OSError, csv.Error, UnicodeDecodeError):
+            continue
+        for r in rows:
+            to = os.path.basename(str(r.get("trashed_to") or ""))
+            if not to:
+                continue
+            try:
+                size = int(r.get("size_bytes") or -1)
+            except ValueError:
+                continue
+            arrived = fallback                  # a record from before trashed_at
+            try:
+                if r.get("trashed_at"):
+                    arrived = datetime.fromisoformat(r["trashed_at"]).timestamp()
+            except ValueError:
+                pass
+            key = os.path.normcase(os.path.join(trash, to))
+            if key not in out or arrived > out[key][0]:
+                out[key] = (arrived, size)
+    return out
+
+
+def trash_contents():
+    """{game_folder: [(name, path, size, arrived)]} for every file in every
+    game's trash. `arrived` is when a deletion record says the file went
+    there - matched by name and size - or None for a file no record accounts
+    for, which nothing here deletes: put there by hand, or by a folder that
+    merely shares the trash's name."""
+    records = trash_records()
+    root, trash_name = WJ.ARCHIVE_ROOT, WJ.CFG.TRASH_FOLDER
+    out = {}
+    try:
+        games = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for g in games:
+        trash = os.path.join(root, g, trash_name)
+        if not os.path.isdir(trash):
+            continue
+        items = []
+        try:
+            with os.scandir(trash) as it:
+                for e in it:
+                    try:
+                        if not e.is_file(follow_symlinks=False):
+                            continue
+                        size = e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+                    hit = records.get(os.path.normcase(e.path))
+                    items.append((e.name, e.path, size,
+                                  hit[0] if hit and hit[1] == size else None))
+        except OSError:
+            continue
+        if items:
+            out[g] = sorted(items, key=lambda t: t[0].lower())
+    return out
+
+
 def purge_trash(days=None):
     """Delete from every game's trash folder what has been there long enough.
 
-    Stage 5c moves reclaimed archives into <game>/<TRASH_FOLDER> and stamps
-    them with the moment they arrived, so age here is time since reclaiming,
-    not the archive's own age. Run at the start of every run, so the undo
-    window is exactly TRASH_KEEP_DAYS and no longer. days=0 empties the
-    trash outright, which is what the wizard's "empty now" does.
+    Only what a cleanup put there: a file is purged when a deletion record
+    says stage 5c sent it to this trash, at this size, and its age is
+    counted from that record. Nothing else in a trash folder is ever deleted
+    by this tooling, whatever its name - a folder the user keeps files in
+    can share the trash's name - and a file whose arrival stamp could not be
+    set is not purged on the strength of its build date. Run at the start of
+    every run, so the undo window is exactly TRASH_KEEP_DAYS and no longer.
+    days=0 empties the trash of everything a cleanup put there, which is what
+    the wizard's "empty now" does.
 
     Returns (rows, record_path): one (game_folder, name, size, arrived) per
     file removed, and the CSV they were written to as it went. Nothing at
@@ -988,7 +1238,6 @@ def purge_trash(days=None):
     cfg = WJ.CFG
     days = cfg.TRASH_KEEP_DAYS if days is None else days
     cutoff = time.time() - days * 86400
-    root = WJ.ARCHIVE_ROOT
     trash_name = cfg.TRASH_FOLDER
     rows, record, writer = [], None, None
     why = trash_name_problem()
@@ -996,48 +1245,40 @@ def purge_trash(days=None):
         LOG.error("[ERROR] Not emptying the trash: TRASH_FOLDER %r cannot be used (%s). "
                   "Nothing was deleted.", trash_name, why)
         return rows, None
-    try:
-        games = sorted(os.listdir(root))
-    except OSError:
+    if DRY_RUN:
         return rows, None
-    for g in games:
-        trash = os.path.join(root, g, trash_name)
-        if not os.path.isdir(trash):
-            continue
-        try:
-            entries = sorted(os.scandir(trash), key=lambda e: e.name.lower())
-        except OSError:
-            continue
-        for e in entries:
-            try:
-                if not e.is_file():
-                    continue
-                st = e.stat()
-            except OSError:
+    unrecorded = 0
+    for g, items in trash_contents().items():
+        for name, path, size, when in items:
+            if when is None:
+                unrecorded += 1
                 continue
-            if st.st_mtime > cutoff:
+            if days and when > cutoff:
                 continue
-            arrived = datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")
+            arrived = datetime.fromtimestamp(when).isoformat(timespec="seconds")
             try:
-                os.remove(e.path)
+                os.remove(path)
             except OSError as ex:
-                LOG.warning("[WARN] Could not purge %s: %s", e.path, ex)
+                LOG.warning("[WARN] Could not purge %s: %s", path, ex)
                 continue
             if record is None:
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                path = runtime_path(f"purged_trash_{stamp}.csv")
                 try:
-                    record = open(path, "w", newline="", encoding="utf-8")
+                    # Never over an earlier purge's record (wj_paths.create_stamped).
+                    _rec_path, record = wj_paths.create_stamped(runtime_path(), "purged_trash_")
                     writer = csv.writer(record)
                     writer.writerow(["game_folder", "archive", "size_bytes", "arrived"])
                 except OSError as ex:
                     LOG.warning("[WARN] Could not open the purge record: %s", ex)
-                    record = False
-            row = (g, e.name, st.st_size, arrived)
+                    record, writer = False, None
+            row = (g, name, size, arrived)
             rows.append(row)
             if writer is not None:
-                writer.writerow(row)
-                record.flush()
+                try:
+                    writer.writerow(row)
+                    record.flush()
+                except OSError as ex:
+                    LOG.warning("[WARN] Could not write to the purge record: %s", ex)
+                    writer = None
     record_path = None
     if record:
         record_path = record.name
@@ -1045,6 +1286,9 @@ def purge_trash(days=None):
     if rows:
         LOG.info("Trash: purged %d file(s) older than %s day(s), %s.", len(rows),
                  days, WJ.human_bytes(sum(r[2] for r in rows)))
+    if unrecorded:
+        LOG.info("Trash: %d file(s) in a trash folder are in no deletion record, so "
+                 "nothing here deletes them; they are yours to keep or remove.", unrecorded)
     return rows, record_path
 
 
@@ -1116,7 +1360,10 @@ def write_nexus_todo(record, nexus_items):
     """CSV of the Nexus download pages still outstanding, for the desktop.
 
     Removed again once nothing is outstanding: a to-do list for a finished
-    list is clutter, and ten of them had accumulated here."""
+    list is clutter, and ten of them had accumulated here. A dry run writes
+    and removes nothing."""
+    if DRY_RUN:
+        return None
     path = runtime_path(f"nexus_todo_{record['name']}.csv")
     if not nexus_items:
         try:
@@ -1177,12 +1424,16 @@ def reload_settings():
 
 
 def wabbajack_busy():
-    """Is a Wabbajack process running? False when that cannot be checked."""
+    """Is a Wabbajack process running? True, False, or None when that cannot
+    be checked (tasklist did not answer). An unattended run has nobody to
+    ask, and treats None as yes: it used to read it as no, and move archives
+    under whatever might be running."""
     try:
         import wj_wabbajack as WB
     except ImportError:
-        return False
-    return bool(WB.running_processes())
+        return None
+    procs = WB.running_processes()
+    return None if procs is None else bool(procs)
 
 
 def child_flags(args):
@@ -1205,6 +1456,67 @@ def set_output_hook(fn):
     OUTPUT_HOOK = fn
 
 
+# The file that asks the child script running now to stop: the downloader and
+# the sorter watch for it (WJ_STOP_FILE) and stop at their next safe point, the
+# way Ctrl+C stops them in a console. It is how the window stops a job it
+# started: the window has no console to send Ctrl+C to, and closing it used
+# to leave the child running on, unseen and unlocked.
+_CHILD = {"stop": None, "stopping": False}
+_STOP_SEQ = itertools.count(1)
+
+# What run_script() returns for a child it did not start because the job had
+# been asked to stop: Ctrl+C's code, which every caller already reads as "did
+# not finish".
+STOPPED = 130
+
+
+def request_child_stop():
+    """Ask the child script running now, if there is one, to stop at its
+    next safe point - and every child after it, until allow_children(), not
+    to start at all. A job that runs several in a row, a download per list or
+    a rebuild per game, used to go straight on to the next one. True unless
+    the child running now could not be asked."""
+    _CHILD["stopping"] = True
+    path = _CHILD.get("stop")
+    if not path:
+        return True
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("stop\n")
+        return True
+    except OSError:
+        return False
+
+
+def allow_children():
+    """A new job: children may start again after an earlier stop."""
+    _CHILD["stopping"] = False
+
+
+def archive_root_for_children():
+    """The archive root a child script has to be told to use, or None when
+    it works it out the same way itself.
+
+    A new ARCHIVE_ROOT saved in the window takes effect at the next start
+    (wj_config.RESTART_SETTINGS), so until then this process plans, measures
+    and clears Master under the root it started with - and a download or a
+    sort it starts would read the new one from the file, and work under the
+    other. While a different root waits in the file, the child is handed
+    this one (WJ_ARCHIVE_ROOT)."""
+    running = getattr(WJ, "ARCHIVE_ROOT", None)
+    if not running:
+        return None
+    saved = CFG.resolve_root(CFG.next_start_settings()["ARCHIVE_ROOT"])
+    same = (os.path.normcase(os.path.abspath(saved))
+            == os.path.normcase(os.path.abspath(running)))
+    return None if same else running
+
+
+def child_running():
+    """Is a child script running under run_script() now?"""
+    return bool(_CHILD.get("stop"))
+
+
 def run_script(script, args, label, interactive=False):
     """Run one of the existing scripts.
 
@@ -1220,13 +1532,34 @@ def run_script(script, args, label, interactive=False):
     With OUTPUT_HOOK set, the child's output is streamed line by line to the
     hook instead, carriage returns included as line breaks, and stdin is
     closed: the GUI has no console to hand over, and neither child needs one
-    when its flags and the API key file answer every question."""
+    when its flags and the API key file answer every question.
+
+    After request_child_stop() nothing is started: STOPPED is returned."""
+    if _CHILD.get("stopping"):
+        LOG.info("[STOP] Not starting %s: asked to stop.", label)
+        return STOPPED
+    stop = runtime_path(f".wj_stop_{os.getpid()}_{next(_STOP_SEQ)}")
+    _CHILD["stop"] = stop
+    try:
+        return _run_script(script, args, label, interactive, stop)
+    finally:
+        _CHILD["stop"] = None
+        try:
+            os.remove(stop)
+        except OSError:
+            pass
+
+
+def _run_script(script, args, label, interactive, stop):
     cmd = wj_paths.stage_argv(script, HERE) + args
     LOG.info("\n$ %s", " ".join(cmd))
     # The child scripts default to scanning their own folder for manifests;
     # this tells them to look where we actually keep them.
     env = dict(os.environ, PYTHONUNBUFFERED="1", WJ_MANIFEST_DIR=MANIFESTS,
-               WJ_LOCK_HELD="1")
+               WJ_LOCK_HELD="1", WJ_STOP_FILE=stop)
+    root = archive_root_for_children()
+    if root:
+        env["WJ_ARCHIVE_ROOT"] = root
     cap = runtime_path(f"wj_autoupdate_{label}.out")
     if OUTPUT_HOOK is not None:
         # The window has no console to give away, and frozen the child is the
@@ -1236,9 +1569,12 @@ def run_script(script, args, label, interactive=False):
         quiet = ({"creationflags": subprocess.CREATE_NO_WINDOW}
                  if hasattr(subprocess, "CREATE_NO_WINDOW") else {})
         try:
+            # UTF-8: the children set their stdout to it (setup_logging), and
+            # read as the ANSI code page their non-ASCII names came out garbled.
             proc = subprocess.Popen(cmd, cwd=HERE, env=env, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, errors="replace", bufsize=1, **quiet)
+                                    text=True, encoding="utf-8", errors="replace",
+                                    bufsize=1, **quiet)
         except OSError as e:
             LOG.error("[ERROR] Could not launch %s: %s", script, e)
             return 127
@@ -1275,8 +1611,12 @@ def run_script(script, args, label, interactive=False):
 # ----------------------------------------------------------------------
 # Start-up shared by the flag interface and the interactive wizard
 # ----------------------------------------------------------------------
-def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
+def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False, recover=True):
     """Prepare the environment. Returns 0 on success, else an exit code.
+
+    `recover` hands back an nxm:// handler a killed run left behind; a run
+    that only reports - --check, --dry-run, --gallery - passes False, and
+    changes nothing.
 
     Both entry points need exactly this: logging, the downloader module, the
     cross-script configuration check, the manifest folder, and the refusal to
@@ -1300,10 +1640,12 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
              if CFG._LOADED else "defaults (no %s)" % CFG.SETTINGS_FILE)
     for problem in CFG.SETTINGS_PROBLEMS:
         LOG.warning("[WARN] %s: %s", CFG.SETTINGS_FILE, problem)
+    # Every refusal below is "could not start", which is exit 2 (README):
+    # some used to return 1, which a scheduler reads as "ran, with problems".
     if not check_script_consistency():
         return 2
     if not resolve_dirs():
-        return 1
+        return 2
     LOG.info("Script dir:     %s", HERE)
     LOG.info("Runtime dir:    %s", runtime_path())
     LOG.info("Manifest dir:   %s", MANIFESTS)
@@ -1320,16 +1662,23 @@ def bootstrap(verbose=False, nexus_mode=None, allow_size_only=False):
         return 2
 
     LOG.info("Nexus mode:     %s", NEXUS_MODE)
+    # A run killed while it held the nxm:// handler - Task Manager, a closed
+    # console, a power cut - could not hand it back; this start does.
+    if recover:
+        try:
+            WJ.recover_nxm_handler(runtime_path())
+        except Exception as e:              # never a reason not to start
+            LOG.debug("Could not check the nxm:// handler: %s", e)
     if not os.path.isdir(WJ.ARCHIVE_ROOT):
         LOG.error("[TERMINATED] ARCHIVE_ROOT does not exist or is not reachable: "
                   "%s\nIf that is a mapped drive, make sure the share is "
                   "connected before running.", WJ.ARCHIVE_ROOT)
-        return 1
+        return 2
     if NEXUS_MODE == "assist" and not getattr(WJ, "_HAVE_WINREG", False):
         LOG.error("[TERMINATED] NEXUS_MODE='assist' needs the Windows registry: "
                   "the downloader registers an nxm:// handler via winreg. "
                   "Use 'skip' here.")
-        return 1
+        return 2
     return 0
 
 
@@ -1791,21 +2140,64 @@ def resolve_tracking(state, rediscover=False):
     Results are cached in state["map"], keyed by filename, so the expensive
     all-feeds scan runs only when something new shows up. An empty string in
     the cache is a remembered "no match", which stops a private or renamed
-    list from triggering a full scan on every single run."""
+    list from triggering a full scan on every single run.
+
+    A file is followed only when its filename IS the feed key, or when the
+    key it matches is pinned in TRACK. A title, or the Name inside the
+    manifest, is a guess - an author's beta of a list carries the list's own
+    Name - and a file matched by a guess was replaced by the published
+    manifest at the next update, its own kept only for KEEP_BACKUP_DAYS. Such
+    a match is now said, as a suggestion, and followed once it is pinned."""
     files = WJ.list_manifest_files(MANIFESTS)
     cache = state.setdefault("map", {})
+    dirty = False
     if rediscover:
         LOG.info("--rediscover: clearing the cached list mapping.")
         cache.clear()
+        dirty = True
+    pinned = {str(k).strip().lower() for k in TRACK if str(k).strip()}
+    # A pin with no file of its own yet may be for one of the files that
+    # matched nothing on its own, so those are tried again while there is one.
+    unclaimed_pins = pinned - {str(v).lower() for v in cache.values() if isinstance(v, str)}
 
     tracked, unresolved = {}, []
+
+    def named_after(fn, key):
+        return (feed_key_from_filename(fn) or "").lower() == str(key).lower()
+
+    def claim(key, fn):
+        """Follow `key` with the file `fn` - unless another file follows it
+        already with the better claim, its name being the key. Two files can
+        stand for one pinned list, the published one and a beta matched by
+        its title, and whichever was met last used to win: the next update
+        then replaced the beta with the published manifest."""
+        cur = tracked.get(key)
+        if cur and cur != fn:
+            if named_after(cur, key) or not named_after(fn, key):
+                LOG.warning("[WARN] %s and %s both stand for %s; following %s, and leaving "
+                            "%s alone.", cur, fn, key, cur, fn)
+                return
+            LOG.warning("[WARN] %s and %s both stand for %s; following %s, which is named "
+                        "after it, and leaving %s alone.", cur, fn, key, fn, cur)
+        tracked[key] = fn
+
     for f in files:
         cached = cache.get(f.lower())
         if isinstance(cached, str) and cached:
-            tracked[cached] = f
+            exact = named_after(f, cached)
+            if exact or cached.lower() in pinned:
+                claim(cached, f)
+                continue
+            # Matched by its title, by a version that still did so.
+            LOG.warning("[UNTRACK] %s was followed as %s because of its title, which is "
+                        "not proof that it is that list, and is no longer followed. Pin "
+                        "%s in TRACK to keep following it.", f, cached, cached)
+            del cache[f.lower()]
+            dirty = True
+            unresolved.append(f)
         elif cached is None:
             unresolved.append(f)
-        elif negative_expired(cached):
+        elif negative_expired(cached) or unclaimed_pins:
             LOG.info("  %s was recorded as unmatched; retrying it.", f)
             unresolved.append(f)
         else:
@@ -1828,30 +2220,45 @@ def resolve_tracking(state, rediscover=False):
             # its own Name, which on a 4 GB list means pulling the whole
             # modlist member across the share.
             cands = match_candidates(idx, f, None)
-            if not cands:
-                cands = match_candidates(idx, f, manifest_name(path))
-
-            if not cands:
-                LOG.warning("[WARN] %s matches no published list, so it will be "
-                            "left alone. Usually means private, renamed, or from "
-                            "a repo outside repositories.json.", f)
-                remember_no_match(cache, f, complete)
-                continue
-            if len(cands) == 1:
-                pick, why = cands[0], "unique match"
+            key = (feed_key_from_filename(f) or "").lower()
+            if cands and cands[0]["key"].lower() == key:
+                pick, why = cands[0], "its filename is the feed key"
             else:
-                rec = WJ.parse_manifest(path)
-                pick, why = disambiguate(cands, path, rec.get("game"))
+                if not cands:
+                    cands = match_candidates(idx, f, manifest_name(path))
+                chosen = [c for c in cands if c["key"].lower() in pinned]
+                if not chosen:
+                    if cands:
+                        LOG.warning("[SUGGEST] %s is not named after a feed key, but looks "
+                                    "like %s by its title or name. A title is no proof, so "
+                                    "it is not followed; to follow it, add %s to TRACK.",
+                                    f, " or ".join(c["key"] for c in cands),
+                                    cands[0]["key"] if len(cands) == 1 else "the right one")
+                    else:
+                        LOG.warning("[WARN] %s matches no published list, so it will be "
+                                    "left alone. Usually means private, renamed, or from "
+                                    "a repo outside repositories.json.", f)
+                    remember_no_match(cache, f, complete)
+                    dirty = True
+                    continue
+                if len(chosen) == 1:
+                    pick, why = chosen[0], "pinned in TRACK, and matched by its title"
+                else:
+                    rec = WJ.parse_manifest(path)
+                    pick, why = disambiguate(chosen, path, rec.get("game"))
             if pick is None:
                 LOG.warning("[WARN] %s matches %d published lists and they could "
                             "not be told apart. Add the right one to TRACK by "
                             "hand: %s", f, len(cands),
                             ", ".join(c["key"] for c in cands))
                 remember_no_match(cache, f, complete)
+                dirty = True
                 continue
             LOG.info("[TRACK] %s  ->  %s  (%s)", f, pick["key"], why)
             cache[f.lower()] = pick["key"]
-            tracked[pick["key"]] = f
+            claim(pick["key"], f)
+            dirty = True
+    if dirty:
         save_state(state)
 
     # Explicit pins always count. Reuse the real local filename when we can,
@@ -1881,13 +2288,23 @@ def resolve_tracking(state, rediscover=False):
     return tracked
 
 
+# Did every feed the last pending_updates() asked answer? A run that says
+# "all current" when one did not has said something it does not know.
+FEEDS_ANSWERED = True
+
+
 def pending_updates(state, tracked):
+    global FEEDS_ANSWERED
     if not tracked:
         LOG.error("[TERMINATED] No lists to follow. Put your .wabbajack files in "
                   "%s, or pin entries in TRACK.", MANIFESTS)
         return None, None, None
     repos = {k.split("/", 1)[0] for k in tracked}
-    feeds, _complete = load_feeds(repos)
+    feeds, complete = load_feeds(repos)
+    FEEDS_ANSWERED = bool(complete)
+    if not complete:
+        LOG.warning("[WARN] Not every feed answered; a list in one that did not is "
+                    "not checked for an update this time.")
     if not feeds:
         return None, None, None
 
@@ -1966,7 +2383,41 @@ def cmd_check(state, tracked):
     return 0
 
 
+def at_a_console():
+    """Is somebody able to answer this run? A scheduled task has no console,
+    and stdin is then not one.
+
+    On Windows isatty() is no answer: it is true of NUL as well, which is
+    what stdin is for a run started with it redirected there - by a
+    scheduler, or `< nul`. Only a real console has a console mode."""
+    try:
+        if not sys.stdin or not sys.stdin.isatty():
+            return False
+        if os.name != "nt":
+            return True
+        import ctypes
+        import msvcrt
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetConsoleMode.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
+        kernel32.GetConsoleMode.restype = ctypes.c_int
+        mode = ctypes.c_uint32()
+        return bool(kernel32.GetConsoleMode(msvcrt.get_osfhandle(sys.stdin.fileno()),
+                                            ctypes.byref(mode)))
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def cmd_run(args, state, tracked):
+    global NEXUS_MODE
+    if NEXUS_MODE == "assist" and not getattr(args, "nexus_mode", None) and not at_a_console():
+        # Assist mode opens a page per Nexus file and waits three minutes for
+        # a click on each. Unattended, that is hours of waiting for nobody;
+        # the settings' NEXUS_MODE is for the window and the console, and an
+        # unattended run asked for assist mode by name would still get it.
+        LOG.warning("[NOTE] Nobody is at a console to click Nexus pages, so this run "
+                    "leaves Nexus files to Wabbajack (NEXUS_MODE skip). Pass "
+                    "--nexus-mode assist to insist.")
+        NEXUS_MODE = "skip"
     if not args.dry_run:
         purge_trash()
     seen, pending, resume = pending_updates(state, tracked)
@@ -1998,6 +2449,10 @@ def cmd_run(args, state, tracked):
         LOG.info("--only: this run is limited to %s.", ", ".join(sorted(keys)))
 
     if not pending and not resume and not args.force:
+        if not FEEDS_ANSWERED:
+            LOG.warning("\n[DONE] Every tracked list that could be checked is current, "
+                        "but not every feed answered, so not every list was checked.")
+            return 1
         LOG.info("\n[DONE] All %d tracked list(s) are current. Nothing to do.",
                  len(seen))
         return 0
@@ -2035,9 +2490,11 @@ def cmd_run(args, state, tracked):
     for key, ent, prev, filename in pending:
         LOG.info("\n%s  %s -> %s", key, prev.get("version") or "absent", ent["version"])
         stem = os.path.splitext(filename)[0]
-        if stem.lower() in ("master", "shared"):
-            LOG.error("  [ERROR] '%s' clashes with a reserved pool folder name. "
-                      "Rename it before tracking.", stem)
+        why = CFG.list_name_problem(stem)
+        if why:
+            LOG.error("  [ERROR] '%s' cannot be a modlist here: %s. Rename it before "
+                      "tracking.", stem, why)
+            failures.append(f"{filename}: {why}")
             continue
         if args.dry_run:
             LOG.info("  [DRY-RUN] would fetch %s", filename)
@@ -2047,7 +2504,7 @@ def cmd_run(args, state, tracked):
         if fetch_manifest(ent, filename):
             updated.append((key, ent, filename))
         else:
-            failures.append("%s: manifest download failed" % filename)
+            failures.append("%s: the manifest was not updated (see the log for why)" % filename)
 
     work = updated + [c for c in carried
                       if c[0] not in {k for k, _e, _f in updated}]
@@ -2088,6 +2545,7 @@ def cmd_run(args, state, tracked):
         if fetchable and not args.no_download and not args.dry_run:
             if not free_space_ok(p["base"], total_size(fetchable)):
                 summary.append(f"{record['name']}: SKIPPED, low disk space")
+                failures.append(f"{record['name']}: not downloaded, low disk space")
                 complete[key] = False
                 continue
             assist = (NEXUS_MODE == "assist")
@@ -2101,9 +2559,11 @@ def cmd_run(args, state, tracked):
                              "--yes"] + mode_flag + child_flags(args)
                             + (["-v"] if args.verbose else []),
                             "downloader", interactive=assist)
-            # rc 1 means some individual files failed, not that the run aborted.
+            # rc 1 means some individual files failed, not that the run aborted;
+            # anything else is the run itself failing, and the exit code says so.
             if rc not in (0, 1):
                 summary.append(f"{record['name']}: downloader exited {rc}")
+                failures.append(f"{record['name']}: the downloader exited {rc}")
             # The child just wrote into the pools, so the cached index of what
             # is on disk is stale. Everything else the parent does is read-only,
             # which is what makes caching the scan safe at all: over SMB it walks
@@ -2118,15 +2578,18 @@ def cmd_run(args, state, tracked):
                 LOG.warning("  [INCOMPLETE] %d fetchable archive(s) still "
                             "missing; will retry next run.", len(left))
                 summary.append(f"{record['name']}: {len(left)} archive(s) still to fetch")
+                failures.append(f"{record['name']}: {len(left)} archive(s) this run could "
+                                f"fetch are still missing")
 
         todo = write_nexus_todo(record, p["nexus"])
         if todo:
             LOG.info("  Nexus to-do list: %s", os.path.basename(todo))
+        planned = args.dry_run or args.no_download
         summary.append(
             f"{record['name']} v{ent['version']}: "
-            f"{len(p['direct'])} fetched here, "
+            f"{len(p['direct'])} {'to fetch here' if planned else 'fetched here'}, "
             f"{len(p['nexus'])} Nexus file(s) ({WJ.human_bytes(total_size(p['nexus']))}) "
-            f"left for Wabbajack")
+            f"{'for clicks' if NEXUS_MODE == 'assist' else 'left for Wabbajack'}")
 
     # ---- Sort ---------------------------------------------------------
     if not args.no_sort and not args.dry_run and staged_candidates:
@@ -2161,9 +2624,16 @@ def cmd_run(args, state, tracked):
                               "list.", target, MANIFESTS)
                     failures.append(f"STAGE_LIST '{target}' not found")
 
+        busy = wabbajack_busy() if rec is not None and rec.get("game") else False
         if rec is None or not rec.get("game"):
             LOG.warning("[SKIPPED] Nothing safe to stage this run.")
-        elif wabbajack_busy():
+        elif busy is None:
+            # Unattended, nobody to ask, and no way to know: not moving.
+            LOG.error("[SKIPPED] Whether Wabbajack is running could not be checked; "
+                      "not moving archives on a guess. The sort will happen on the "
+                      "next run.")
+            failures.append("sorter skipped: could not check whether Wabbajack is running")
+        elif busy:
             # Unattended, so there is nobody to ask to close it. Moving
             # archives under a running install would break the install.
             LOG.error("[SKIPPED] Wabbajack is running; not moving archives "
@@ -2271,7 +2741,7 @@ def cmd_nexus_key(args):
 
 # ----------------------------------------------------------------------
 def main():
-    global WJ, NEXUS_MODE
+    global WJ, NEXUS_MODE, DOWNLOAD_ORDER, DRY_RUN
     ap = argparse.ArgumentParser(
         description="Watch Wabbajack modlists for updates and drive the "
                     "downloader and sorter unattended.")
@@ -2298,6 +2768,12 @@ def main():
                          ".wabbajack first.")
     ap.add_argument("--check", action="store_true",
                     help="Report which tracked lists have updates. Changes nothing.")
+    ap.add_argument("--run", action="store_true",
+                    help="A full unattended run: fetch every updated manifest, the "
+                         "archives they are missing, and stage STAGE_LIST (or the most "
+                         "recently updated list). What a scheduled task runs. With "
+                         "nobody at a console, Nexus files are left to Wabbajack "
+                         "unless --nexus-mode assist insists.")
     ap.add_argument("--only", metavar="LIST",
                     help="Do the archive work for just this list (by TRACK key "
                          "or filename stem), leaving other updated lists' "
@@ -2360,9 +2836,15 @@ def main():
     # specific. Testing len(sys.argv) instead would send "--nexus-mode assist"
     # - a modifier, not an action - down the non-interactive path, which is
     # exactly the sort of surprise a scheduled run should never spring.
-    actions = (args.check, args.discover, args.only, args.force, args.dry_run,
+    # --order and --nexus-mode are modifiers too; --run is the action that
+    # asks for a full unattended run, which before it existed could only be
+    # had by adding a flag with side effects of its own.
+    actions = (args.run, args.check, args.discover, args.only, args.force, args.dry_run,
                args.no_download, args.no_sort, args.rediscover, args.selftest,
                args.gallery, args.sync_reports)
+    if args.order:
+        # One run's order, for the window and the wizard as for a flag run.
+        DOWNLOAD_ORDER = args.order
     if args.gui:
         import wj_gui
         return wj_gui.main(nexus_mode=args.nexus_mode,
@@ -2374,17 +2856,32 @@ def main():
                              allow_size_only=args.allow_size_only,
                              no_lock=args.no_lock)
 
+    DRY_RUN = bool(args.dry_run)
+    # A run that only reports changes nothing, the nxm:// handler included.
+    reports_only = (args.check or args.dry_run or args.gallery or args.sync_reports
+                    or args.selftest or args.discover)
     rc = bootstrap(verbose=args.verbose, nexus_mode=args.nexus_mode,
-                   allow_size_only=args.allow_size_only)
+                   allow_size_only=args.allow_size_only, recover=not reports_only)
     if rc:
+        if not args.check and not args.dry_run:
+            # A run that could not start is one a scheduler most needs to hear of.
+            notify("Wabbajack updater could not start (exit %d)" % rc,
+                   "See runtime\\wj_autoupdate.log beside the tools.")
         return rc
 
-    if args.selftest:
-        return cmd_selftest()
-    if args.gallery or args.sync_reports:
-        return cmd_gallery(sync=args.sync_reports)
-    if args.discover:
-        return cmd_discover()
+    # Read-only, and outside the lock; but an error in one of them is still
+    # an unhandled error, exit 4 with its traceback in the log, rather than
+    # Python's own exit 1, which reads as "finished with problems".
+    try:
+        if args.selftest:
+            return cmd_selftest()
+        if args.gallery or args.sync_reports:
+            return cmd_gallery(sync=args.sync_reports)
+        if args.discover:
+            return cmd_discover()
+    except Exception:
+        LOG.exception("[TERMINATED] Unhandled error; see the traceback above.")
+        return 4
 
     # Everything past here touches the pools, so serialise it.
     lock_fd = None
@@ -2410,19 +2907,23 @@ def main():
         tracked = resolve_tracking(state, rediscover=args.rediscover)
         rc = cmd_check(state, tracked) if args.check else cmd_run(args, state, tracked)
         return rc
+    except KeyboardInterrupt:
+        rc = 130                    # stopped by the person running it: not a failure to report
+        raise
     except Exception:
         LOG.exception("[TERMINATED] Unhandled error; see the traceback above.")
         rc = 4
         return rc
     finally:
         release_lock(lock_fd)
-        # cmd_run reports its own outcome, including partial failures. This
-        # covers the paths that never got that far - a dead feed, no space, an
-        # unhandled error - which previously notified nothing at all, which is
-        # exactly backwards for a run you are not watching.
-        if rc >= 2 and not args.check and not args.dry_run:
-            notify("Wabbajack updater failed (exit %d)" % rc,
-                   "The run stopped early. See runtime\\wj_autoupdate.log on the share.")
+        # cmd_run reports its own outcome when it gets to the end. This
+        # covers every path that did not - a dead feed, no space, an unhandled
+        # error, an early "nothing could be checked" - which previously sent
+        # nothing at all unless the code was 2 or more, exactly backwards for
+        # a run you are not watching.
+        if rc not in (0, 130) and not _NOTIFIED and not args.check and not args.dry_run:
+            notify("Wabbajack updater finished with problems (exit %d)" % rc,
+                   "See runtime\\wj_autoupdate.log beside the tools.")
 
 
 if __name__ == "__main__":

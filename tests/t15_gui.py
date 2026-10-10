@@ -96,6 +96,7 @@ box.pool_file(GAME, "Doomed", "shared.7z", 20)
 box.pool_file(GAME, "Master", "junk.7z", 999)
 box.pool_file(GAME, "TTW", "hand-built.7z", 700)
 box.pool_file(GAME, "Trash", "old.7z", 40)
+box.trash_record(GAME, "old.7z", 40)            # what the cleanup that put it there wrote
 A.WJ.set_known_list_dirs(A.WJ.known_list_dirs_from(box.manifests))
 A.WJ.invalidate_existing_cache()
 
@@ -260,6 +261,12 @@ settle()
 check("emptying the trash removes everything in it", os.listdir(trash) == [], str(os.listdir(trash)))
 check("  and a purge record was written",
       any(f.startswith("purged_trash_") for f in box.runtime_files()), str(box.runtime_files()))
+box.pool_file(GAME, "Trash", "mine.7z", 3)                 # put there by hand: no record
+app.space_measure()
+settle()
+check("a file in the trash that no record accounts for is named, as never purged",
+      "1 file(s) in no deletion record" in app.trash_note.get(), app.trash_note.get())
+os.remove(os.path.join(trash, "mine.7z"))
 
 # refusals still hold in the window
 DLG.calls.clear()
@@ -281,9 +288,13 @@ app.settings_save()
 p = CFG.settings_path()
 check("the settings file was written in the sandbox", os.path.isfile(p) and box.tools in p, p)
 saved = json.load(io.open(p, encoding="utf-8"))
-check("  holding only what differs from the defaults",
-      set(saved) >= {"NEXUS_MODE", "TRASH_KEEP_DAYS", "EXCLUDE", "GAME_FOLDERS", "ARCHIVE_ROOT"}
-      and "REQUIRE_HASH" not in saved, str(sorted(saved)))
+# Only the fields changed in the form: ARCHIVE_ROOT differs from its default
+# in this process (the suite moved it) but was not touched in the form, so
+# it is not written - saving the whole form used to write it, and with it
+# whatever stale value the form had been filled with.
+check("  holding only what was changed in the form",
+      set(saved) >= {"NEXUS_MODE", "TRASH_KEEP_DAYS", "EXCLUDE", "GAME_FOLDERS"}
+      and "ARCHIVE_ROOT" not in saved and "REQUIRE_HASH" not in saved, str(sorted(saved)))
 check("  with the right values", saved["NEXUS_MODE"] == "assist" and saved["TRASH_KEEP_DAYS"] == 7
       and saved["EXCLUDE"] == ["A/b", "C/d"] and saved["GAME_FOLDERS"] == {"DarkSouls3": "DARK SOULS 3"},
       str(saved))
@@ -643,9 +654,13 @@ check("  and the pane offers to hide it",
       str(app.browse_hide.cget("state")) == "normal" and app.browse_hide.cget("text") == "Hide this list",
       str((app.browse_hide.cget("state"), app.browse_hide.cget("text"))))
 n_rows = len(app.browse["rows"])
+app.space["wide"] = {"from-a-snapshot.7z": {1}}       # the gallery's demand, loaded earlier
+app.rule.set("a")
 app.browse_toggle_hidden()
 settle()
 check("HIDDEN names it", [k.lower() for k in CFG.HIDDEN] == ["r/one"], str(CFG.HIDDEN))
+check("  and the gallery demand the Space tab loaded with it the other way is dropped, rule and all",
+      app.space["wide"] is None and app.rule.get() == "y", str((app.space["wide"], app.rule.get())))
 check("  in the sandbox's settings file", settings_file().get("HIDDEN") == ["r/one"],
       str(settings_file().get("HIDDEN")))
 check("it left the game's rows, which is what a report sync fetches for",
@@ -1132,6 +1147,247 @@ finally:
     WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready, \
         WB.manifest_readme, WB.open_readme = real
     DLG.answer = True
+
+# ---------------------------------------------------------------- 15.23
+print("\n 15.23  one failure while the window handles its queue does not freeze it")
+# Found 2026-10-10: a completion handler that raised ended the pump for the
+# session - Tk does not reschedule a callback that raised - so the log froze,
+# the next job's 'done' was never read, and the window stayed Busy.
+check("errors in Tk callbacks are the window's to report, not stderr's",
+      root.report_callback_exception == app._callback_error)
+settle()
+DLG.calls.clear()
+app.q.put(("done", "Odd", None, None, lambda result: result["no such key"]))
+app.q.put(("log", "a line queued after the failure"))
+app._pump()
+check("the failing handler is reported once", DLG.shown("Something went wrong"), str(DLG.calls))
+check("  and what was queued after it still reached the log", "a line queued after the failure" in log_text())
+check("  the window is not left busy, and the next job runs",
+      not app.busy and app.run_job("Next", lambda: 1) is True and settle())
+
+# ---------------------------------------------------------------- 15.24
+print("\n 15.24  a save writes what was changed in the form, over the file as it is now")
+app.settings_fill()
+on_disk = settings_file()
+on_disk["KEEP_BACKUP_DAYS"] = 99                            # edited by hand since the form was filled
+io.open(CFG.settings_path(), "w", encoding="utf-8").write(json.dumps(on_disk))
+app.setting_vars["THEME"].set("dark")
+app.settings_save()
+saved = settings_file()
+check("the hand edit survives a save of another field", saved.get("KEEP_BACKUP_DAYS") == 99
+      and saved.get("THEME") == "dark", str(saved))
+check("  and the running process now has both", CFG.KEEP_BACKUP_DAYS == 99 and CFG.THEME == "dark")
+root_before, wj_root_before = CFG.ARCHIVE_ROOT, A.WJ.ARCHIVE_ROOT
+elsewhere = os.path.join(box.root, "Archive Elsewhere")
+app.setting_vars["ARCHIVE_ROOT"].set(elsewhere)
+app.settings_save()
+check("a new ARCHIVE_ROOT is written to the file", settings_file().get("ARCHIVE_ROOT") == elsewhere,
+      str(settings_file().get("ARCHIVE_ROOT")))
+check("  but this process keeps the root it started with, as the downloader and the sorter do",
+      CFG.ARCHIVE_ROOT == root_before and A.WJ.ARCHIVE_ROOT == wj_root_before, CFG.ARCHIVE_ROOT)
+check("  and the window says a restart is needed", "Restart" in app.settings_note.get(),
+      app.settings_note.get())
+check("  the form shows the root the next start will use", app.setting_vars["ARCHIVE_ROOT"].get()
+      == elsewhere, app.setting_vars["ARCHIVE_ROOT"].get())
+check("  and a download or a sort started meanwhile works under this window's own",
+      A.archive_root_for_children() == wj_root_before, str(A.archive_root_for_children()))
+app.setting_vars["ARCHIVE_ROOT"].set(CFG._DEFAULTS["ARCHIVE_ROOT"])
+app.settings_save()
+check("  so typing the old one back undoes the change", "ARCHIVE_ROOT" not in settings_file(),
+      str(sorted(settings_file())))
+app.settings_fill(CFG.defaults())                 # Reset to defaults
+app.settings_save()
+saved = settings_file()
+check("Reset to defaults, then Save, takes the file back to the defaults",
+      "THEME" not in saved and "KEEP_BACKUP_DAYS" not in saved and CFG.THEME == "light"
+      and CFG.KEEP_BACKUP_DAYS == CFG._DEFAULTS["KEEP_BACKUP_DAYS"], str(sorted(saved)))
+CFG.update_settings({"ARCHIVE_ROOT": CFG._DEFAULTS["ARCHIVE_ROOT"], "THEME": "light",
+                     "KEEP_BACKUP_DAYS": CFG._DEFAULTS["KEEP_BACKUP_DAYS"]})
+CFG.ARCHIVE_ROOT = box.archives
+A.reload_settings()
+app.apply_theme(CFG.THEME)
+app.settings_fill()
+
+# ---------------------------------------------------------------- 15.25
+print("\n 15.25  a clear goes by what the folder holds when it runs, not when it was measured")
+box.pool_file(GAME, "Master", "clear-me.7z", 66)
+A.WJ.invalidate_existing_cache()
+app.data_changed("pools")
+app.space_measure()
+settle()
+app.rule.set("y")
+app.masters_table.tree.selection_set("0")
+box.manifest("Newcomer", GAME, [("clear-me.7z", 66, "nexus")])     # dropped in since
+DLG.calls.clear()
+app.space_clear()
+settle()
+check("a manifest that arrived since the table was measured stops the clear",
+      DLG.shown("have changed") and os.path.isfile(os.path.join(box.archives, GAME, "Master", "clear-me.7z")),
+      str(DLG.calls))
+os.remove(os.path.join(box.manifests, "Newcomer.wabbajack"))
+app.reload_records()
+app.data_changed("records")
+app.space_measure()
+settle()
+app.rule.set("y")
+app.masters_table.tree.selection_set("0")
+keep_path = os.path.join(box.manifests, "Keep.wabbajack")
+keep_bytes = io.open(keep_path, "rb").read()
+io.open(keep_path, "wb").write(b"copied over since, and not a zip")
+DLG.calls.clear()
+try:
+    app.space_clear()
+    settle()
+finally:
+    io.open(keep_path, "wb").write(keep_bytes)
+check("  and so does a manifest of the same name that can no longer be read",
+      DLG.shown("can no longer be trusted")
+      and os.path.isfile(os.path.join(box.archives, GAME, "Master", "clear-me.7z")), str(DLG.calls))
+app.reload_records()
+app.data_changed("records")
+
+# ---------------------------------------------------------------- 15.26
+print("\n 15.26  nothing is moved on a guess about Wabbajack")
+box.pool_file(GAME, "Stray2", "x.7z", 3)
+A.WJ.invalidate_existing_cache()
+app.data_changed("pools")
+app.space_measure()
+settle()
+names = [s[1] for s in app.space["strays"]]
+app.strays_table.tree.selection_set(str(names.index("Stray2")))
+WB.running_processes = lambda: [(4321, "Wabbajack.exe")]
+DLG.askretrycancel = lambda *a, **k: DLG.calls.append(("ask", "retry", a[1] if len(a) > 1 else "")) or False
+try:
+    DLG.calls.clear()
+    app.space_park()
+    settle()
+finally:
+    del DLG.askretrycancel
+    WB.running_processes = lambda: []
+check("parking a stray waits on a running Wabbajack, and Cancel parks nothing",
+      any(k == "ask" and t == "retry" for k, t, _x in DLG.calls)
+      and os.path.isfile(os.path.join(box.archives, GAME, "Stray2", "x.7z")), str(DLG.calls))
+WB.running_processes = lambda: None
+try:
+    DLG.calls.clear()
+    DLG.answer = False
+    no = app.wabbajack_clear("Test")
+    DLG.answer = True
+    yes = app.wabbajack_clear("Test")
+finally:
+    WB.running_processes = lambda: []
+check("when whether it runs cannot be told, the window asks, and goes by the answer",
+      no is False and yes is True and any("could not be checked" in x for _k, _t, x in DLG.calls),
+      str(DLG.calls))
+
+# ---------------------------------------------------------------- 15.27
+print("\n 15.27  closing the window while a job runs")
+# Found 2026-10-10: closing mid-job released the run lock and destroyed the
+# window at once, while a download or a sort went on as a child process,
+# unseen and unlocked.
+import threading
+
+
+def destroyed(r):
+    try:
+        r.winfo_exists()
+        return False
+    except tk.TclError:
+        return True
+
+
+def pump(a, r, until, timeout=60):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            a._pump()
+        except tk.TclError:
+            pass                    # the window has gone; its pump cannot re-arm
+        if until():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def second_window():
+    r = tk.Tk()
+    r.withdraw()
+    a = GUI.App(r, None)
+    sys.stdout, sys.stderr = REAL_OUT, REAL_ERR
+    pump(a, r, lambda: not a.busy)
+    return r, a
+
+
+root3, app3 = second_window()
+release = threading.Event()
+app3.run_job("Moving files", release.wait)
+DLG.askokcancel = lambda *a, **k: False
+app3.on_close()
+check("work in the window's own process: Cancel keeps the window open",
+      not app3.closing and not destroyed(root3))
+DLG.askokcancel = lambda *a, **k: True
+app3.on_close()
+check("  OK closes it when the job is done, not before", app3.closing and not destroyed(root3))
+check("  and nothing new starts meanwhile", app3.run_job("Another", lambda: None) is False)
+release.set()
+check("  the window closes once the job is done", pump(app3, root3, lambda: destroyed(root3)))
+del DLG.askokcancel
+
+root4, app4 = second_window()
+stop_file = os.path.join(box.runtime, ".wj_stop_test")
+A._CHILD["stop"] = stop_file                     # as run_script sets it while a child runs
+
+
+def a_child():
+    t0 = time.time()
+    while not os.path.exists(stop_file) and time.time() - t0 < 30:
+        time.sleep(0.05)
+    return "stopped"
+
+
+try:
+    app4.run_job("Downloading", a_child)
+    DLG.askyesnocancel = lambda *a, **k: None
+    app4.on_close()
+    check("a child process running: Cancel keeps the window open", not app4.closing)
+    DLG.askyesnocancel = lambda *a, **k: True
+    app4.on_close()
+    check("  Yes asks the child to stop at its next safe point",
+          os.path.isfile(stop_file) and "stop" in io.open(stop_file, encoding="utf-8").read())
+    t0 = time.time()
+    rc = A.run_script("wj_sorter.py", ["--help"], "after-the-stop")
+    check("  and no later child of the job is started at all: a download per list stops with the first",
+          rc == A.STOPPED and time.time() - t0 < 2, str(rc))
+    check("  and the window closes once it has", pump(app4, root4, lambda: destroyed(root4)))
+finally:
+    A._CHILD["stop"] = None
+    A.allow_children()
+    del DLG.askyesnocancel
+    if os.path.exists(stop_file):
+        os.remove(stop_file)
+W.out = lambda msg="": app.q.put(("log", str(msg)))
+A.set_output_hook(lambda line: app.q.put(("child", line)))
+
+# ---------------------------------------------------------------- 15.28
+print("\n 15.28  a list Windows reads as a pool is not deleted from the window either")
+dotted = box.manifest("Master.", GAME, [("x.7z", 1, "nexus")])     # Master..wabbajack
+app.reload_records()
+app.data_changed("records")
+app.space_measure()
+settle()
+files = [x["file"] for x in app.space["lists"]]
+app.lists_table.tree.selection_set(str(files.index("Master..wabbajack")))
+before = sorted(os.listdir(os.path.join(box.archives, GAME, "Master")))
+DLG.calls.clear()
+app.space_delete()
+settle()
+check("deleting 'Master.' is refused before anything is asked, saying why",
+      DLG.shown("Cannot delete") and not any(k == "ask" for k, _t, _x in DLG.calls)
+      and os.path.isfile(dotted)
+      and sorted(os.listdir(os.path.join(box.archives, GAME, "Master"))) == before, str(DLG.calls))
+os.remove(dotted)
+app.reload_records()
+app.data_changed("records")
 
 # ---- put everything back ---------------------------------------------------
 root.destroy()

@@ -1,5 +1,261 @@
 # Changelog
 
+## 1.5.0 — 2026-10-10
+
+A review of the whole suite for what it could lose. Every fix below was first
+reproduced in a sandbox, and each has a regression check.
+
+### Fixed: nothing is written over any more
+
+- **A download deleted a build another list still needed.** Staging moves
+  the archives a list wants into its folder, the build it shares with other
+  lists included. When that list then moved on to a new build of the same
+  name, its download deleted the old one in its way - the build the other
+  lists still pinned - with no trash and no record; and since a download was
+  put in place first and checked after, one that failed its check lost both.
+  A download is now checked while it is still a `.part`, and only then given
+  its name; a different file already under that name is kept beside it as
+  `Name~1.ext`, its `.meta` with it, and the run says `[KEPT]`. The CDN path
+  does the same, and refuses before downloading a definition whose hash or
+  size is not the build the manifest pins.
+- **Staging handed a list another list's build.** With no copy of a name at
+  a size the list states, staging moved whichever copy there was into the
+  list's folder under the manifest's name and reported nothing missing, so
+  Wabbajack was handed the wrong bytes - and the next download for the list
+  deleted them (above). Such an archive is now left where it is and reported
+  as still to fetch, with the sizes wanted and found; the cleanup pass parks
+  a build no list in the pool wants in Master.
+- **Deleting a list deleted any file the same size as one in Master.** It was
+  taken for a redundant copy and removed on the spot, with no hash, no trash
+  and no record; when the bytes differed, a build a surviving list wanted was
+  gone. It is parked beside under a `~N` name now, for 5c's hash check.
+- **A move could land on a file.** The sorter's every move deleted whatever
+  was at its destination first, so a collision whose other file could not be
+  parked lost that file, and a sidecar landing on an orphaned one replaced it;
+  parking a folder in `Unmanaged` could leave it half copied and half deleted
+  when a file in it was held open; a deletion record written in the same
+  second as another replaced it. Every tool now moves files through one set
+  of rules in `wj_paths.py`: a rename, or a copy to a temporary name first
+  across volumes, never onto a file that is there, and a folder only ever by
+  a rename.
+- **A list called `Master.` was Master.** Windows drops a trailing dot, so the
+  folder of the list in `Master..wabbajack` is the Master pool, and deleting
+  the list emptied the pool in a sandbox, while every check compared
+  `master.` with `master`. A list name is now judged as Windows reads it:
+  trailing dots and spaces, and device names - `CON`, `NUL`, `CONIN$`,
+  `COM1` and `COM¹` among them - are refused everywhere a name becomes a
+  folder, as the pool names always were.
+- **The trash purge went by the files' own dates.** A file whose arrival stamp
+  could not be set on the share kept its build date and was purged at the
+  next start, with no grace at all; and anything in a trash folder - files put
+  there by hand included - went. The purge now goes by the deletion records
+  only: a file is purged when a record says stage 5c sent it there, at that
+  size, `TRASH_KEEP_DAYS` ago. A file no record accounts for is never deleted,
+  and stage 5d, the Space tab and the log say how many there are. Nothing is
+  sent to the trash when its record cannot be written. Putting a cleanup back
+  no longer takes a same-size file under the name for the build already back:
+  only the same hash is.
+
+### Fixed: deleting on a short picture
+
+- **The "any known modlist" rule could protect too little and say nothing.** A
+  feed whose shape, or one of whose entries, this version cannot read counted
+  as read and empty; so did a validation report with entries it cannot read.
+  A report validated for an older build than the feed now publishes was used
+  as it was. The feeds call one game by another name than a manifest does -
+  `vtmb` and `VampireTheMasqueradeBloodlines` - and read apart, its lists
+  protected nothing. The feed snapshot was reused for the window's whole
+  session; and the window cleared Master by a demand and a set of manifests
+  measured perhaps hours before. Each of these now refuses, re-reads, or reads
+  the two names as one game; the snapshot lasts six hours, or five minutes
+  when a feed did not answer, and **Reload gallery** starts a fresh one.
+- **A manifest the feeds said nothing about was adopted.** A feed entry with
+  neither size nor hash matched any local file, an old version included,
+  which was then never updated again; and a hash that could not be read
+  matched as well. Neither is a match now, and a manifest fetched for such an
+  entry is checked to be one - an error page served with a 200 is not. A
+  staging copy an interrupted fetch left behind is cleared first.
+- **A file was followed as a published list on its title alone.** An author's
+  beta of a list carries the list's own Name, and such a file was replaced by
+  the published manifest at the next update. Only a file named after a feed
+  key is followed now, or one whose key is pinned in `TRACK`; a title match is
+  said as `[SUGGEST]`, and one an older version followed is untracked, with
+  `[UNTRACK]` in the log.
+
+### Fixed: downloads
+
+- **Verification passed a file it could not read.** A hash that could not be
+  computed - the share dropped, the file held open - counted as a match, for
+  archives and manifests alike. It is a failure now.
+- **A resume could splice or loop.** A server answering a resume from another
+  place had its bytes appended to the `.part`; a 416 was retried for as long
+  as the `.part` could not be removed; a server sending more than the file's
+  size was read until it stopped. Each is now a fresh start, or a refusal.
+- **A redirect went anywhere, with the API key.** urllib follows a redirect to
+  any scheme, `ftp:` included, and copies every header onto it. Every fetch
+  now goes through one opener that knows only `http` and `https`, and leaves
+  credentials behind when a redirect leaves the host.
+- **The CDN held the whole file in memory**, 4.7 GB for the largest manifest
+  here, and a failed part, a full disk or Ctrl+C left every queued part to be
+  fetched first. A few parts per worker are in hand at once now, and any of
+  those ends the transfer at once, keeping what was written for the resume.
+- **One bad moment with the Nexus API ended an assist session.** A dropped
+  connection, a reply that was not JSON, a 502 to 504 or a `Retry-After`
+  given as a date raised out of the request. They are retried now, and end as
+  an error the run records.
+- **A second click on one page cost the next file.** It was taken as the next
+  page's click, so that page was replaced at once and its file neither
+  downloaded nor recorded. Each page now waits for its own file's click, a
+  click for a later file is taken at once, and a page nobody clicks counts as
+  a failure, so the exit code says so.
+- **The `nxm://` handler stayed this tool's after a run was killed**, until
+  someone noticed Wabbajack's downloads landing here. The next start of the
+  window, the wizard or a flag run hands it back, unless a session is
+  listening. A backup of the tool's
+  own command - written by a run started another way - is never "restored",
+  and the handler is not taken at all when the one in place cannot be saved.
+- **A stop waited for everything in flight.** Ctrl+C, or the window's stop,
+  now ends a transfer at its next chunk and keeps its `.part`.
+
+### Fixed: the window
+
+- **Closing the window mid-job left the job running, unlocked.** A download
+  or a sort runs as a child process, and went on unseen while the lock was
+  released beside it. Closing now offers to stop the child at its next safe
+  point, to close when the job is done, or to stay open; the lock goes last.
+- **One error froze the window for the session.** A completion handler that
+  raised ended the loop reading the job queue: the log stopped, the next job's
+  end was never read, and every button stayed off. Each item is handled on its
+  own now, and an error is logged, shown once, and survived.
+- **Saving the Settings tab undid other changes.** It wrote the whole form,
+  filled perhaps hours before, so a value typed into the file since - or a
+  pool fold - went back; and saving moved the window's archive root while the
+  downloader and the sorter in the same process kept the old one. A save now
+  writes only the fields changed, over the file as it is; settings this
+  version does not know are kept; and `ARCHIVE_ROOT` and `MANIFEST_DIR` take
+  effect at the next start, as the tab says.
+
+### Fixed: stage 5, installs, and unattended runs
+
+- **Stage 5e crashed at its second question, and behind the crash "no" read as
+  yes.** Only a plain yes deletes now, and **change** narrows the sweep as it
+  says. The sweep no longer follows a junction out of the tools folder, and
+  deletes files only.
+- **Wabbajack's real versions could be pruned as superseded.** A folder such
+  as `4.2.3.0 - Copy (2)` was ranked by every digit in its name and taken for
+  the newest; and a `tasklist` that did not answer read as "Wabbajack is not
+  running", for pruning and for moving archives alike. Only a folder named
+  exactly like a version counts now, a folder holding your manifests is kept,
+  and "cannot tell" asks, or skips.
+- **An install could go where this tooling keeps things** - inside the archive
+  root, around the tools folder, or over the modlist file. Refused now. An
+  update in place stops before staging when its download could not run.
+- **An unattended run waited for clicks nobody would make**, three minutes per
+  Nexus file, when the settings said assist mode. With nobody at a console it
+  leaves them to Wabbajack unless `--nexus-mode assist` insists.
+- **Exit codes and notifications told less than they should.** A run in which
+  a feed did not answer said "all current" and exited 0; a downloader that
+  failed, a list refused for its name, low disk and a skipped sort were not
+  counted; a start-up failure could exit 1; the wizard's crashes exited 1; and
+  a run that ended early with problems sent nothing to `NOTIFY_URL`. Each is
+  counted now, `2` is
+  every start-up failure, `4` every unhandled error, `130` Ctrl+C, and a run
+  that does not end cleanly reports itself, unless it was a check or a dry
+  run, or you stopped it. `NOTIFY_URL` has to be a web address, and a password
+  in it is masked in the log.
+- **A dry run was not dry.** It saved the state, pruned backups, wrote to-do
+  CSVs and sent a "processed" notification. It does none of those now, and
+  the trash purge refuses outright while one runs.
+- **`run.bat` paused a run it could not finish.** It now hands back the exit
+  code, waits for a key only when someone could press one (never with
+  `WJ_NO_PAUSE`), keeps its variables to itself, and no longer pulls a UNC
+  path's drive out from under the window it starts. `setup_env.bat` exits 1
+  when it could not finish.
+
+### Fixed: settings and other inputs
+
+- **`ARCHIVE_ROOT` could be a drive's root, the tools folder, or one holding
+  it** - which makes every folder there a game's pools, and the tools' own
+  files reclaimable. Refused now. `TRASH_KEEP_DAYS` runs from 1 to 3650.
+- **A Nexus API key file in UTF-16** - what Windows PowerShell 5.1's
+  `"key" > nexus_api_key.txt` writes - stopped every lookup of the key with a
+  decoding error. It is read now, as is UTF-8 with or without a BOM.
+- **A gallery reply that was not JSON was cached**, for six hours or fourteen
+  days, and every read of it crashed stage 1. It is never cached now; an older
+  copy is used when there is one.
+
+### Fixed: found by a second review of the changes above
+
+- **An update replaced the manifest with no backup when the backups sat on
+  another drive.** `MANIFEST_DIR` may point into Wabbajack's own folder under
+  `%LOCALAPPDATA%` while `manifest_backups` sits beside the tools; the backup
+  was a rename, which fails between volumes, and the update went on - having
+  deleted the previous `.bak` first. The backup now copies across volumes,
+  the previous `.bak` goes only once the new one is safe, and a manifest whose
+  old version cannot be kept is not replaced.
+- **"Stop it now" stopped one download of several.** A job that runs one
+  child after another - a download per list, a rebuild per game - went on to
+  the next. Nothing further in the job starts now.
+- **A download or a sort the window started could work under another
+  archive root than the window.** A new `ARCHIVE_ROOT` takes effect at the
+  next start; a child read it from the file at once. A child is handed its
+  parent's root until then, and the Settings tab shows the root the next
+  start will use, so a change can be undone by typing the old value back.
+- **A handler taken on purpose with `--register-nxm` was handed back** by the
+  next start, which could not tell it from one a killed run left behind; and
+  a `--check` or a `--dry-run` could change the registry. The first stays
+  until `--unregister-nxm` now, and a run that only reports leaves the
+  registry alone.
+- **One unrelated feed that did not answer made a scheduled run exit 1**,
+  saying not every feed had answered when every feed of a tracked list had.
+- **A sort moved the CDN downloader's resume record into Master**, as an
+  archive nobody wanted, and the next attempt started the file afresh. A
+  partial download and its record are now never indexed, moved or reclaimed.
+- **A slow download taken from a click for a later file used up the current
+  page's wait**, and that page then counted as unclicked. Its time is given
+  back.
+- **A CDN part kept retrying after its download had failed**, delaying the
+  end of the process for minutes with the network down.
+- **A move across volumes could leave a temporary file, or the file in two
+  places**; a file set aside could leave its sidecar behind, to be written
+  over by the new one's. Each now happens whole or not at all.
+- **The sorter's stop could land between an archive and its sidecar.** It is
+  taken between two moves now.
+- **With two files standing for one pinned list, the last one met won**, and
+  the next update replaced a beta with the published manifest. The file named
+  after the key is followed.
+- **A build set aside that no list wanted stayed in a list's folder for
+  good**, out of 5c's reach. The cleanup pass parks it in Master.
+- **Two settings changes at once - a pool fold and a switch in the window -
+  could drop one.** Changes to the file now go one at a time; and **Reset to
+  defaults** then **Save** writes the defaults, where it wrote nothing.
+- **Clearing Master in the window went by manifests checked when the table
+  was measured**: one rewritten since, unreadable or empty, protected
+  nothing. They are checked again as the clear runs, and the window's delete
+  judges a list's name as Windows reads it, as stage 5 does.
+- **A list validated for an older build than its feed publishes** is named in
+  the confirmation of a clear under the "any known modlist" rule, since what
+  only its new build wants is not protected yet.
+
+### Added
+
+- **`--run`**, the whole unattended run as an action of its own: what a
+  scheduled task runs. It could only be had before by adding a flag with side
+  effects of its own.
+- **`tests/t19_safety.py`**, which reads the source rather than running it:
+  every call that deletes or overwrites a file has to be in a reviewed list,
+  with what it may destroy and why that is safe; nothing fetches but through
+  the web-only opener; the never-overwrite primitives have one
+  implementation; the launchers keep their line ends and exit codes; and the
+  version agrees with this file.
+- The suites now serve their own feed registry when a whole run needs one
+  (`WJ_FEED_REGISTRY`), and point every other run at one nobody serves, so no
+  suite reaches GitHub; `WJ_NO_REGISTRY` now also keeps every suite from
+  taking this account's `nxm://` handler.
+
+Tests: 1605 checks across 19 suites, up from 1246. Run against 1.4.1, the new
+checks fail in every suite they were added to.
+
 ## 1.4.1 — 2026-10-03
 
 ### Fixed

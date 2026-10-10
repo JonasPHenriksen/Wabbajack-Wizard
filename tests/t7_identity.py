@@ -123,4 +123,96 @@ r = W.master_report(G, recs)
 check("a wanted build that a list folder already holds is a duplicate, reclaimable",
       r["dup_files"] == 1 and r["free_files"] == 2 and r["kept_files"] == 1, str(r))
 
+# ---------------------------------------------------------------- 7.6
+print("\n 7.6  a download never takes the place of a build another list needs")
+# Reproduced 2026-10-10 against 1.4.1. Staging moves the build two lists share
+# into the staged list's folder. When that list then moves on to a new build
+# of the same name, its download deleted the old one in its way - the build
+# the other list still pins - with no trash and no record of it.
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from harness import wj_hash
+
+OLD = b"O" * 200            # ListB's build, and ListA's before its update
+NEW = b"N" * 100            # the build ListA moves on to
+SERVE = {"/Synthesis.zip": NEW}
+
+
+class Serve(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        body = SERVE.get(self.path.split("?")[0])
+        if body is None:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), Serve)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+URL = "http://127.0.0.1:%d/Synthesis.zip" % srv.server_port
+
+
+def held(s, folder, name):
+    p = os.path.join(s.archives, G, folder, name)
+    return open(p, "rb").read() if os.path.isfile(p) else None
+
+
+def synthesis(s):
+    return sorted(s.where("Synthesis.zip") + s.where("Synthesis~1.zip"))
+
+
+s = Sandbox(BOX)
+s.manifest("ListA", G, [("Synthesis.zip", 200, "http", URL, wj_hash(OLD)), ("only-a.7z", 10, "nexus")])
+s.manifest("ListB", G, [("Synthesis.zip", 200, "http", URL, wj_hash(OLD)), ("only-b.7z", 20, "nexus")])
+s.pool_file(G, "Shared", "Synthesis.zip", 200, data=OLD)
+s.pool_file(G, "ListA", "only-a.7z", 10)
+s.pool_file(G, "ListB", "only-b.7z", 20)
+rc, out = s.run("wj_sorter.py", ["--game", G, "--list", "ListA", "--yes"], expect=0)
+check("staging ListA takes the build both lists share into its folder",
+      s.where("Synthesis.zip") == [("ListA", 200)], str(s.where("Synthesis.zip")))
+s.manifest("ListA", G, [("Synthesis.zip", 100, "http", URL, wj_hash(NEW)), ("only-a.7z", 10, "nexus")])
+rc, out = s.run("wj_downloader.py", ["--game", G, "--list", "ListA", "--yes", "--skip-nexus"],
+                expect=0)
+check("ListA's new build is downloaded into its folder",
+      rc == 0 and held(s, "ListA", "Synthesis.zip") == NEW, str(synthesis(s)))
+check("  and the build ListB pins is kept beside it, not deleted",
+      held(s, "ListA", "Synthesis~1.zip") == OLD, str(synthesis(s)))
+check("  which the run says", "[KEPT]" in out and "Synthesis~1.zip" in out, out[-600:])
+rc, out = s.run("wj_sorter.py", ["--game", G, "--list", "ListB", "--yes"], expect=0)
+check("staging ListB afterwards finds its build, under the name its manifest uses",
+      held(s, "ListB", "Synthesis.zip") == OLD, str(synthesis(s)))
+check("  and ListA's new one is still in the pools, wherever the rebuild put it",
+      any(sz == 100 for _f, sz in synthesis(s)), str(synthesis(s)))
+
+# ---------------------------------------------------------------- 7.7
+print("\n 7.7  staging never hands a list another list's build as its own")
+# The same loss by another road: ListA's build was not on disk at all, so
+# staging moved ListB's build out of Shared into ListA's folder under the same
+# name, reported nothing missing - and the download for ListA deleted it.
+s = Sandbox(BOX)
+s.manifest("ListA", G, [("Synthesis.zip", 100, "http", URL, wj_hash(NEW)), ("only-a.7z", 10, "nexus")])
+s.manifest("ListB", G, [("Synthesis.zip", 200, "http", URL, wj_hash(OLD)), ("only-b.7z", 20, "nexus")])
+s.pool_file(G, "Shared", "Synthesis.zip", 200, data=OLD)
+s.pool_file(G, "ListA", "only-a.7z", 10)
+s.pool_file(G, "ListB", "only-b.7z", 20)
+rc, out = s.run("wj_sorter.py", ["--game", G, "--list", "ListA", "--yes"], expect=0)
+check("staging ListA leaves ListB's build in Shared",
+      s.where("Synthesis.zip") == [("Shared", 200)], str(s.where("Synthesis.zip")))
+check("  and reports ListA's own build as still to fetch, with both sizes",
+      "only a DIFFERENT build" in out and "wants 100; on disk at 200" in out
+      and "1 missing" in out, out[-900:])
+rc, out = s.run("wj_downloader.py", ["--game", G, "--list", "ListA", "--yes", "--skip-nexus"],
+                expect=0)
+check("the download then fetches ListA's build into its folder",
+      rc == 0 and held(s, "ListA", "Synthesis.zip") == NEW, str(synthesis(s)))
+check("  and ListB's build is untouched in Shared", held(s, "Shared", "Synthesis.zip") == OLD,
+      str(synthesis(s)))
+srv.shutdown()
+
 sys.exit(summary())

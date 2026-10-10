@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
@@ -223,7 +224,7 @@ before = master_of(box)
 (res, spoke) = quiet(W.delete_modlist, {"lists": {}, "map": {}},
                      {"file": "Master.wabbajack", "game": GAME})
 check("delete_modlist refuses", res == (0, 0, 0), str(res))
-check("  and says why", "named after a pool folder" in spoke, spoke[-200:])
+check("  and says why", "reserved for a pool folder" in spoke, spoke[-200:])
 check("Master is untouched", master_of(box) == before, str(master_of(box)))
 check("  and the manifest is still there",
       os.path.isfile(os.path.join(box.manifests, "Master.wabbajack")))
@@ -235,7 +236,7 @@ rc, out = box.run("wj_downloader.py",
                   ["--game", GAME, "--list", "Master", "--dry-run", "--yes"],
                   expect=2)
 check("--list Master exits 2", rc == 2)
-check("  naming the clash", "reserved pool folder" in out, out.strip()[-200:])
+check("  naming the clash", "reserved for a pool folder" in out, out.strip()[-200:])
 
 print("\n      and stage 5a refuses to offer it")
 records = A.load_plan_records()
@@ -508,8 +509,10 @@ except Interrupted:
 rows = list(csv.reader(io.open(record.path, encoding="utf-8")))
 check("the record already holds the two deletions",
       len(rows) == 3 and rows[0] == ["archive", "size_bytes", "reason",
-                                     "trashed_to", "master", "rule"],
+                                     "trashed_to", "master", "rule", "trashed_at"],
       str(rows))
+check("  each with when it went, which the purge counts from",
+      all(r[6] for r in rows[1:]), str(rows))
 check("  naming the files that are actually gone",
       [r[0] for r in rows[1:]] == ["a.7z", "b.7z"]
       and not os.path.exists(os.path.join(master, "a.7z"))
@@ -682,7 +685,10 @@ os.utime(os.path.join(box.archives, GAME, "Master", "junk.7z"),
          (1_000_000, 1_000_000))                          # an ancient archive
 wire(box)
 records = A.load_plan_records()
-(res, _o) = quiet(W.clear_master, GAME, W.wanted_builds(records, GAME))
+_b, master14, _s = A.WJ.resolve_game_dirs(GAME)
+record14 = W.DeletionRecord(GAME, "your modlists only", master14)
+(res, _o) = quiet(W.clear_master, GAME, W.wanted_builds(records, GAME), on_delete=record14.note)
+rec14 = record14.close()
 trash = os.path.join(box.archives, GAME, "Trash")
 check("the unwanted file is in the trash, not deleted",
       os.path.isfile(os.path.join(trash, "junk.7z")))
@@ -702,7 +708,24 @@ check("a fresh arrival survives the 30-day purge",
 stale = time.time() - 31 * 86400
 os.utime(os.path.join(trash, "junk.7z"), (stale, stale))
 purged, rec = A.purge_trash()
-check("a file 31 days in the trash is purged",
+check("a file whose arrival stamp did not take is NOT purged on its own old date",
+      purged == [] and os.path.isfile(os.path.join(trash, "junk.7z")), str(purged))
+
+
+def age_record(path, name, days):
+    """Make the record say `name` went to the trash `days` days ago."""
+    rows = list(csv.reader(io.open(path, newline="", encoding="utf-8")))
+    when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    for r in rows[1:]:
+        if r[0] == name:
+            r[6] = when
+    with io.open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows(rows)
+
+
+age_record(rec14, "junk.7z", 31)
+purged, rec = A.purge_trash()
+check("a file its record says went 31 days ago is purged",
       [p[1] for p in purged] == ["junk.7z"]
       and not os.path.exists(os.path.join(trash, "junk.7z")), str(purged))
 check("  its sidecar, younger, is not yet",
@@ -710,10 +733,16 @@ check("  its sidecar, younger, is not yet",
 check("  and the purge is recorded",
       bool(rec) and os.path.isfile(rec)
       and "junk.7z" in io.open(rec, encoding="utf-8").read(), str(rec))
+box.pool_file(GAME, "Trash", "mine.7z", 70)                 # put there by hand
 purged, rec = A.purge_trash(days=0)
-check("days=0 empties the trash",
-      [p[1] for p in purged] == ["junk.7z.meta"] and os.listdir(trash) == [],
-      str(purged))
+check("days=0 empties the trash of what a cleanup put there",
+      [p[1] for p in purged] == ["junk.7z.meta"]
+      and sorted(os.listdir(trash)) == ["mine.7z"], str((purged, os.listdir(trash))))
+check("  and leaves a file no record accounts for exactly where it is",
+      os.path.getsize(os.path.join(trash, "mine.7z")) == 70)
+(res, text) = drive(W.trash_step, [], {"lists": {}, "map": {}}, records)
+check("5d still says such a file is there, and offers nothing for it",
+      res is False and "5d. Trash" in text and "in no deletion" in text and "[e]" not in text, text[-400:])
 
 # ---------------------------------------------------------------- 13.15
 print("\n 13.15  stale to-do CSVs are removed")
@@ -778,6 +807,7 @@ wire(box)
 box.manifest("L", GAME, [("k.7z", 1, "nexus")])
 box.pool_file(GAME, "Master", "k.7z", 1)
 box.pool_file(GAME, "Trash", "old.7z", 40)
+box.trash_record(GAME, "old.7z", 40)            # what an earlier cleanup wrote
 wire(box)
 records = A.load_plan_records()
 (res, text) = drive(W.stage_space, ["s", "e", "y"], {"lists": {}, "map": {}}, records)
@@ -786,6 +816,7 @@ check("  and empties it on request",
       os.listdir(os.path.join(box.archives, GAME, "Trash")) == []
       and "Purged 1 file(s)" in text, text[-300:])
 box.pool_file(GAME, "Trash", "again.7z", 4)
+box.trash_record(GAME, "again.7z", 4)
 (res, text) = drive(W.stage_space, ["s", "s"], {"lists": {}, "map": {}}, records)
 check("  or leaves it alone",
       os.path.isfile(os.path.join(box.archives, GAME, "Trash", "again.7z")), text[-300:])
@@ -837,6 +868,320 @@ check("one whose name another build took comes back beside it, suffixed",
 check("  and the purged one is counted as gone", "1 no longer in the trash" in text, text[-400:])
 check("the record now counts only what is still in the trash",
       W.cleanup_records()[0]["waiting"] == 1, str(W.cleanup_records()))
+
+
+def held(path):
+    try:
+        return io.open(path, "rb").read()
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------- 13.19
+print("\n 13.19  deleting a list never deletes a file for being the same size")
+# Reproduced 2026-10-10 against 1.4.1: a file in the deleted list's folder
+# with the size of the one under its name in Master was taken for the same
+# file and deleted on the spot - no hash, no trash, no record - and when the
+# bytes differed, a build a surviving list wanted was gone for good.
+box = Sandbox(BOX)
+wire(box)
+box.manifest("A", GAME, [("same.7z", 8, "nexus")])
+box.manifest("B", GAME, [("same.7z", 8, "nexus")])
+box.pool_file(GAME, "A", "same.7z", 8, data=b"a" * 8)
+box.pool_file(GAME, "Master", "same.7z", 8, data=b"m" * 8)      # another build, same size
+wire(box)
+records = A.load_plan_records()
+survivors = {fn: e for fn, e in records.items() if fn != "A.wabbajack"}
+(res, _o) = quiet(W.delete_modlist, {"lists": {}, "map": {}},
+                  {"file": "A.wabbajack", "game": GAME}, keep=W.wanted_builds(survivors, GAME))
+master = os.path.join(box.archives, GAME, "Master")
+check("both builds are kept, the incoming one beside the other under a '~N' name",
+      held(os.path.join(master, "same.7z")) == b"m" * 8
+      and held(os.path.join(master, "same~1.7z")) == b"a" * 8, str(os.listdir(master)))
+check("  and counted as parked", res[:2] == (1, 1), str(res))
+A.WJ.invalidate_existing_cache()
+(res, _o) = quiet(W.clear_master, GAME, W.wanted_builds(survivors, GAME))
+check("5c, which hashes before anything goes, keeps both: they are not the same file",
+      res[0] == [] and sorted(os.listdir(master)) == ["same.7z", "same~1.7z"], str(res))
+
+# ---------------------------------------------------------------- 13.20
+print("\n 13.20  a list named 'Master.' is Master to Windows, and is not deleted")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("Master.", GAME, [("x.7z", 1, "nexus")])          # Master..wabbajack
+box.pool_file(GAME, "Master", "precious.7z", 111)
+wire(box)
+before = master_of(box)
+(res, spoke) = quiet(W.delete_modlist, {"lists": {}, "map": {}},
+                     {"file": "Master..wabbajack", "game": GAME})
+check("delete_modlist refuses, saying why", res == (0, 0, 0) and "ends in a dot" in spoke,
+      str(res) + " " + spoke[-200:])
+check("  Master is untouched, and so is the manifest",
+      master_of(box) == before and os.path.isfile(os.path.join(box.manifests, "Master..wabbajack")),
+      str(master_of(box)))
+
+# ---------------------------------------------------------------- 13.21
+print("\n 13.21  putting a cleanup back: a same-size file under the name is not the build")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("L", GAME, [("keep.7z", 1, "nexus")])
+box.pool_file(GAME, "Master", "keep.7z", 1)
+box.pool_file(GAME, "Master", "alike.7z", 9, data=b"1" * 9)
+wire(box)
+records = A.load_plan_records()
+master = os.path.join(box.archives, GAME, "Master")
+trash = os.path.join(box.archives, GAME, "Trash")
+quiet(W.clear_masters, records, [{"game": GAME, "label": GAME, "path": master}], "y", None)
+check("the cleanup put it in the trash", held(os.path.join(trash, "alike.7z")) == b"1" * 9)
+io.open(os.path.join(master, "alike.7z"), "wb").write(b"2" * 9)  # another build since, same size
+result = W.restore_cleanup(W.cleanup_records()[0])
+check("it is not taken for 'back already', to be purged from the trash later",
+      "alike.7z" not in result["already"], str(result))
+check("  it comes back beside the other build, under a '~N' name, both intact",
+      held(os.path.join(master, "alike~1.7z")) == b"1" * 9
+      and held(os.path.join(master, "alike.7z")) == b"2" * 9, str(os.listdir(master)))
+
+# ---------------------------------------------------------------- 13.22
+print("\n 13.22  the trash is never written over, and every move into it is recorded")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("L", GAME, [("keep.7z", 1, "nexus")])
+box.pool_file(GAME, "Master", "keep.7z", 1)
+box.pool_file(GAME, "Master", "junk.7z", 50)
+box.pool_file(GAME, "Master", "junk.7z.meta", 5)
+box.pool_file(GAME, "Trash", "junk.7z", 33)                   # an earlier cleanup's, still waiting
+wire(box)
+records = A.load_plan_records()
+noted = []
+real_utime = os.utime
+
+
+def no_stamp(*a, **k):
+    raise PermissionError(5, "Access is denied")
+
+
+os.utime = no_stamp                                           # a share that refuses the stamp
+try:
+    (res, _o) = quiet(W.clear_master, GAME, W.wanted_builds(records, GAME),
+                      on_delete=lambda n, s, r, d: noted.append(n))
+finally:
+    os.utime = real_utime
+trash = os.path.join(box.archives, GAME, "Trash")
+check("the earlier file in the trash is kept, and the new one arrives beside it",
+      len(held(os.path.join(trash, "junk.7z")) or b"") == 33
+      and len(held(os.path.join(trash, "junk~1.7z")) or b"") == 50, str(sorted(os.listdir(trash))))
+check("  its sidecar under the matching name", len(held(os.path.join(trash, "junk~1.7z.meta")) or b"") == 5,
+      str(sorted(os.listdir(trash))))
+check("  and both moves are recorded, though neither arrival could be stamped",
+      noted == ["junk.7z", "junk.7z.meta"], str(noted))
+
+# ---------------------------------------------------------------- 13.23
+print("\n 13.23  with no deletion record to write, nothing goes to the trash")
+box = Sandbox(BOX)
+wire(box)
+box.manifest("L", GAME, [("keep.7z", 1, "nexus")])
+box.pool_file(GAME, "Master", "keep.7z", 1)
+box.pool_file(GAME, "Master", "junk.7z", 50)
+wire(box)
+records = A.load_plan_records()
+before = master_of(box)
+nowhere = os.path.join(box.tools, "no-such-folder")
+real_rt = A.runtime_path
+A.runtime_path = lambda name=None, make=True: os.path.join(nowhere, name) if name else nowhere
+try:
+    (record, _o) = quiet(W.DeletionRecord, GAME, "your modlists only",
+                         os.path.join(box.archives, GAME, "Master"))
+    record_ok = record.ok
+    record.close()
+    (grand, spoke) = quiet(W.clear_masters, records,
+                           [{"game": GAME, "label": GAME,
+                             "path": os.path.join(box.archives, GAME, "Master")}], "y", None)
+finally:
+    A.runtime_path = real_rt
+check("a record that cannot be opened says so", record_ok is False)
+check("  and Master is not cleared: a file sent to the trash with no record could be "
+      "neither put back nor purged",
+      grand == 0 and master_of(box) == before and "could not be written" in spoke, spoke[-300:])
+
+# ---------------------------------------------------------------- 13.24
+print("\n 13.24  when whether Wabbajack runs cannot be told, the wizard asks")
+W.WB.running_processes = lambda: None
+try:
+    (res, text) = drive(W.wait_for_wabbajack, ["c"], "Staging")
+    (res2, text2) = drive(W.wait_for_wabbajack, ["q"], "Staging")
+finally:
+    W.WB.running_processes = lambda: []
+check("it says so and waits for a word, where it used to go on as if none ran",
+      res is True and "could not be checked" in text, text[-300:])
+check("  and 'q' stops the wizard", res2 is None and text2 == "(quit)")
+
+# ---------------------------------------------------------------- 13.25
+print("\n 13.25  two records written in one second are two records")
+# Found 2026-10-10 when a suite ran faster than before: a cleanup's record
+# opened in the same second as an earlier one replaced it, and the files the
+# earlier one accounted for could then be neither put back nor purged.
+folder = os.path.join(box.tools, "records")
+os.makedirs(folder, exist_ok=True)
+when = datetime(2026, 10, 10, 12, 0, 0)
+taken = os.path.join(folder, "deleted_Fallout4_20261010_120000.csv")
+io.open(taken, "w", encoding="utf-8").write("an earlier record\n")
+path, fh = W.wj_paths.create_stamped(folder, "deleted_Fallout4_", when=when)
+fh.write("this one\n")
+fh.close()
+check("a record whose name is taken takes the next second's",
+      os.path.basename(path) == "deleted_Fallout4_20261010_120001.csv", path)
+check("  the earlier one says what it said",
+      io.open(taken, encoding="utf-8").read() == "an earlier record\n")
+check("  and the new name still reads as a deletion record",
+      bool(A._DELETED_RECORD.match(os.path.basename(path))))
+
+# ---------------------------------------------------------------- 13.26
+print("\n 13.26  a clear goes by the manifests as they read when it runs")
+# Found 2026-10-10 in review: the refusals ran on the manifests as the table
+# was measured, and a manifest rewritten since - copied over, or read back
+# damaged - protected nothing at the moment the clear ran.
+box = Sandbox(BOX)
+wire(box)
+box.manifest("L", GAME, [("keep.7z", 1, "nexus")])
+box.pool_file(GAME, "Master", "keep.7z", 1)
+box.pool_file(GAME, "Master", "junk.7z", 50)
+wire(box)
+records = A.load_plan_records()
+before = master_of(box)
+rows = [{"game": GAME, "label": GAME, "path": os.path.join(box.archives, GAME, "Master")}]
+damaged = dict(records, **{"L.wabbajack": dict(records["L.wabbajack"], readable=False, archives=[])})
+(grand, spoke) = quiet(W.clear_masters, damaged, rows, "y", None)
+check("a manifest that cannot be read now stops the clear, whatever the table said",
+      grand == 0 and master_of(box) == before and "could not be read" in spoke, spoke[-300:])
+hollow = dict(records, **{"L.wabbajack": dict(records["L.wabbajack"], archives=[])})
+(grand, spoke) = quiet(W.clear_masters, hollow, rows, "y", None)
+check("  as does one that lists nothing, for the pool it draws from",
+      grand == 0 and master_of(box) == before and "lists no archives" in spoke, spoke[-300:])
+(grand, spoke) = quiet(W.clear_masters, records, rows, "y", None)
+check("  while the manifests as they are clear what nothing wants",
+      grand == 50 and "keep.7z" in master_of(box) and "junk.7z" not in master_of(box), spoke[-300:])
+
+print("\n      a download stopped half-way in Master is no archive to reclaim")
+box.pool_file(GAME, "Master", "big.7z.part", 300)
+box.pool_file(GAME, "Master", "big.7z.parts.json", 40)
+A.WJ.invalidate_existing_cache()
+r = W.master_report(GAME, records)
+check("it is not counted as reclaimable", r["free_files"] == 0 and r["files"] == 1, str(r))
+(grand, spoke) = quiet(W.clear_masters, records, rows, "y", None)
+check("  and 5c leaves it, and its resume record, where they are",
+      grand == 0 and master_of(box).get("big.7z.part") == 300
+      and master_of(box).get("big.7z.parts.json") == 40, str(master_of(box)))
+
+# ---------------------------------------------------------------- 13.27
+print("\n 13.27  a move happens or it does not, across volumes too")
+# Found 2026-10-10 in review: across volumes, a copy that failed left its
+# temporary file behind, and an original that would not go once copied left
+# the file in both places while the caller was told the move had failed -
+# in the trash, a copy no record accounts for.
+import errno
+import wj_paths as WP
+here = os.path.join(box.tools, "moves")
+os.makedirs(os.path.join(here, "a"))
+os.makedirs(os.path.join(here, "b"))
+
+
+class OtherVolume:
+    """os, with folder b on another volume than folder a."""
+    def __init__(self, fail_remove_of=None):
+        self.fail_remove_of = fail_remove_of
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def rename(self, src, dst):
+        if os.path.dirname(os.path.abspath(src)) != os.path.dirname(os.path.abspath(dst)):
+            raise OSError(errno.EXDEV, "The system cannot move the file to a different disk drive")
+        return os.rename(src, dst)
+
+    def remove(self, path):
+        if self.fail_remove_of and os.path.abspath(path) == os.path.abspath(self.fail_remove_of):
+            raise PermissionError(32, "The file is in use by another process", path)
+        return os.remove(path)
+
+
+src = os.path.join(here, "a", "x.7z")
+dst = os.path.join(here, "b", "x.7z")
+io.open(src, "wb").write(b"x" * 64)
+real = (WP.os, WP.shutil.copy2)
+WP.os = OtherVolume()
+try:
+    WP.move_file(src, dst)
+finally:
+    WP.os = real[0]
+check("across volumes a file is copied into place and the original removed",
+      held(dst) == b"x" * 64 and not os.path.exists(src) and os.listdir(os.path.join(here, "b")) == ["x.7z"])
+src, dst = dst, os.path.join(here, "a", "x.7z")
+
+
+def half_copy(a, b, **k):
+    io.open(b, "wb").write(b"x" * 10)
+    raise OSError(28, "There is not enough space on the disk")
+
+
+WP.os, WP.shutil.copy2 = OtherVolume(), half_copy
+try:
+    try:
+        WP.move_file(src, dst)
+        raised = None
+    except OSError as e:
+        raised = e
+finally:
+    WP.os, WP.shutil.copy2 = real
+check("a copy that fails half-way leaves no temporary file, and the original where it was",
+      raised is not None and held(src) == b"x" * 64 and os.listdir(os.path.join(here, "a")) == [],
+      str((raised, os.listdir(os.path.join(here, "a")))))
+WP.os = OtherVolume(fail_remove_of=src)
+try:
+    try:
+        WP.move_file(src, dst)
+        raised = None
+    except OSError as e:
+        raised = e
+finally:
+    WP.os = real[0]
+check("an original that will not go once copied: the copy goes again, and the move has not happened",
+      raised is not None and held(src) == b"x" * 64 and os.listdir(os.path.join(here, "a")) == [],
+      str((raised, os.listdir(os.path.join(here, "a")))))
+
+print("\n      a file set aside takes its sidecar with it, or neither moves")
+d = os.path.join(here, "aside")
+os.makedirs(d)
+arch, meta = os.path.join(d, "s.7z"), os.path.join(d, "s.7z.meta")
+io.open(arch, "wb").write(b"build")
+io.open(meta, "wb").write(b"its record")
+
+
+class RefuseRename:
+    def __init__(self, suffix):
+        self.suffix = suffix
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def rename(self, a, b):
+        if a.endswith(self.suffix):
+            raise PermissionError(32, "The file is in use by another process", a)
+        return os.rename(a, b)
+
+
+for suffix, which in ((".meta", "the sidecar"), (".7z", "the archive")):
+    WP.os = RefuseRename(suffix)
+    try:
+        try:
+            WP.set_aside(arch)
+            raised = None
+        except OSError as e:
+            raised = e
+    finally:
+        WP.os = real[0]
+    check("%s will not move: neither does, and both are where they were" % which,
+          raised is not None and held(arch) == b"build" and held(meta) == b"its record"
+          and sorted(os.listdir(d)) == ["s.7z", "s.7z.meta"], str((raised, sorted(os.listdir(d)))))
 
 W.WB.running_processes = REAL_RUNNING
 shutil.rmtree(BOX, ignore_errors=True)

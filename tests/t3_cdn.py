@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -28,27 +29,57 @@ os.makedirs(TMP, exist_ok=True)
 PART = 1000
 NPARTS = 4
 WHOLE = b"".join(bytes([65 + i]) * PART for i in range(NPARTS))
-BROKEN = {"parts": set(), "shortparts": set(), "definition": "ok"}
+BROKEN = {"parts": set(), "shortparts": set(), "cutparts": set(), "slowbad": set(),
+          "definition": "ok"}
 HITS = {}
+# A file of many small parts, served under /many: enough of them that a
+# download holding every part at once, or fetching on after a stop, shows.
+MANY, MANY_PART = 40, 100
+WHOLE_MANY = b"".join(bytes([48 + i % 40]) * MANY_PART for i in range(MANY))
+STOP_AT = [None]            # the /many part whose request stands for Ctrl+C
+
+
+def layout(whole, part):
+    entries = []
+    for i in range(len(whole) // part):
+        chunk = whole[i * part:(i + 1) * part]
+        entries.append({"Index": i, "Offset": i * part, "Size": part,
+                        "Hash": C.wj_hash(chunk)})
+    return {"Size": len(whole), "Hash": C.wj_hash(whole), "MungedName": "test.bin",
+            "Parts": entries}
 
 
 def definition(size=None, parts=NPARTS, whole_hash=None):
-    entries = []
-    for i in range(parts):
-        chunk = WHOLE[i * PART:(i + 1) * PART]
-        entries.append({"Index": i, "Offset": i * PART, "Size": PART,
-                        "Hash": C.wj_hash(chunk)})
-    return {"Size": len(WHOLE) if size is None else size,
-            "Hash": C.wj_hash(WHOLE) if whole_hash is None else whole_hash,
-            "MungedName": "test.bin", "Parts": entries}
+    d = layout(WHOLE[:parts * PART], PART)
+    d["Size"] = len(WHOLE) if size is None else size
+    d["Hash"] = C.wj_hash(WHOLE) if whole_hash is None else whole_hash
+    return d
 
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def send_body(self, body, cut=False):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if cut:
+            # The body stops short and the connection closes: IncompleteRead.
+            self.wfile.write(body[:5])
+            self.close_connection = True
+            return
+        self.wfile.write(body)
+
     def do_GET(self):
         HITS[self.path] = HITS.get(self.path, 0) + 1
+        if self.path.startswith("/many/"):
+            if self.path.endswith("/definition.json.gz"):
+                return self.send_body(gzip.compress(json.dumps(layout(WHOLE_MANY, MANY_PART)).encode()))
+            idx = int(self.path.rsplit("/", 1)[1])
+            if idx == STOP_AT[0]:
+                C.STOP.set()
+            return self.send_body(WHOLE_MANY[idx * MANY_PART:(idx + 1) * MANY_PART])
         if self.path.endswith("/definition.json.gz"):
             mode = BROKEN["definition"]
             if mode == "404":
@@ -63,12 +94,13 @@ class H(BaseHTTPRequestHandler):
             elif mode == "badwholehash":
                 body = gzip.compress(json.dumps(
                     definition(whole_hash="AAAAAAAAAAA=")).encode())
+            elif mode == "badlayout":
+                d = definition()
+                d["Parts"][1]["Offset"] = -1000      # somewhere that is not this file
+                body = gzip.compress(json.dumps(d).encode())
             else:
                 body = gzip.compress(json.dumps(definition()).encode())
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            return self.wfile.write(body)
+            return self.send_body(body, cut=(mode == "cutdef" and HITS[self.path] == 1))
         if "/parts/" in self.path:
             idx = int(self.path.rsplit("/", 1)[1])
             data = WHOLE[idx * PART:(idx + 1) * PART]
@@ -76,10 +108,10 @@ class H(BaseHTTPRequestHandler):
                 data = b"Z" * PART          # right length, wrong bytes
             if idx in BROKEN["shortparts"]:
                 data = data[:10]            # wrong length
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            return self.wfile.write(data)
+            if idx in BROKEN["slowbad"]:
+                time.sleep(2)               # slow, and wrong when it comes
+                data = b"Y" * PART
+            return self.send_body(data, cut=(idx in BROKEN["cutparts"] and HITS[self.path] == 1))
         self.send_error(404)
 
 
@@ -106,6 +138,8 @@ def clean(name="cdn.bin"):
 def reset():
     BROKEN["parts"] = set()
     BROKEN["shortparts"] = set()
+    BROKEN["cutparts"] = set()
+    BROKEN["slowbad"] = set()
     BROKEN["definition"] = "ok"
     HITS.clear()
 
@@ -287,6 +321,252 @@ check("its inline copy is in use and agrees with wj_paths on every address",
       alone.web_url_problem is not wj_paths.web_url_problem
       and [alone.web_url_problem(u) is None for u in urls]
       == [wj_paths.web_url_problem(u) is None for u in urls])
+
+
+def read(p):
+    try:
+        return io.open(p, "rb").read()
+    except OSError:
+        return None
+
+
+def part_fetches(prefix="/file/parts/"):
+    return sum(v for k, v in HITS.items() if k.startswith(prefix))
+
+
+# ---------------------------------------------------------------- 3.12
+print("\n 3.12  the assembled file never replaces the one already under its name")
+reset()
+p = clean()
+aside = os.path.join(TMP, "cdn~1.bin")
+for leftover in (aside, aside + ".meta"):
+    if os.path.exists(leftover):
+        os.remove(leftover)
+io.open(p, "wb").write(b"another list's build")
+io.open(p + ".meta", "w", encoding="utf-8").write("[General]\nwhose=the other list\n")
+ok = C.download(BASE, p, progress=False)
+check("the download lands under its name", ok is True and read(p) == WHOLE)
+check("  and the file that was there is kept beside it, with its sidecar",
+      read(aside) == b"another list's build" and os.path.isfile(aside + ".meta"),
+      str(sorted(n for n in os.listdir(TMP) if n.startswith("cdn"))))
+os.remove(aside)
+os.remove(aside + ".meta")
+ok = C.download(BASE, p, progress=False)
+check("the very same bytes already there are simply replaced: nothing set aside",
+      ok is True and read(p) == WHOLE and not os.path.exists(aside))
+
+# ---------------------------------------------------------------- 3.13
+print("\n 3.13  an assembled file that cannot be read to hash it is not published")
+reset()
+p = clean()
+real_hash_file = C.hash_file
+C.hash_file = lambda path, chunk=1 << 20: None      # held open elsewhere; the share dropped
+try:
+    ok = C.download(BASE, p, progress=False)
+finally:
+    C.hash_file = real_hash_file
+check("the download reports failure rather than an unchecked file",
+      ok is False and not os.path.exists(p))
+check("  and keeps what it fetched for the next try",
+      os.path.exists(p + ".part") and os.path.exists(p + ".parts.json"))
+ok = C.download(BASE, p, progress=False)
+check("  which then finishes without fetching a part again",
+      ok is True and read(p) == WHOLE and part_fetches() == NPARTS, str(HITS))
+
+# ---------------------------------------------------------------- 3.14
+print("\n 3.14  only a few parts are in hand at once, however many the file has")
+# Every finished part used to stay referenced until the last arrived: the
+# whole file in memory, 4.7 GB for the largest manifest here.
+import concurrent.futures as cf
+
+
+class CountingPool(cf.ThreadPoolExecutor):
+    """Counts the parts submitted and not yet taken back."""
+    lock = threading.Lock()
+    held = peak = 0
+
+    def submit(self, fn, *a, **k):
+        fut = super().submit(fn, *a, **k)
+        with CountingPool.lock:
+            CountingPool.held += 1
+            CountingPool.peak = max(CountingPool.peak, CountingPool.held)
+        real = fut.result
+
+        def result(timeout=None):
+            with CountingPool.lock:
+                CountingPool.held -= 1
+            return real(timeout)
+        fut.result = result
+        return fut
+
+
+reset()
+p = clean("many.bin")
+real_pool = cf.ThreadPoolExecutor
+cf.ThreadPoolExecutor = CountingPool
+try:
+    ok = C.download(BASE.replace("/file", "/many"), p, progress=False, workers=2)
+finally:
+    cf.ThreadPoolExecutor = real_pool
+check("a %d-part file assembles byte-exact" % MANY, ok is True and read(p) == WHOLE_MANY)
+check("  with never more than %d parts in hand at once" % (C.WINDOW_PER_WORKER * 2),
+      0 < CountingPool.peak <= C.WINDOW_PER_WORKER * 2, "peak=%d" % CountingPool.peak)
+
+# ---------------------------------------------------------------- 3.15
+print("\n 3.15  a stop ends the download within a part, and keeps what it has")
+reset()
+p = clean("many.bin")
+STOP_AT[0] = 5
+t0 = time.time()
+try:
+    ok = C.download(BASE.replace("/file", "/many"), p, progress=False, workers=2)
+    took = time.time() - t0
+    # A request already on the wire when the stop came still lands, after the
+    # download has returned; it is let land before anything is counted.
+    time.sleep(1.0)
+finally:
+    stopped = C.STOP.is_set()
+    C.STOP.clear()
+    STOP_AT[0] = None
+first = part_fetches("/many/parts/")
+kept = json.load(io.open(p + ".parts.json", encoding="utf-8")).get("done", []) \
+    if os.path.exists(p + ".parts.json") else []
+check("the download stops, unfinished, in moments", stopped and ok is False and took < 10,
+      "%.1fs" % took)
+check("  nothing queued is fetched after it", first <= 5 + 1 + C.WINDOW_PER_WORKER * 2,
+      "fetched %d of %d" % (first, MANY))
+check("  and what was written is recorded for the resume", 0 < len(kept) <= first,
+      str(kept))
+HITS.clear()
+ok = C.download(BASE.replace("/file", "/many"), p, progress=False, workers=2)
+check("the next run fetches only the rest, and finishes",
+      ok is True and read(p) == WHOLE_MANY and part_fetches("/many/parts/") == MANY - len(kept),
+      "fetched %d, had %d" % (part_fetches("/many/parts/"), len(kept)))
+
+# ---------------------------------------------------------------- 3.16
+print("\n 3.16  a disk that fills mid-download is a failure, not a crash")
+import builtins
+
+
+class FullDisk:
+    """A file that takes `room` writes and then reports the disk full."""
+    def __init__(self, f, room):
+        self.f, self.room = f, room
+
+    def write(self, data):
+        if self.room <= 0:
+            raise OSError(28, "There is not enough space on the disk")
+        self.room -= 1
+        return self.f.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self.f, name)
+
+
+def full_disk_open(path, mode="r", *a, **k):
+    f = builtins.open(path, mode, *a, **k)
+    writing = "b" in mode and ("w" in mode or "+" in mode)
+    return FullDisk(f, 2) if str(path).endswith(".part") and writing else f
+
+
+reset()
+p = clean("many.bin")
+C.open = full_disk_open
+try:
+    try:
+        ok = C.download(BASE.replace("/file", "/many"), p, progress=False, workers=2)
+        raised = None
+    except Exception as e:
+        ok, raised = None, e
+finally:
+    del C.open
+kept = json.load(io.open(p + ".parts.json", encoding="utf-8")).get("done", []) \
+    if os.path.exists(p + ".parts.json") else None
+check("the download returns failure; nothing is raised", ok is False and raised is None,
+      repr(raised))
+check("  no part queued behind the failure is fetched",
+      part_fetches("/many/parts/") <= 3 + C.WINDOW_PER_WORKER * 2, str(part_fetches("/many/parts/")))
+check("  and the two parts written are recorded for the resume", kept is not None and len(kept) == 2,
+      str(kept))
+ok = C.download(BASE.replace("/file", "/many"), p, progress=False, workers=2)
+check("  from which the next run finishes", ok is True and read(p) == WHOLE_MANY)
+
+print("\n      and a part still in flight when a download fails does not retry on for nobody")
+reset()
+BROKEN["slowbad"] = {1}                           # 2 s to arrive, and wrong when it does
+p = clean()
+
+
+def no_room_open(path, mode="r", *a, **k):
+    f = builtins.open(path, mode, *a, **k)
+    writing = "b" in mode and ("w" in mode or "+" in mode)
+    return FullDisk(f, 0) if str(path).endswith(".part") and writing else f
+
+
+C.open = no_room_open                             # the first write fails: the disk is full
+try:
+    ok = C.download(BASE, p, progress=False, workers=2)
+finally:
+    del C.open
+returned = HITS.get("/file/parts/1", 0)
+time.sleep(6)                                     # past the slow part's retry, had it come
+check("the download fails at once", ok is False)
+check("  and the slow part, failing too, is not asked for again after the download has ended",
+      HITS.get("/file/parts/1", 0) == returned == 1, str(HITS))
+
+# ---------------------------------------------------------------- 3.17
+print("\n 3.17  a part or a definition cut short is fetched again, not the end of the file")
+reset()
+BROKEN["cutparts"] = {1}
+p = clean()
+ok = C.download(BASE, p, progress=False)
+check("a part whose body stops short is retried", ok is True and read(p) == WHOLE
+      and HITS.get("/file/parts/1") == 2, str(HITS))
+reset()
+BROKEN["definition"] = "cutdef"
+p = clean()
+ok = C.download(BASE, p, progress=False)
+check("so is a definition", ok is True and read(p) == WHOLE
+      and HITS.get("/file/definition.json.gz") == 2, str(HITS))
+
+# ---------------------------------------------------------------- 3.18
+print("\n 3.18  a definition whose parts do not lay out as one file is refused")
+check("a definition that does lay out passes", C.parts_problem(definition()) is None)
+spoilers = {
+    "a negative offset": lambda d: d["Parts"][1].update(Offset=-1000),
+    "a fractional size": lambda d: d["Parts"][1].update(Size=999.5),
+    "one index given twice": lambda d: d["Parts"][2].update(Index=1),
+    "a part reaching past the end": lambda d: d["Parts"][3].update(Offset=3500),
+    "a file size that is not a count": lambda d: d.update(Size="4000"),
+    "true for an index": lambda d: d["Parts"][0].update(Index=True),
+}
+for label, spoil in spoilers.items():
+    d = definition()
+    spoil(d)
+    check("refused: %s" % label, bool(C.parts_problem(d)), str(C.parts_problem(d)))
+reset()
+BROKEN["definition"] = "badlayout"
+p = clean()
+ok = C.download(BASE, p, progress=False)
+check("such a definition from the server: no part fetched, nothing written",
+      ok is False and part_fetches() == 0 and not os.path.exists(p)
+      and not os.path.exists(p + ".part"), str(HITS))
+
+# ---------------------------------------------------------------- 3.19
+print("\n 3.19  a build of another size is refused before it is fetched, and nothing is lost")
+reset()
+p = clean()
+ok = C.download(BASE, p, progress=False, expected_size=len(WHOLE) - 1, strict_hash=True)
+check("strict: a definition of another size than asked for is refused before any part",
+      ok is False and part_fetches() == 0 and not os.path.exists(p + ".part"), str(HITS))
+reset()
+p = clean("there.bin")
+io.open(p, "wb").write(WHOLE)               # the very bytes the CDN serves: another list's build
+results = {"done": 0, "failed": 0, "failures": []}
+ok = D.download_one(BASE, {"name": "there.bin", "size": len(WHOLE) - 1, "hash": "",
+                           "meta_text": "", "_cdn": True}, TMP, results)
+check("a manifest pinning another size: the download fails, and the file already there stays",
+      ok is False and read(p) == WHOLE and part_fetches() == 0, str((results, HITS)))
 
 srv.shutdown()
 sys.exit(summary())

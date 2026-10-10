@@ -8,6 +8,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXROOT = os.path.join(os.environ.get("TEMP", "/tmp"), "wj_tests")
 import base64
 import io
+import json
 import os
 import re
 import socket
@@ -36,6 +37,7 @@ BIG = b"B" * ((1 << 20) + 5)          # over the pool's 1 MiB 'small' threshold
 STALL = 3.5                           # how long /slow goes silent for
 HOLD = 1.0                            # how long /hold takes before it answers
 HITS = {}
+REDIRECTS = {}                        # path -> where the server sends it (2.23)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -119,6 +121,73 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(BIG)))
             self.end_headers()
             self.wfile.write(BIG)
+        elif path in ("/r416", "/always416"):
+            # /r416 has nothing past the end of the file to give a resume;
+            # /always416 refuses even a request for the whole file.
+            if path == "/always416" or self.headers.get("Range"):
+                self.send_response(416)
+                self.send_header("Content-Range", "bytes */%d" % len(BODY))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(BODY)))
+                self.end_headers()
+                self.wfile.write(BODY)
+        elif path == "/badrange":
+            # Answers a resume with the whole file, labelled as starting at 0.
+            if self.headers.get("Range"):
+                self.send_response(206)
+                self.send_header("Content-Range", "bytes 0-%d/%d" % (len(BODY) - 1, len(BODY)))
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(BODY)))
+            self.end_headers()
+            self.wfile.write(BODY)
+        elif path == "/late":
+            # A file that takes a while to arrive (2.25).
+            time.sleep(2.5)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(BODY)))
+            self.end_headers()
+            self.wfile.write(BODY)
+        elif path == "/toobig":
+            # Three times what the manifest says the file is, and counting.
+            self.send_response(200)
+            self.send_header("Content-Length", str(3 * len(BODY)))
+            self.end_headers()
+            self.wfile.write(BODY * 3)
+        elif path in ("/nx503", "/nx429date", "/nxjunk"):
+            # Nexus having a bad moment: two 503s; a 429 whose Retry-After is
+            # a date; a reply that is not JSON.
+            if path == "/nx503" and HITS[path] <= 2:
+                self.send_error(503)
+                return
+            if path == "/nx429date" and HITS[path] == 1:
+                self.send_response(429)
+                self.send_header("Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = b"<html>Cloudflare says hello</html>" if path == "/nxjunk" else b'{"ok": 1}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/nxreset":
+            self.close_connection = True        # hangs up without a word
+        elif path in REDIRECTS:
+            self.send_response(302)
+            self.send_header("Location", REDIRECTS[path])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif path == "/echo":
+            # The request's headers, as this server received them.
+            body = json.dumps({k.lower(): v for k, v in self.headers.items()}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_error(404)
 
@@ -1015,6 +1084,493 @@ check("the rule: http and https are web addresses, and nothing else is",
           "https://example.invalid/a.7z", "HTTP://example.invalid/a.7z", " https://x.invalid/ ",
           FILE_URL, "ftp://example.invalid/a.7z", "data:,hello", "C:\\Users\\x\\key", "", None)]
       == [True, True, True, False, False, False, False, False, False])
+
+# ---------------------------------------------------------------- 2.19
+print("\n 2.19  a download never replaces the file already under its name")
+# Reproduced 2026-10-10 against 1.4.1: a download was put in place over
+# whatever had its name - in a list's folder, often the build another list
+# still needed - and only then checked, so a download that failed its check
+# lost both. 7.6 and 7.7 follow the same loss through whole runs.
+from harness import wj_hash
+keep_dir = os.path.join(TMP, "keep")
+OTHER_BUILD = b"o" * 300
+WRONG_HASH = base64.b64encode(struct.pack("<Q", 12345)).decode()
+
+
+def reset_keep():
+    shutil.rmtree(keep_dir, ignore_errors=True)
+    os.makedirs(keep_dir)
+
+
+def other_build_there(name="keep.bin"):
+    """A different build under `name`, with its sidecar, as another list left it."""
+    reset_keep()
+    p = os.path.join(keep_dir, name)
+    io.open(p, "wb").write(OTHER_BUILD)
+    io.open(p + ".meta", "w", encoding="utf-8").write("[General]\nfrom=the other list\n")
+    return p
+
+
+def wanted(name, h):
+    return {"name": name, "size": len(BODY), "hash": h, "meta_text": "[General]\nfrom=this list\n",
+            "meta": {}, "state": {"$type": "HttpDownloader"}}
+
+
+def read(p, text=False):
+    try:
+        return io.open(p, encoding="utf-8").read() if text else io.open(p, "rb").read()
+    except OSError:
+        return None
+
+
+p = other_build_there()
+res = {"done": 0, "failed": 0, "failures": []}
+ok = D.download_one(BASE + "/ok", wanted("keep.bin", wj_hash(BODY)), keep_dir, res)
+aside = os.path.join(keep_dir, "keep~1.bin")
+check("the download lands under its name", ok is True and read(p) == BODY, str(res))
+check("  and the build that was there is kept beside it as keep~1.bin", read(aside) == OTHER_BUILD,
+      str(sorted(os.listdir(keep_dir))))
+check("  its sidecar with it, and the new file has its own",
+      "the other list" in (read(aside + ".meta", True) or "")
+      and "this list" in (read(p + ".meta", True) or ""), str(sorted(os.listdir(keep_dir))))
+
+p = other_build_there()
+res = {"done": 0, "failed": 0, "failures": []}
+ok = D.download_one(BASE + "/ok", wanted("keep.bin", WRONG_HASH), keep_dir, res)
+check("a download that fails its check leaves the file there exactly as it was",
+      ok is False and read(p) == OTHER_BUILD and "the other list" in (read(p + ".meta", True) or "")
+      and sorted(os.listdir(keep_dir)) == ["keep.bin", "keep.bin.meta"],
+      str(sorted(os.listdir(keep_dir))))
+
+reset_keep()
+p = os.path.join(keep_dir, "keep.bin")
+io.open(p, "wb").write(BODY)
+res = {"done": 0, "failed": 0, "failures": []}
+ok = D.download_one(BASE + "/ok", wanted("keep.bin", wj_hash(BODY)), keep_dir, res)
+check("the very same bytes already there are simply replaced: nothing set aside",
+      ok is True and sorted(os.listdir(keep_dir)) == ["keep.bin", "keep.bin.meta"],
+      str(sorted(os.listdir(keep_dir))))
+
+p = other_build_there("plain.bin")
+ok = D.stream_download(BASE + "/ok", p, expected_size=len(BODY))
+check("stream_download keeps what it finds under the name too",
+      ok is True and read(p) == BODY and read(os.path.join(keep_dir, "plain~1.bin")) == OTHER_BUILD,
+      str(sorted(os.listdir(keep_dir))))
+
+# ---------------------------------------------------------------- 2.20
+print("\n 2.20  a file that cannot be read to hash it is not verified")
+p = dest("unhashed.bin")
+io.open(p, "wb").write(BODY)
+real_hash = D.wabbajack_hash
+D.wabbajack_hash = lambda path: None             # held open elsewhere; the share dropped
+try:
+    good, why = D.verify_file(p, len(BODY), wj_hash(BODY))
+finally:
+    D.wabbajack_hash = real_hash
+check("it fails, and says why, where it used to pass", not good and "could not be read" in why, why)
+check("  while a file that can be read still passes", D.verify_file(p, len(BODY), wj_hash(BODY))[0])
+
+# ---------------------------------------------------------------- 2.21
+print("\n 2.21  a resume the server cannot serve")
+p = dest("r416.bin")
+io.open(p + ".part", "wb").write(BODY)              # already whole, from an interrupted run
+HITS.clear()
+ok = D.stream_download(BASE + "/r416", p, expected_size=len(BODY))
+check("a .part that is already the whole file is finished, not fetched again",
+      ok is True and read(p) == BODY and HITS.get("/r416") == 1, str(HITS))
+p = dest("r416b.bin")
+io.open(p + ".part", "wb").write(b"?" * (len(BODY) + 10))   # longer than the file: not it
+HITS.clear()
+ok = D.stream_download(BASE + "/r416", p, expected_size=len(BODY))
+check("one that is not the file is started again from the beginning",
+      ok is True and read(p) == BODY and HITS.get("/r416") == 2, str(HITS))
+p = dest("always416.bin")
+io.open(p + ".part", "wb").write(BODY[:1000])
+HITS.clear()
+ok = D.stream_download(BASE + "/always416", p, expected_size=len(BODY), retries=0)
+check("a server that refuses even that is given up on, once, not asked forever",
+      ok is False and HITS.get("/always416") == 2 and not os.path.exists(p), str(HITS))
+
+p = dest("badrange.bin")
+io.open(p + ".part", "wb").write(BODY[:1000])
+HITS.clear()
+ok = D.stream_download(BASE + "/badrange", p, expected_size=len(BODY))
+check("a resume answered from another place than asked is not spliced onto the .part",
+      ok is True and read(p) == BODY and HITS.get("/badrange") == 2, str((HITS, len(read(p) or b""))))
+
+p = dest("toobig.bin")
+HITS.clear()
+ok = D.stream_download(BASE + "/toobig", p, expected_size=len(BODY))
+check("a server sending more than the manifest's size is cut off, and not asked again",
+      ok is False and HITS.get("/toobig") == 1 and not os.path.exists(p)
+      and not os.path.exists(p + ".part"), str(HITS))
+
+# ---------------------------------------------------------------- 2.22
+print("\n 2.22  a Nexus request that fails is an answer, never a crash")
+# Every caller branches on the error _get_json hands back. A reset connection,
+# a body cut short, a reply that is not JSON or a Retry-After given as a date
+# used to raise out of it instead, and end a two-hour assist session.
+SLEPT = []
+real_time = D.time
+D.time = types.SimpleNamespace(time=real_time.time, monotonic=real_time.monotonic,
+                               sleep=SLEPT.append)
+nx = D.NexusClient("k")
+try:
+    HITS.clear()
+    data, err = nx._get_json(BASE + "/nx503")
+    check("a 503 is waited out and asked again", data == {"ok": 1} and err is None
+          and HITS.get("/nx503") == 3, str((data, err, HITS)))
+    SLEPT.clear()
+    data, err = nx._get_json(BASE + "/nx429date")
+    check("a 429 whose Retry-After is a date is waited out, not a crash",
+          data == {"ok": 1} and SLEPT[:1] == [1], str((data, err, SLEPT)))
+    for path, label in (("/nxjunk", "a reply that is not JSON"),
+                        ("/nxreset", "a connection dropped without a word")):
+        HITS.clear()
+        try:
+            data, err = nx._get_json(BASE + path)
+            raised = None
+        except Exception as e:                   # what used to happen
+            data, err, raised = None, None, e
+        check("%s: retried, then an error handed back" % label,
+              raised is None and data is None and err is not None and HITS.get(path) == 4,
+              str((raised, err, HITS)))
+    HITS.clear()
+    data, err = nx._get_json(BASE + "/nx404")
+    check("a definite answer, a 404, goes straight back", data is None
+          and getattr(err, "code", None) == 404 and HITS.get("/nx404") == 1, str((err, HITS)))
+finally:
+    D.time = real_time
+check("Retry-After read as seconds, as a date, or not at all, and never past five minutes",
+      [D._retry_after(h) for h in ({"Retry-After": "120"},
+                                   {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"},
+                                   {"Retry-After": "soon"}, {}, None, {"Retry-After": "99999"})]
+      == [120, 1, None, None, None, 300])
+
+# ---------------------------------------------------------------- 2.23
+print("\n 2.23  a redirect is followed only to a web address, and leaves the API key behind")
+# Checking the address a fetch starts from is not enough: urllib follows a
+# redirect anywhere, ftp: included, and copies every header onto it - the
+# Nexus API key with it, to whatever host the redirect names.
+import urllib.error
+srv2 = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+threading.Thread(target=srv2.serve_forever, daemon=True).start()
+REDIRECTS.update({"/to-file": FILE_URL, "/to-ftp": "ftp://127.0.0.1:1/x.7z",
+                  "/to-other": "http://127.0.0.1:%d/echo" % srv2.server_port, "/to-same": "/echo"})
+for path in ("/to-file", "/to-ftp"):
+    p = dest("redirected.bin")
+    ok = D.stream_download(BASE + path, p, expected_size=os.path.getsize(secret), retries=0)
+    check("a redirect to %s: is refused, and nothing is written" % REDIRECTS[path].split(":")[0],
+          ok is False and not os.path.exists(p) and not os.path.exists(p + ".part"))
+nx = D.NexusClient("secret-key-for-the-test")
+data, err = nx._get_json(BASE + "/to-other")
+check("the Nexus API key does not follow a redirect to another host",
+      isinstance(data, dict) and "apikey" not in data and "user-agent" in data, str((data, err)))
+data, err = nx._get_json(BASE + "/to-same")
+check("  while a redirect on the same host keeps it",
+      isinstance(data, dict) and data.get("apikey") == "secret-key-for-the-test", str((data, err)))
+req = urllib.request.Request(BASE + "/to-other", headers={
+    "Authorization": "Bearer x", "Cookie": "a=b", "X-Other": "kept"})
+with D.wj_paths.urlopen(req, timeout=10) as r:
+    got = json.load(r)
+check("  nor do Authorization or a cookie, while other headers go along",
+      "authorization" not in got and "cookie" not in got and got.get("x-other") == "kept", str(got))
+try:
+    D.wj_paths.urlopen(FILE_URL, timeout=10)
+    refused = False
+except urllib.error.URLError:
+    refused = True
+check("wj_paths.urlopen refuses a file: address handed to it directly", refused)
+srv2.shutdown()
+
+# ---------------------------------------------------------------- 2.24
+print("\n 2.24  a stop request ends a transfer at its next chunk, and keeps what it has")
+p = dest("stop.bin")
+D._STOP.set()
+try:
+    t0 = time.time()
+    ok = D.stream_download(BASE + "/hold", p, expected_size=len(BIG))
+    took = time.time() - t0
+finally:
+    D._STOP.clear()
+check("a transfer asked to stop gives up at once, without retrying",
+      ok is False and took < HOLD + 3, "%.1fs" % took)
+check("  and nothing is published under the name", not os.path.exists(p))
+
+
+class Closable:
+    """The assist window, as far as a stop is concerned."""
+    def __init__(self):
+        self.closed = threading.Event()
+
+    def close(self):
+        self.closed.set()
+
+
+win = Closable()
+stop_file = os.path.join(TMP, "stop-now")
+if os.path.exists(stop_file):
+    os.remove(stop_file)
+D._ACTIVE_OPENER = win           # so the watcher closes it, rather than interrupting this suite
+try:
+    D.watch_stop_file(stop_file, interval=0.05)
+    io.open(stop_file, "w").write("stop")
+    win.closed.wait(5)
+    if not win.closed.is_set():
+        os.remove(stop_file)     # never fires later, with no window to close
+    seen = (win.closed.is_set(), D._STOP.is_set(), D._CDN.STOP.is_set())
+finally:
+    D._ACTIVE_OPENER = None
+    D._STOP.clear()
+    D._CDN.STOP.clear()
+check("the window's stop file closes the assist window, as a person closing it would", seen[0])
+check("  and asks every transfer to stop, the CDN's included", seen[1] and seen[2], str(seen))
+check("  and is removed once read", not os.path.exists(stop_file))
+
+# ---------------------------------------------------------------- 2.25
+print("\n 2.25  assist mode: a second click, a click ahead, and no click at all")
+
+
+def send_click(mod, fid):
+    try:
+        port = int(io.open(os.path.join(TMP, D.NXM_PORT_FILE)).read())
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(f"nxm://skyrimspecialedition/mods/{mod}/files/{fid}?key=k&expires=1\n".encode())
+    except (OSError, ValueError):
+        pass                                     # the run is over: nobody listens
+
+
+class ScriptedOpener:
+    """Shows pages like the window does, and clicks as it is told: for each
+    page, by mod id, the (delay, mod, file) clicks that follow it."""
+    def __init__(self, script):
+        self.closed = threading.Event()
+        self.script = script
+        self.shown = []
+        self.was_active = []
+
+    def show(self, url, banner=""):
+        self.shown.append(url)
+        self.was_active.append(D._ACTIVE_OPENER is self)
+        mod = int(re.search(r"mods/(\d+)\?tab=files", url).group(1))
+        for delay, m, f in self.script.get(mod, []):
+            threading.Timer(delay, send_click, (m, f)).start()
+        return True
+
+
+saved_assist = (D.register_nxm, D.unregister_nxm, D.resolve_browser_domain, D.CLICK_AHEAD,
+                D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW, D.NxmListener)
+D.register_nxm = lambda sd: True
+D.unregister_nxm = lambda sd: None
+D.resolve_browser_domain = lambda nexus, a, learned: ("skyrimspecialedition", None)
+D.CLICK_AHEAD, D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW = False, 10, False
+try:
+    for n in ("nx1.bin", "nx2.bin"):
+        dest(n)
+    nx_items[:] = [nx_item("nx1.bin", "/ok", 1, len(BODY)), nx_item("nx2.bin", "/spaces", 2, len(BODY))]
+    HITS.clear()
+    op = ScriptedOpener({1: [(0.2, 1, 10), (0.6, 1, 10)],     # a click, and another on the same page
+                         2: [(1.2, 2, 20)]})                   # the next page's own, a moment later
+    res = {"done": 0, "failed": 0, "failures": []}
+    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args, opener=op)
+    check("a second click on one page is not taken for the next page's",
+          res["done"] == 2 and res["failed"] == 0 and len(op.shown) == 2, str((res, op.shown)))
+    check("  and the file is fetched once", HITS.get("/ok") == 1 and HITS.get("/spaces") == 1,
+          str(HITS))
+    check("  while the pages were up, a stop would have reached the window",
+          op.was_active == [True, True] and D._ACTIVE_OPENER is None, str(op.was_active))
+
+    for n in ("nx1.bin", "nx2.bin"):
+        dest(n)
+    op = ScriptedOpener({1: [(0.2, 2, 20), (0.6, 1, 10)]})    # the later file clicked first
+    res = {"done": 0, "failed": 0, "failures": []}
+    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args, opener=op)
+    check("a click for a later file is taken at once, and the page still waits for its own",
+          res["done"] == 2 and res["failed"] == 0 and len(op.shown) == 1, str((res, op.shown)))
+
+    for n in ("nx1.bin", "nx2.bin"):
+        dest(n)
+    nx_items[:] = [nx_item("nx1.bin", "/ok", 1, len(BODY)), nx_item("nx2.bin", "/late", 2, len(BODY))]
+    D.NXM_CLICK_TIMEOUT = 2
+    op = ScriptedOpener({1: [(0.2, 2, 20), (0.5, 1, 10)]})     # the later file, then this page's
+    res = {"done": 0, "failed": 0, "failures": []}
+    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args, opener=op)
+    check("  and the time its download takes is not taken from this page's wait",
+          res["done"] == 2 and res["failed"] == 0, str(res))
+    D.NXM_CLICK_TIMEOUT = 10
+    nx_items[:] = [nx_item("nx1.bin", "/ok", 1, len(BODY)), nx_item("nx2.bin", "/spaces", 2, len(BODY))]
+
+    dest("nx1.bin")
+    nx_items[:] = [nx_item("nx1.bin", "/ok", 1, len(BODY))]
+    D.NXM_CLICK_TIMEOUT = 1
+    res = {"done": 0, "failed": 0, "failures": []}
+    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args, opener=ScriptedOpener({}))
+    check("a page nobody clicks is a failure the run counts, with the reason",
+          res["failed"] == 1 and res["done"] == 0
+          and any("no nxm click captured" in (r or "") for _n, r in res["failures"]), str(res))
+
+    calls = []
+    D.register_nxm = lambda sd: calls.append("register") or True
+    D.unregister_nxm = lambda sd: calls.append("unregister")
+
+    def no_listener(run_dir):
+        raise OSError(10048, "Only one usage of each socket address is normally permitted")
+    D.NxmListener = no_listener
+    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args, opener=ScriptedOpener({}))
+    check("a click listener that cannot start hands the nxm handler straight back",
+          calls == ["register", "unregister"], str(calls))
+finally:
+    (D.register_nxm, D.unregister_nxm, D.resolve_browser_domain, D.CLICK_AHEAD,
+     D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW, D.NxmListener) = saved_assist
+
+# ---------------------------------------------------------------- 2.26
+print("\n 2.26  the nxm:// handler: taken, handed back, and recovered after a crash")
+# Against a registry of our own: no suite touches this account's registry.
+
+
+class FakeRegistry:
+    """winreg over a dict: one hive, string values."""
+    HKEY_CURRENT_USER = "HKCU"
+    REG_SZ = 1
+    KEY_READ, KEY_WRITE = 1, 2
+
+    class Key:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def __init__(self):
+        self.keys = {}
+
+    def OpenKey(self, root, path, reserved=0, access=0):
+        if path.lower() not in self.keys:
+            raise FileNotFoundError(2, "The system cannot find the file specified", path)
+        return self.Key(path)
+
+    def CreateKey(self, root, path):
+        parts = path.split("\\")
+        for i in range(1, len(parts) + 1):
+            self.keys.setdefault("\\".join(parts[:i]).lower(), {})
+        return self.Key(path)
+
+    def QueryValueEx(self, key, name):
+        values = self.keys.get(key.path.lower(), {})
+        if name not in values:
+            raise FileNotFoundError(2, "The system cannot find the file specified", name)
+        return values[name], self.REG_SZ
+
+    def SetValueEx(self, key, name, reserved, kind, value):
+        self.keys[key.path.lower()][name] = value
+
+    def EnumKey(self, key, index):
+        prefix = key.path.lower() + "\\"
+        subs = sorted({k[len(prefix):].split("\\")[0] for k in self.keys if k.startswith(prefix)})
+        if index >= len(subs):
+            raise OSError(259, "No more data is available")
+        return subs[index]
+
+    def DeleteKey(self, root, path):
+        low = path.lower()
+        if any(k.startswith(low + "\\") for k in self.keys):
+            raise PermissionError(5, "Access is denied", path)
+        if low not in self.keys:
+            raise FileNotFoundError(2, "The system cannot find the file specified", path)
+        del self.keys[low]
+
+    def command(self):
+        return self.keys.get(D._NXM_CMD_KEY.lower(), {}).get(None)
+
+    def set_command(self, cmd):
+        with self.CreateKey(self.HKEY_CURRENT_USER, D._NXM_CMD_KEY) as k:
+            self.SetValueEx(k, None, 0, self.REG_SZ, cmd)
+
+
+WABBAJACK = '"C:\\Wabbajack\\Wabbajack.exe" "%1"'
+VORTEX = '"C:\\Vortex\\Vortex.exe" -d "%1"'
+OURS_ELSEWHERE = '"C:\\Python\\pythonw.exe" "D:\\Elsewhere\\wj_downloader.py" --nxm "%1"'
+OURS_BUILT = '"D:\\WJ\\WabbajackWizard-console.exe" --wj-stage=wj_downloader --nxm "%1"'
+run_dir = os.path.join(TMP, "nxm-run")
+shutil.rmtree(run_dir, ignore_errors=True)
+os.makedirs(run_dir)
+backup = os.path.join(run_dir, D.NXM_PREV_HANDLER)
+reg = FakeRegistry()
+saved_reg = (D.winreg, D._HAVE_WINREG, D._associations_changed)
+# Patched in before anything is called, so that even a version of the code
+# that ignored WJ_NO_REGISTRY would reach only this stand-in.
+D.winreg, D._HAVE_WINREG, D._associations_changed = reg, True, (lambda: None)
+no_registry = os.environ.get("WJ_NO_REGISTRY")
+try:
+    reg.set_command(WABBAJACK)
+    check("with WJ_NO_REGISTRY set, as every suite sets it, the handler is neither taken nor handed back",
+          no_registry and D.register_nxm(run_dir) is False and D.unregister_nxm(run_dir) is False
+          and reg.command() == WABBAJACK and not os.path.exists(backup), str(reg.command()))
+    os.environ.pop("WJ_NO_REGISTRY", None)       # from here the registry is the stand-in
+    check("our handler is known however it was started, and nothing else is taken for it",
+          all(D._is_our_handler(c) for c in (D.nxm_handler_command(), OURS_ELSEWHERE, OURS_BUILT))
+          and not any(D._is_our_handler(c) for c in (
+              WABBAJACK, VORTEX, None, "", '"C:\\x\\wj_downloader.py" --list y')))
+    reg.set_command(WABBAJACK)
+    check("taking the handler saves Wabbajack's", D.register_nxm(run_dir) is True
+          and D._is_our_handler(reg.command()) and read(backup, True) == WABBAJACK, str(reg.command()))
+    D.register_nxm(run_dir)
+    check("  and taking it twice does not save ours over it", read(backup, True) == WABBAJACK)
+    check("handing it back restores Wabbajack's, and spends the backup",
+          D.unregister_nxm(run_dir) is True and reg.command() == WABBAJACK and not os.path.exists(backup))
+
+    D.register_nxm(run_dir)
+    reg.set_command(OURS_ELSEWHERE)              # a run from another copy took it meanwhile
+    D.register_nxm(run_dir)
+    check("taken again from another copy of this tool, Wabbajack's is still the one kept",
+          read(backup, True) == WABBAJACK, str(read(backup, True)))
+    D.unregister_nxm(run_dir)
+    check("  and it is Wabbajack's that comes back", reg.command() == WABBAJACK, str(reg.command()))
+
+    D.register_nxm(run_dir)
+    reg.set_command(VORTEX)                      # a mod manager registered itself meanwhile
+    D.unregister_nxm(run_dir)
+    check("a handler another program registered since is left exactly as it is",
+          reg.command() == VORTEX and not os.path.exists(backup), str(reg.command()))
+
+    reg.set_command(D.nxm_handler_command())
+    io.open(backup, "w", encoding="utf-8").write(OURS_ELSEWHERE)   # as older versions saved it
+    D.unregister_nxm(run_dir)
+    check("a backup that is ourselves is never 'restored': the handler is removed instead",
+          reg.command() is None and "software\\classes\\nxm" not in reg.keys, str(reg.keys))
+
+    reg.set_command(WABBAJACK)
+    D.register_nxm(run_dir)                      # a run took the handler and was killed
+    os.environ["WJ_NO_REGISTRY"] = "1"
+    check("with WJ_NO_REGISTRY set, recovery touches nothing either",
+          D.recover_nxm_handler(run_dir) is False and D._is_our_handler(reg.command()))
+    del os.environ["WJ_NO_REGISTRY"]
+    lst = D.NxmListener(run_dir)                 # a session listening for clicks right now
+    try:
+        check("a handler a live session holds is not taken from it",
+              D.recover_nxm_handler(run_dir) is False and D._is_our_handler(reg.command()))
+    finally:
+        lst.close()
+    check("one a run that died left behind is handed back at the next start",
+          D.recover_nxm_handler(run_dir) is True and reg.command() == WABBAJACK, str(reg.command()))
+    check("  and another program's is never touched",
+          D.recover_nxm_handler(run_dir) is False and reg.command() == WABBAJACK)
+    D.register_nxm(run_dir, keep=True)           # --register-nxm, to collect clicks for --nxm-file
+    check("a handler taken on purpose with --register-nxm is not taken back at a start",
+          D.recover_nxm_handler(run_dir) is False and D._is_our_handler(reg.command()))
+    D.unregister_nxm(run_dir)
+    check("  until --unregister-nxm hands it back, and the note goes with it",
+          reg.command() == WABBAJACK and not os.path.exists(os.path.join(run_dir, D.NXM_KEPT_FILE)))
+    check("with no backup to write, the handler is not taken at all",
+          D.register_nxm(os.path.join(run_dir, "no-such-folder")) is False
+          and reg.command() == WABBAJACK, str(reg.command()))
+finally:
+    D.winreg, D._HAVE_WINREG, D._associations_changed = saved_reg
+    if no_registry is not None:
+        os.environ["WJ_NO_REGISTRY"] = no_registry
 
 srv.shutdown()
 sys.exit(summary())

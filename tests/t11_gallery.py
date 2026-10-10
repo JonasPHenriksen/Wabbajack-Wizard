@@ -552,5 +552,92 @@ except Exception as e:
 check("  and so does the feed reader",
       isinstance(got, Exception) and "web address" in str(got), repr(got)[:200])
 
+# ---------------------------------------------------------------- 11.16
+print("\n 11.16  a reply that is not JSON is never cached")
+# Found 2026-10-10: a captive portal's page, or an upstream file with a typo
+# in it, was cached first and parsed after - for six hours, or fourteen days
+# for a report - and every read of it raised a ValueError stage 1 did not catch.
+fresh_box()
+G.http_bytes = lambda rel, url=None: b"<html>Sign in to the hotel wifi</html>"
+try:
+    try:
+        G.fetch_json(G.SUMMARY_PATH)
+        raised = None
+    except Exception as e:
+        raised = e
+    check("with nothing cached: a GalleryError, not a ValueError",
+          isinstance(raised, G.GalleryError), repr(raised))
+    check("  and the page is not cached", not os.path.exists(G.cache_file(G.SUMMARY_PATH)))
+    seed_cache(G.SUMMARY_PATH, [summ_row("r/a")])
+    os.utime(G.cache_file(G.SUMMARY_PATH), (0, 0))              # stale, so it is fetched
+    got = G.load_summary()
+    check("with an older copy cached: the older copy is used",
+          list(got) == ["r/a"], str(list(got)))
+    check("  and is still what the cache holds", list(G.load_summary()) == ["r/a"])
+finally:
+    G.http_bytes = REAL_HTTP
+
+# ---------------------------------------------------------------- 11.17
+print("\n 11.17  one game under two names protects one pool")
+check("the feeds' 'vtmb' is the pool of a manifest's VampireTheMasqueradeBloodlines",
+      G.in_pools("vtmb", {CFG.folder_key("VampireTheMasqueradeBloodlines")}))
+check("  and the other way round",
+      G.in_pools("VampireTheMasqueradeBloodlines", {CFG.folder_key("VTMB")}))
+check("  while two games with different names stay apart",
+      not G.in_pools("fallout4", {CFG.folder_key("Fallout4VR")}))
+check("a feed entry with no game is labelled, not None", G.game_label(None) == "?"
+      and G.game_label("") == "?")
+
+# ---------------------------------------------------------------- 11.18
+print("\n 11.18  a report is read for the build the feed publishes, or is not counted")
+fresh_box()
+feeds = {"r/new": dict(feed_entry("r", "new", "fallout4"), hash="NEWHASH="),
+         "r/odd": feed_entry("r", "odd", "fallout4")}
+summary_rows = {k: summ_row(k) for k in feeds}
+old_rep = dict(rep("new", "1.0", [("old-build.7z", 10, "nexus", "Valid")]), ModListHash="OLDHASH=")
+new_rep = dict(rep("new", "2.0", [("new-build.7z", 20, "nexus", "Valid")]), ModListHash="NEWHASH=")
+seed_cache(G.report_rel("r/new"), old_rep)
+odd = rep("odd", "1.0", [("fine.7z", 5, "nexus", "Valid")])
+odd["Archives"].append({"Status": "Valid", "Original": {"Size": 3}})        # no Name: unreadable
+seed_cache(G.report_rel("r/odd"), odd)
+fetched = []
+
+
+def serve_new(rel, url=None):
+    fetched.append(rel)
+    return json.dumps(new_rep).encode()
+
+
+G.http_bytes = serve_new
+try:
+    behind = []
+    want, checked, unchecked = G.published_builds({"fallout4"}, feeds, summary_rows, WJ,
+                                                  behind=behind)
+finally:
+    G.http_bytes = REAL_HTTP
+check("a cached report for an older build is fetched again",
+      fetched == [G.report_rel("r/new")], str(fetched))
+check("  and the new build's archives are what it protects",
+      "new-build.7z" in want and "old-build.7z" not in want, str(sorted(want)))
+check("  the list counts as checked, and is not 'behind' once caught up",
+      behind == [] and "r/new" not in unchecked, str((behind, unchecked)))
+check("a report with entries this version cannot read is a gap, not a list that wants less",
+      "r/odd" in unchecked and "cannot be read" in unchecked["r/odd"]
+      and "fine.7z" not in want, str(unchecked))
+check("the shape is counted as the tooling reads it",
+      G.report_unreadable(odd) == 1 and G.report_unreadable(new_rep) == 0
+      and G.report_unreadable({"Archives": ["not an entry", {"Original": "x"}]}) == 2)
+
+seed_cache(G.report_rel("r/new"), old_rep)
+G.http_bytes = lambda rel, url=None: json.dumps(old_rep).encode()   # the validator is behind
+try:
+    behind = []
+    want, checked, unchecked = G.published_builds({"fallout4"}, {"r/new": feeds["r/new"]},
+                                                  summary_rows, WJ, behind=behind)
+finally:
+    G.http_bytes = REAL_HTTP
+check("when the validator has not caught up, its last report is used, and the list named",
+      behind == ["r/new"] and "old-build.7z" in want and checked == 1, str((behind, want)))
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

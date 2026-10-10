@@ -19,10 +19,11 @@ import copy
 import json
 import os
 import re
+import threading
 
 import wj_paths
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 APP_NAME = "WabbajackWizard"
 USER_AGENT = f"{APP_NAME}/{__version__}"
 
@@ -296,6 +297,11 @@ CHOICES = {
     "THEME": ("light", "dark"),
 }
 
+# The settings a running process keeps until its next start, whatever is
+# saved: they move where everything is, and the downloader and the sorter
+# fix theirs when they start (save_settings).
+RESTART_SETTINGS = ("ARCHIVE_ROOT", "MANIFEST_DIR")
+
 # The text settings that may be null, each of which says what null means:
 # auto-detect, the most recently updated list, no notifications. Every other
 # text setting has to name something, and a null or empty one keeps its
@@ -316,9 +322,23 @@ FOLDER_SETTINGS = ("UNMANAGED_FOLDER", "TRASH_FOLDER")
 _BAD_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 # Names Windows keeps for devices, with or without an extension: a folder
-# called NUL is no folder at all.
-_DEVICE_NAMES = ({"con", "prn", "aux", "nul"}
-                 | {f"{p}{n}" for p in ("com", "lpt") for n in range(1, 10)})
+# called NUL is no folder at all. The same set os.path.isreserved() knows
+# (Python 3.13), which this tool cannot assume: CONIN$ and CONOUT$, and COM
+# and LPT with the superscript digits Windows also accepts.
+_DEVICE_NAMES = ({"con", "prn", "aux", "nul", "conin$", "conout$"}
+                 | {f"{p}{n}" for p in ("com", "lpt") for n in "123456789¹²³"})
+
+# A setting that is a whole number of days, and what it may be. A trash kept
+# 0 days is emptied at the next start, which nobody means by typing 0; and a
+# span past the year 3000 is more than Windows' clock functions will take.
+INT_RANGES = {"TRASH_KEEP_DAYS": (1, 3650)}
+
+
+def is_device_name(name):
+    """Is `name` one Windows keeps for a device? Judged as Windows does: by
+    the part before the first dot, trailing spaces dropped - 'NUL .txt' is
+    NUL as surely as 'NUL' is."""
+    return str(name).split(".")[0].rstrip(" ").lower() in _DEVICE_NAMES
 
 
 def plain_name_problem(name):
@@ -350,10 +370,53 @@ def folder_setting_problem(name):
     why = plain_name_problem(name)
     if why:
         return why
-    if name.split(".")[0].lower() in _DEVICE_NAMES:
+    if is_device_name(name):
         return "it is a name Windows keeps for a device"
     if name.lower() in {p.lower() for p in POOL_FOLDERS}:
         return f"it is the {name} pool itself"
+    return None
+
+
+def archive_root_problem(value):
+    """Why `value` cannot be ARCHIVE_ROOT, or None if it can.
+
+    Everything under the archive root is judged by this tooling: each folder
+    in it is read as a game's pools, a stray in one is offered for parking,
+    and <folder>/<TRASH_FOLDER> anywhere in it is emptied on a timer. So it
+    may not be a drive or share root, the tools folder itself, or a folder
+    holding the tools folder - each of those makes this tooling's own files,
+    or the rest of a disk, into pools. Checked as it would resolve, so
+    '..' is refused as surely as 'C:\\' is."""
+    if not isinstance(value, str) or not value.strip():
+        return "it is empty"
+    path = value if looks_absolute(value) else os.path.join(
+        wj_paths.app_dir(__file__), value)
+    full = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+    if not os.path.splitdrive(full)[1].strip("\\/"):
+        return "it is the root of a drive or a share"
+    tools = os.path.normcase(os.path.abspath(wj_paths.app_dir(__file__)))
+    if full == tools:
+        return "it is the tools folder itself"
+    if tools.startswith(full.rstrip("\\/") + os.sep):
+        return "the tools folder is inside it"
+    return None
+
+
+def list_name_problem(stem):
+    """Why a manifest named `stem` cannot be a modlist here, or None if it can.
+
+    A list's folder is named after its manifest, so the name has to be a
+    plain folder name that is not a pool. And it is judged as Windows will
+    read it: Windows drops a trailing dot, so 'Master.' opens Master, and a
+    manifest called 'Master..wabbajack' slipped past every check that
+    compared 'master.' with 'master' - deleting it emptied the Master pool."""
+    why = plain_name_problem(stem)
+    if why:
+        return why
+    if is_device_name(stem):
+        return "it is a name Windows keeps for a device"
+    if str(stem).lower() in reserved_list_names():
+        return "the name is reserved for a pool folder, so its folder IS that pool"
     return None
 
 
@@ -371,8 +434,9 @@ def current_settings():
     return {k: copy.deepcopy(globals()[k]) for k in USER_SETTINGS}
 
 
-def apply_settings(values):
-    """Set the module's settings from a dict. Returns a list of problems;
+def apply_settings(values, into=None):
+    """Set the module's settings from a dict - or, given `into`, that dict's
+    entries instead, leaving the module alone. Returns a list of problems;
     a setting with a problem keeps its current value.
 
     Every value is checked for its type, and the folder settings for what
@@ -380,7 +444,7 @@ def apply_settings(values):
     is refused here, and so is a combination of folders that would make one
     folder two things at once (see _check_layout)."""
     problems = []
-    g = globals()
+    g = globals() if into is None else into
     for key, value in values.items():
         if key not in USER_SETTINGS:
             problems.append(f"{key}: not a setting, ignored")
@@ -432,6 +496,10 @@ def apply_settings(values):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 problems.append(f"{key}: expected a whole number, kept the default")
                 continue
+            lo, hi = INT_RANGES.get(key, (0, None))
+            if value < lo or (hi is not None and value > hi):
+                problems.append(f"{key}: must be from {lo} to {hi}, kept the default")
+                continue
             g[key] = value
         else:                                   # a string, or None
             if value is not None and not isinstance(value, str):
@@ -450,11 +518,17 @@ def apply_settings(values):
                     problems.append(f"{key}: {value!r} cannot be used: {why}; "
                                     f"kept the default")
                     continue
+            if key == "ARCHIVE_ROOT":
+                why = archive_root_problem(value)
+                if why:
+                    problems.append(f"{key}: {value!r} cannot be used: {why}; "
+                                    f"kept the default")
+                    continue
             g[key] = value
-    return problems + _check_layout()
+    return problems + _check_layout(g)
 
 
-def _check_layout():
+def _check_layout(g=None):
     """The folder settings against each other, once each has passed alone.
 
     Each rule is one a folder would otherwise break by being two things at
@@ -463,7 +537,7 @@ def _check_layout():
     installer's. Whichever setting was moved off its default is the one put
     back, the trash first when both were. Returns the problems, and leaves
     the settings consistent."""
-    g = globals()
+    g = globals() if g is None else g
     problems = []
     for _ in range(5):
         trash, unmanaged = g["TRASH_FOLDER"], g["UNMANAGED_FOLDER"]
@@ -491,22 +565,81 @@ def _check_layout():
     return problems
 
 
-def load_settings(path=None):
-    """Overlay wj_settings.json onto the defaults. Returns (values, problems)."""
+def read_settings_file(path=None):
+    """(data, problem): what wj_settings.json holds right now, unapplied,
+    and why it could not be read, if it could not. A missing file is ({},
+    None): every setting at its default is a perfectly good state."""
     p = path or settings_path()
     if not os.path.isfile(p):
-        return {}, []
+        return {}, None
     try:
         with open(p, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, ValueError) as e:
-        return {}, [f"{os.path.basename(p)} could not be read ({e}); defaults in use"]
+        return {}, f"{os.path.basename(p)} could not be read ({e})"
     if not isinstance(data, dict):
-        return {}, [f"{os.path.basename(p)} is not a JSON object; defaults in use"]
+        return {}, f"{os.path.basename(p)} is not a JSON object"
+    return data, None
+
+
+def load_settings(path=None):
+    """Overlay wj_settings.json onto the defaults. Returns (values, problems)."""
+    data, problem = read_settings_file(path)
+    if problem:
+        return {}, [problem + "; defaults in use"]
     return data, apply_settings(data)
 
 
-def save_settings(values, path=None):
+# One change to the settings file at a time, in this process: the window's
+# switches run on its main thread while a job - folding a game into another's
+# pool - writes from a worker, and each reads the file, changes it and writes
+# it back. Two of those at once dropped the change of whichever read first.
+_SETTINGS_LOCK = threading.RLock()
+
+
+def update_settings(change, path=None):
+    """Change some settings, and only those, in wj_settings.json.
+
+    `change` is a dict of the settings to change, or a function given every
+    setting as the file says it now and returning that dict - for a change
+    made relative to what is there, such as one more entry in HIDDEN. The
+    file is read again first, not taken from memory, so a value edited in
+    it by hand since this process started - or written by another window -
+    is kept rather than overwritten with the value this process happened to
+    start with. A key the file holds that this version does not know is
+    kept as well. Returns what save_settings() does; the process is left
+    applying exactly what was written."""
+    with _SETTINGS_LOCK:
+        return _update_settings(change, path)
+
+
+def _update_settings(change, path):
+    p = path or settings_path()
+    data, problem = read_settings_file(p)
+    if problem:
+        # Not the user's settings any more, only a broken file: kept beside
+        # under another name - one of its own, never over an earlier one -
+        # and the settings this process runs with are what the change is
+        # made to.
+        try:
+            wj_paths.move_file(p, wj_paths.unique_path(p + ".unreadable"))
+        except OSError as e:
+            raise OSError(f"{problem}, and it could not be kept aside to write a new "
+                          f"one ({e})") from e
+        fresh = current_settings()
+    else:
+        # What the file says, worked out aside: the running settings are not
+        # touched until the result is saved.
+        scratch = copy.deepcopy(_DEFAULTS)
+        apply_settings({k: v for k, v in data.items() if k in USER_SETTINGS}, into=scratch)
+        fresh = {k: scratch[k] for k in USER_SETTINGS}
+    changes = change(copy.deepcopy(fresh)) if callable(change) else dict(change)
+    merged = dict(fresh)
+    merged.update(changes or {})
+    return save_settings(merged, path=p, keep_unknown=data)
+
+
+def save_settings(values, path=None, keep_unknown=None):
     """Write the given settings to wj_settings.json and apply them.
 
     Only keys that differ from the shipped default are written, so the file
@@ -515,15 +648,30 @@ def save_settings(values, path=None):
 
     The values are applied before anything is written, and what is written
     is what was applied: a value refused here is left out of the file rather
-    than saved to be refused again at every start. Returns (path, problems),
-    the problems naming each value that kept its default."""
+    than saved to be refused again at every start. Keys in `keep_unknown`
+    that are not settings of this version are written back as they were.
+    Returns (path, problems), the problems naming each value that kept its
+    default. Prefer update_settings(), which starts from the file.
+
+    The settings are worked out aside, over the defaults - a key left out
+    goes back to its default - and the running ones are set only once the
+    file is written, each once: they used to be reset to their defaults and
+    applied again, and another thread looking in between saw the defaults.
+    The two paths, ARCHIVE_ROOT and MANIFEST_DIR, are written and not set at
+    all: they take effect at the next start, as the Settings tab says. Set
+    at once, they moved wj_config's view of the archive root while the
+    downloader and the sorter, which plan with their own, stayed put - two
+    roots in one process."""
+    with _SETTINGS_LOCK:
+        return _save_settings(values, path, keep_unknown)
+
+
+def _save_settings(values, path, keep_unknown):
     p = path or settings_path()
-    before = current_settings()
-    # Reset to defaults first, so a key left out goes back to its default
-    # rather than lingering at the old value.
-    apply_settings(_DEFAULTS)
-    problems = apply_settings({k: values[k] for k in USER_SETTINGS if k in values})
-    applied = current_settings()
+    scratch = copy.deepcopy(_DEFAULTS)
+    problems = apply_settings({k: values[k] for k in USER_SETTINGS if k in values},
+                              into=scratch)
+    applied = {k: scratch[k] for k in USER_SETTINGS}
     out = {}
     for key in USER_SETTINGS:
         if key not in values:
@@ -541,7 +689,12 @@ def save_settings(values, path=None):
         if v == (sorted(d) if isinstance(d, (set, frozenset)) else d):
             continue
         out[key] = v
-    tmp = p + ".tmp"
+    for key, v in (keep_unknown or {}).items():
+        if key not in USER_SETTINGS and key not in out:
+            out[key] = v
+    # One temporary name per writer: the window's switches and a job saving a
+    # pool fold could otherwise both be writing the same .tmp at once.
+    tmp = f"{p}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2, sort_keys=True)
@@ -550,13 +703,16 @@ def save_settings(values, path=None):
     except OSError:
         # Not saved, so not applied either: the running process keeps
         # agreeing with the file.
-        apply_settings(_DEFAULTS)
-        apply_settings(before)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         raise
+    g = globals()
+    for key in USER_SETTINGS:
+        if key not in RESTART_SETTINGS:
+            g[key] = applied[key]
     return p, problems
-
-
-_LOADED, SETTINGS_PROBLEMS = load_settings()
 
 
 def looks_absolute(path):
@@ -569,11 +725,16 @@ def looks_absolute(path):
             or (len(path) > 1 and path[1] == ":"))
 
 
+def resolve_root(value):
+    """An ARCHIVE_ROOT value as an absolute path, anchored to this file's folder."""
+    if looks_absolute(value):
+        return value
+    return os.path.normpath(os.path.join(wj_paths.app_dir(__file__), value))
+
+
 def resolved_archive_root():
     """ARCHIVE_ROOT as an absolute path, anchored to this file's folder."""
-    if looks_absolute(ARCHIVE_ROOT):
-        return ARCHIVE_ROOT
-    return os.path.normpath(os.path.join(wj_paths.app_dir(__file__), ARCHIVE_ROOT))
+    return resolve_root(ARCHIVE_ROOT)
 
 
 def excluded_dirs():
@@ -606,7 +767,7 @@ def canonical_name(name):
 
     When two different builds share one filename and both have to survive in
     the same folder, the second is stored as 'Name~1.ext', 'Name~2.ext', ...
-    (see unique_path() in the sorter and the wizard). That suffix is storage
+    (see wj_paths.unique_path(), which every tool uses). That suffix is storage
     only: no manifest ever asks for a file by that name, so every place that
     matches a file on disk against a manifest has to look through it, or the
     suffixed copy is invisible to demand - never staged, never counted as
@@ -647,9 +808,12 @@ def valid_game_type(gt):
 
     Wabbajack serialises GameType from an enum, so it is always a plain word.
     But a .wabbajack is a zip anyone could have edited, and a value carrying a
-    path separator would put that list's pools outside the archive root."""
+    path separator would put that list's pools outside the archive root. Held
+    to the plain-name rule every other outside name is: 'Skyrim.' would open
+    the Skyrim folder while being counted as a pool of its own, and a list
+    sorted under it would see none of the Skyrim lists' demand."""
     gt = str(gt or "")
-    return bool(gt) and gt not in (".", "..") and not any(c in gt for c in "/\\:")
+    return plain_name_problem(gt) is None and not is_device_name(gt)
 
 
 def folder_key(game):
@@ -673,7 +837,53 @@ def game_label(game):
     return GAME_DISPLAY.get(game, game)
 
 
-def resolve_game_dirs(game):
-    """(output_base, master, shared) for one game."""
-    base = os.path.join(resolved_archive_root(), game_folder(game))
+def game_aliases(game):
+    """Every spelling, lowercased, that names the same game as `game`: those
+    GAME_DISPLAY gives the same label. The feeds call Vampire: The Masquerade
+    - Bloodlines 'vtmb' while a manifest can say VampireTheMasqueradeBloodlines,
+    and the two have to be read as one game when one protects the other's
+    archives."""
+    low = str(game or "").lower()
+    names = {low} if low else set()
+    label = next((v for k, v in GAME_DISPLAY.items() if k.lower() == low), None)
+    if label is not None:
+        names |= {k.lower() for k, v in GAME_DISPLAY.items() if v == label}
+    return names
+
+
+def resolve_game_dirs(game, root=None):
+    """(output_base, master, shared) for one game, under `root` or the
+    archive root. The one implementation: the downloader and the sorter pass
+    the root they planned with."""
+    base = os.path.join(root if root is not None else resolved_archive_root(),
+                        game_folder(game))
     return base, os.path.join(base, "Master"), os.path.join(base, "Shared")
+
+
+def next_start_settings():
+    """Every setting as the next start will apply it: the file as it is now,
+    over the defaults. The two RESTART_SETTINGS can differ from what this
+    process runs with, once a new value has been saved."""
+    data, problem = read_settings_file()
+    scratch = copy.deepcopy(_DEFAULTS)
+    if not problem:
+        apply_settings({k: v for k, v in data.items() if k in USER_SETTINGS}, into=scratch)
+    return {k: scratch[k] for k in USER_SETTINGS}
+
+
+# Last, so that every check apply_settings() makes is defined by now.
+_LOADED, SETTINGS_PROBLEMS = load_settings()
+
+# A download or a sort that a run, the window or the wizard starts works on
+# the archive root its parent started with, which WJ_ARCHIVE_ROOT carries
+# (wj_autoupdate.run_script) - not on one saved to the file since. A new
+# ARCHIVE_ROOT takes effect at the next start, and a child that read it
+# early would download and sort under one root while its parent planned,
+# measured and cleared Master under the other.
+if os.environ.get("WJ_ARCHIVE_ROOT"):
+    _why = archive_root_problem(os.environ["WJ_ARCHIVE_ROOT"])
+    if _why:
+        SETTINGS_PROBLEMS.append(f"WJ_ARCHIVE_ROOT {os.environ['WJ_ARCHIVE_ROOT']!r} cannot be "
+                                 f"used ({_why}); ARCHIVE_ROOT is {ARCHIVE_ROOT!r}")
+    else:
+        ARCHIVE_ROOT = os.environ["WJ_ARCHIVE_ROOT"]

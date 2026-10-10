@@ -102,7 +102,7 @@ box2.manifest(CFG.UNMANAGED_FOLDER, GAME, [("a.7z", 10, "nexus")])
 rc, out2 = box2.run("wj_sorter.py",
                     ["--game", GAME, "--cleanup-only", "--yes"], expect=1)
 check("a list called Unmanaged is refused outright",
-      "clashes with a reserved pool folder name" in out2, out2.strip()[-200:])
+      "reserved for a pool folder" in out2, out2.strip()[-200:])
 shutil.rmtree(BOX + "r", ignore_errors=True)
 
 # ---------------------------------------------------------------- 12.2
@@ -554,6 +554,108 @@ check("  every leftover is gone", not any(os.path.exists(p) for p in junk))
 check("  everything else is untouched", all(os.path.exists(p) for p in keep),
       str([p for p in keep if not os.path.exists(p)]))
 check("a second sweep finds nothing", W.leftover_report() == [], str(W.leftover_report()))
+
+# ---------------------------------------------------------------- 12.8
+print("\n 12.8  stage 5e asks twice, and only a yes deletes")
+# Found 2026-10-10: the second question passed a keyword its confirmation
+# does not take, so the step crashed - and behind the crash it tested the
+# answer for truth, which "no" and "change" both are.
+import builtins
+
+
+def drive(fn, answers, *a, **k):
+    it = iter(answers)
+
+    def fake(prompt=""):
+        try:
+            return next(it)
+        except StopIteration:
+            raise EOFError
+    real_input = builtins.input
+    builtins.input = fake
+    try:
+        return quiet(fn, *a, **k)
+    except W.Quit:
+        return None, "(quit)"
+    finally:
+        builtins.input = real_input
+
+
+def litter():
+    return [put("Thumbs.db"), put(os.path.join("runtime", ".DS_Store")),
+            put(os.path.join(box.manifests, "Gone_@@_gone.wabbajack.metadata"), b"{}")]
+
+
+left = litter()
+(res, text) = drive(W.leftover_step, ["d", "n"])
+check("'no' at the confirmation deletes nothing", res is False
+      and all(os.path.exists(p) for p in left) and "Left alone" in text, text[-300:])
+(res, text) = drive(W.leftover_step, ["d", "c", "1", "y"])
+check("'change' narrows it to the kinds picked, and only those go",
+      res is True and not os.path.exists(left[0]) and not os.path.exists(left[1])
+      and os.path.exists(left[2]), text[-400:])
+(res, text) = drive(W.leftover_step, ["d", "y"])
+check("'yes' deletes what is left", res is True and not any(os.path.exists(p) for p in left),
+      text[-300:])
+
+# ---------------------------------------------------------------- 12.9
+print("\n 12.9  the sweep stays in its own folders, and takes files only")
+outside = os.path.join(BOXROOT, "sb12-outside")
+shutil.rmtree(outside, ignore_errors=True)
+os.makedirs(outside)
+theirs = [os.path.join(outside, n) for n in ("Thumbs.db", "desktop.ini")]
+for p in theirs:
+    io.open(p, "wb").write(b"someone else's")
+link = os.path.join(box.tools, "linked")
+import subprocess
+made = subprocess.run(["cmd", "/c", "mklink", "/J", link, outside], capture_output=True,
+                      text=True, stdin=subprocess.DEVNULL).returncode == 0
+check("(a junction can be made here)", made)
+if made:
+    rows = W.leftover_report()
+    check("a junction is not followed: nothing beyond it is listed",
+          not any(os.path.normcase(outside) in os.path.normcase(p) for _c, p, _b in rows), str(rows))
+    W.remove_leftovers(rows)
+    check("  and nothing beyond it is deleted", all(os.path.exists(p) for p in theirs))
+    os.rmdir(link)                                   # the junction only, never its target
+folder = os.path.join(box.manifests, "Folder_@@_x.wabbajack.metadata")
+os.makedirs(os.path.join(folder, "inside"))
+io.open(os.path.join(folder, "inside", "keep.txt"), "wb").write(b"mine")
+check("a folder named like a sidecar is not an orphaned sidecar",
+      not any("Folder_@@_x" in p for _c, p, _b in W.leftover_report()), str(W.leftover_report()))
+count, freed, failures = W.remove_leftovers([("orphaned sidecar", folder, 4)])
+check("  and handed to the delete anyway, it is left alone, contents and all",
+      count == 0 and failures and os.path.isfile(os.path.join(folder, "inside", "keep.txt")),
+      str(failures))
+shutil.rmtree(outside, ignore_errors=True)
+
+# ---------------------------------------------------------------- 12.10
+print("\n 12.10  parking a folder never merges it into one already parked, nor splits it")
+box = Sandbox(BOX)
+wire(box)
+base = os.path.join(box.archives, GAME)
+box.pool_file(GAME, os.path.join(CFG.UNMANAGED_FOLDER, "TTW"), "parked-before.7z", 5)
+box.pool_file(GAME, "TTW", "new.7z", 6)
+(dst, _o) = quiet(W.park_unmanaged_dir, base, "TTW")
+store = os.path.join(base, CFG.UNMANAGED_FOLDER)
+check("a second TTW is parked beside the first, not into it",
+      dst and os.path.basename(dst) == "TTW~1"
+      and sorted(os.listdir(os.path.join(store, "TTW"))) == ["parked-before.7z"]
+      and sorted(os.listdir(os.path.join(store, "TTW~1"))) == ["new.7z"], str(dst))
+box.pool_file(GAME, "Busy", "a.7z", 7)
+box.pool_file(GAME, os.path.join("Busy", "sub"), "b.7z", 8)
+held_open = io.open(os.path.join(base, "Busy", "a.7z"), "rb")   # in use, as by an install
+try:
+    (dst, _o) = quiet(W.park_unmanaged_dir, base, "Busy")
+finally:
+    held_open.close()
+src_whole = (os.path.isfile(os.path.join(base, "Busy", "a.7z"))
+             and os.path.isfile(os.path.join(base, "Busy", "sub", "b.7z")))
+dst_whole = bool(dst) and os.path.isfile(os.path.join(dst, "a.7z")) \
+    and os.path.isfile(os.path.join(dst, "sub", "b.7z"))
+check("a folder with a file in use moves whole or stays whole, never half and half",
+      (src_whole and not dst) or (dst_whole and not os.path.exists(os.path.join(base, "Busy"))),
+      str((dst, src_whole, dst_whole)))
 
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

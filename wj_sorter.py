@@ -43,10 +43,13 @@ and performs none.
 
 import os
 import sys
+import time
 import shutil
+import _thread
 import filecmp
 import logging
 import argparse
+import threading
 from datetime import datetime
 from collections import defaultdict
 
@@ -96,6 +99,35 @@ LOG = logging.getLogger("wj_sorter")
 
 # Folder names that must not be used as modlist names (they are reserved pools).
 RESERVED_NAMES = set()
+
+# A stop asked for through WJ_STOP_FILE - the window's, there being no console
+# to send Ctrl+C to - is taken between two moves, each of them whole: an
+# archive with its sidecar, a collision's park and its place. While no move is
+# under way nothing has been changed, and the main thread is interrupted as
+# Ctrl+C interrupts it. Interrupting it mid-move, as the stop once did, could
+# land between an archive and its sidecar.
+_STOP = threading.Event()
+_MOVING = threading.Event()
+_STOP_LOCK = threading.Lock()
+
+
+def watch_stop_file(path, interval=0.5):
+    """Stop this sort when `path` appears: between two moves while it is
+    moving files, at once while it is not."""
+    def watch():
+        while not os.path.exists(path):
+            time.sleep(interval)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        LOG.info("\n[STOP] Asked to stop; stopping between two moves. Every move made so "
+                 "far is whole, and the next sort carries on from there.")
+        with _STOP_LOCK:
+            _STOP.set()
+            if not _MOVING.is_set():
+                _thread.interrupt_main()
+    threading.Thread(target=watch, daemon=True, name="stop-watch").start()
 
 
 # ----------------------------------------------------------------------
@@ -209,28 +241,12 @@ def acquire_pool_lock(script_dir):
     return fd
 
 
-def is_junk_name(name):
-    """OS litter that must never be mistaken for an archive or a manifest.
-
-    Deliberately NOT "anything starting with a dot". Nexus filenames routinely
-    begin with one - ".45 Auto Pistol Ha_ru anims-21142-1-2-1.zip", ".30 Carbine
-    Pistol-71955-...", ".1130 _ResourcePack Fixes-..." - and excluding those made
-    13 archives that are present on disk report as absent, and hid them from the
-    sorter so they would never be staged. Only the AppleDouble prefix and a
-    named list of OS files are junk."""
-    low = name.lower()
-    return low.startswith("._") or low in (
-        ".ds_store", "thumbs.db", "desktop.ini", ".localized")
-
-
-def list_manifest_files(directory):
-    try:
-        names = os.listdir(directory)
-    except OSError as e:
-        LOG.error("[ERROR] Cannot read manifest folder %s: %s", directory, e)
-        return []
-    return sorted(f for f in names
-                  if f.lower().endswith(".wabbajack") and not is_junk_name(f))
+# One implementation each, shared with the downloader: what counts as OS
+# litter, and which files in a folder are manifests. The downloader decides
+# what is present and the sorter what to move, so the two must never
+# disagree about either.
+is_junk_name = WJ.is_junk_name
+list_manifest_files = WJ.list_manifest_files
 
 
 def resolve_manifest_dir(script_dir):
@@ -272,35 +288,26 @@ def on_same_volume(a, b):
     return da == db
 
 
-def unique_path(path):
-    """Return `path` if free, else insert ~1, ~2, ... before the extension."""
-    if not os.path.exists(path):
-        return path
-    root, ext = os.path.splitext(path)
-    i = 1
-    while True:
-        candidate = f"{root}~{i}{ext}"
-        if not os.path.exists(candidate):
-            return candidate
-        i += 1
+# `path`, or the first free 'Name~N.ext' beside it: wj_paths' one
+# implementation, which every tool uses (wj_merge_pool imports it from here).
+unique_path = wj_paths.unique_path
 
 
 # ----------------------------------------------------------------------
-# Game helpers
+# Game helpers - the layout is wj_config's; the archive root is this run's
 # ----------------------------------------------------------------------
 def game_folder(game):
-    """Filesystem folder name for a GameType (GameType values are already safe)."""
-    return GAME_FOLDERS.get(game, game)
+    """Filesystem folder name for a GameType."""
+    return CFG.game_folder(game)
 
 
 def game_label(game):
-    return GAME_DISPLAY.get(game, game)
+    return CFG.game_label(game)
 
 
 def resolve_game_dirs(game):
     """Return (output_base, master, shared) for a given GameType."""
-    base = os.path.join(ARCHIVE_ROOT, game_folder(game))
-    return base, os.path.join(base, "Master"), os.path.join(base, "Shared")
+    return CFG.resolve_game_dirs(game, ARCHIVE_ROOT)
 
 
 # ----------------------------------------------------------------------
@@ -435,11 +442,12 @@ def build_disk_index(search_locations, protected_names):
 
             if low.endswith(".meta"):
                 continue  # meta sidecars travel with their parent file
-            if low.endswith(".part"):
+            if WJ.is_resume_file(low):
                 # An in-flight (or failed-and-resumable) download from
-                # wj_downloader.py. No modlist demands a file by
-                # this name, so indexing it would park it in Master and destroy
-                # the resume progress. Leave it exactly where it is.
+                # wj_downloader.py, or the CDN downloader's record of which
+                # parts it holds. No modlist demands a file by this name, so
+                # indexing it would park it in Master and destroy the resume
+                # progress. Leave it exactly where it is.
                 continue
             if is_junk_name(name):
                 continue  # '._x' / '.DS_Store' left by a Mac on the share
@@ -477,15 +485,21 @@ def pick_copy(copies, wanted_sizes):
     the receiving modlist's manifest states for that name. The copy that
     matches is the one that list can actually install; without this the first
     copy scanned wins, which is arbitrary and frequently wrong when two lists
-    pin different builds under one name. Falls back to the first copy when
-    nothing matches or nothing is known, leaving the existing size-checked
-    collision handling to sort out what it can. Returns (path, name, size)."""
-    if len(copies) == 1 or not wanted_sizes:
+    pin different builds under one name. Returns (path, name, size); the
+    first copy when nothing is known about the size; and None when the sizes
+    are known and no copy has one of them.
+
+    None, not the first copy: there is then nothing on disk the list can
+    use. Staging used to move whichever copy there was into the list's
+    folder under the manifest's name - another list's build, out of Shared -
+    and report nothing missing, so Wabbajack was handed the wrong bytes, and
+    the next download for the list deleted the build in its way."""
+    if not wanted_sizes:
         return copies[0]
     for path, name, size in copies:
         if size in wanted_sizes:
             return path, name, size
-    return copies[0]
+    return None
 
 
 def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
@@ -518,11 +532,16 @@ def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
                 # served from Shared, and the duplicate report says so. But a
                 # copy that SOME wanting list can use must win over one that
                 # none can: taking the first copy found used to carry a junk
-                # build into Shared while the right one sat in Master.
+                # build into Shared while the right one sat in Master. A list
+                # that states no size could use any of them, and then which
+                # copy goes is anybody's guess, as it always was.
                 wanted = set()
                 for l in lists:
-                    wanted |= list_sizes.get(l, {}).get(low, set())
-                wanted = wanted or None
+                    sizes = list_sizes.get(l, {}).get(low)
+                    if not sizes:
+                        wanted = None
+                        break
+                    wanted |= sizes
             elif n == 1:
                 dest_dir, reason = os.path.join(OUTPUT_BASE_DIR, lists[0]), f"only '{lists[0]}'"
                 wanted = list_sizes.get(lists[0], {}).get(low)
@@ -530,7 +549,23 @@ def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
                 dest_dir, reason = MASTER_ARCHIVE_DIR, "unused -> master"
                 wanted = None
 
-        src, name, chosen_size = pick_copy(copies, wanted)
+        picked = pick_copy(copies, wanted)
+        if picked is None:
+            if target_modlist:
+                # Not one copy is the build this list wants: nothing moves,
+                # and run_stage() reports the archive as missing.
+                continue
+            # The lists that want this name want other builds of it, and no
+            # copy here is one of those: every copy is a build nobody in this
+            # pool asks for, which is what Master is for. Parked, so nothing
+            # lands on a file of the same name there.
+            for p, n_, _s in copies:
+                if not same_path(os.path.dirname(p), MASTER_ARCHIVE_DIR):
+                    plan.append({"src": p, "dst": os.path.join(MASTER_ARCHIVE_DIR, n_),
+                                 "name": n_, "park": True,
+                                 "reason": "a build no list here wants"})
+            continue
+        src, name, chosen_size = picked
         # Of the copies at that size, one already sitting in the destination
         # folder wins: moving another one onto it would only collide with it
         # and park the mover, while this one was never going anywhere.
@@ -550,19 +585,26 @@ def build_plan(target_modlist, file_demands, disk_index, list_sizes=None):
         # Every OTHER copy of the same build - same name, same size - is
         # redundant once one copy has a home, and goes to Master for stage 5c
         # to reclaim. Doing this here, in the cleanup pass, is what lets the
-        # pools settle in one run instead of one copy per run. Copies of other
-        # sizes are left alone: a name several lists pin at different sizes
-        # has one home per build, and Shared can hold only one of them. Only
-        # the cleanup pass does this; staging finds the pools already settled.
+        # pools settle in one run instead of one copy per run. A copy of
+        # another size that some list here wants is left alone: a name
+        # several lists pin at different sizes has one home per build, and
+        # Shared can hold only one of them. One that no list wants - a build
+        # a download set aside under a '~N' name, say - goes to Master too:
+        # that is where "needed by nothing" lives, and in a list's folder it
+        # was never reclaimed at all. Only the cleanup pass does this; staging
+        # finds the pools already settled.
         if target_modlist is None:
-            for p, n, s in copies:
-                if p == src or s != chosen_size:
+            for p, n_, s in copies:
+                if p == src or same_path(os.path.dirname(p), MASTER_ARCHIVE_DIR):
                     continue
-                if same_path(os.path.dirname(p), MASTER_ARCHIVE_DIR):
+                if s == chosen_size:
+                    why = "redundant copy of the same build"
+                elif s is not None and (not lists or (wanted is not None and s not in wanted)):
+                    why = "a build no list here wants"
+                else:
                     continue
-                plan.append({"src": p, "dst": os.path.join(MASTER_ARCHIVE_DIR, n),
-                             "name": n, "reason": "redundant copy of the same build",
-                             "park": True})
+                plan.append({"src": p, "dst": os.path.join(MASTER_ARCHIVE_DIR, n_),
+                             "name": n_, "reason": why, "park": True})
 
     return plan
 
@@ -608,13 +650,12 @@ def estimate_cross_volume_bytes(moves):
 # Move execution
 # ----------------------------------------------------------------------
 def _raw_move(src, dst):
-    """Move src -> dst, clearing a colliding file first. Raises on failure."""
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if os.path.islink(dst) or os.path.exists(dst):
-        if os.path.isdir(dst) and not os.path.islink(dst):
-            raise IsADirectoryError(f"Destination is a directory, refusing: {dst}")
-        os.remove(dst)
-    shutil.move(src, dst)
+    """Move src -> dst, never over another file: FileExistsError when dst is
+    taken (wj_paths.move_file). It used to delete whatever was in the way,
+    so a collision whose other file could not be parked lost that file."""
+    if os.path.isdir(dst) and not os.path.islink(dst):
+        raise IsADirectoryError(f"Destination is a directory, refusing: {dst}")
+    wj_paths.move_file(src, dst)
 
 
 def move_with_meta(src, dst, counters, dry_run):
@@ -625,35 +666,44 @@ def move_with_meta(src, dst, counters, dry_run):
     counters["moved"] += 1
     meta_src = src + ".meta"
     if os.path.exists(meta_src):
+        meta_dst = dst + ".meta"
         try:
-            _raw_move(meta_src, dst + ".meta")
+            if os.path.lexists(meta_dst):
+                # A sidecar with no archive of its own, left by something
+                # else: kept under another name rather than written over.
+                wj_paths.move_file(meta_dst, wj_paths.unique_path(meta_dst))
+            wj_paths.move_file(meta_src, meta_dst)
             counters["meta"] += 1
         except OSError as e:
             LOG.warning("  [WARN] Moved '%s' but its .meta failed: %s", os.path.basename(src), e)
 
 
 def park_in_master(path, counters, dry_run, why):
-    """Move a file (and its .meta) into Master under a non-colliding name."""
+    """Move a file (and its .meta) into Master under a non-colliding name.
+    True when it moved (or would have, in a dry run)."""
     name = os.path.basename(path)
     LOG.info("  [PARK] '%s' -> Master  (%s)", name, why)
     if dry_run:
         counters["parked"] += 1
-        return
+        return True
+    # Free for the archive AND its sidecar, so the sidecar keeps the exact
+    # name that ties it to its archive.
     dest = unique_path(os.path.join(MASTER_ARCHIVE_DIR, name))
     try:
-        os.makedirs(MASTER_ARCHIVE_DIR, exist_ok=True)
-        shutil.move(path, dest)
-        counters["parked"] += 1
-        meta_src = path + ".meta"
-        if os.path.exists(meta_src):
-            try:
-                shutil.move(meta_src, unique_path(dest + ".meta"))
-                counters["meta"] += 1
-            except OSError as e:
-                LOG.warning("  [WARN] Parked '%s' but its .meta failed: %s", name, e)
-    except (OSError, shutil.Error) as e:
+        wj_paths.move_file(path, dest)
+    except OSError as e:
         LOG.error("  [ERROR] Could not park '%s' in Master: %s", name, e)
         counters["errors"] += 1
+        return False
+    counters["parked"] += 1
+    meta_src = path + ".meta"
+    if os.path.exists(meta_src):
+        try:
+            wj_paths.move_file(meta_src, dest + ".meta")
+            counters["meta"] += 1
+        except OSError as e:
+            LOG.warning("  [WARN] Parked '%s' but its .meta failed: %s", name, e)
+    return True
 
 
 def resolve_collision(src, dst, name, expected, counters, dry_run):
@@ -695,8 +745,8 @@ def resolve_collision(src, dst, name, expected, counters, dry_run):
             LOG.info("  [CONFLICT] '%s': incoming copy matches the manifest size, "
                      "existing does not (%s vs expected %s).",
                      name, s_dst, sorted(want))
-            park_in_master(dst, counters, dry_run, "existing copy: wrong size")
-            move_with_meta(src, dst, counters, dry_run)
+            if park_in_master(dst, counters, dry_run, "existing copy: wrong size"):
+                move_with_meta(src, dst, counters, dry_run)
             return
 
         # Neither matches the expected size -> preserve both, leave the slot empty
@@ -725,15 +775,32 @@ def resolve_collision(src, dst, name, expected, counters, dry_run):
     # existing copy in Master, then place the incoming one.
     LOG.warning("  [CONFLICT] '%s': no manifest size to check and copies differ; "
                 "preserving the existing copy in Master, placing the incoming one.", name)
-    park_in_master(dst, counters, dry_run, "unverified collision (existing copy preserved)")
-    move_with_meta(src, dst, counters, dry_run)
+    if park_in_master(dst, counters, dry_run, "unverified collision (existing copy preserved)"):
+        move_with_meta(src, dst, counters, dry_run)
 
 
 def execute_plan(moves, expected, dry_run):
-    """Carry out the planned moves. Returns a counters dict."""
-    counters = {"moved": 0, "meta": 0, "parked": 0, "errors": 0}
+    """Carry out the planned moves. Returns a counters dict, with "stopped"
+    set when a stop (watch_stop_file) ended it between two moves."""
+    counters = {"moved": 0, "meta": 0, "parked": 0, "errors": 0, "stopped": False}
+    with _STOP_LOCK:
+        if _STOP.is_set():
+            counters["stopped"] = True
+            return counters
+        _MOVING.set()
+    try:
+        return _execute_moves(moves, expected, dry_run, counters)
+    finally:
+        _MOVING.clear()
 
-    for m in moves:
+
+def _execute_moves(moves, expected, dry_run, counters):
+    for i, m in enumerate(moves):
+        if _STOP.is_set():
+            LOG.info("  [STOP] Stopped between two moves; %d of %d left for the next sort.",
+                     len(moves) - i, len(moves))
+            counters["stopped"] = True
+            break
         src, dst, name = m["src"], m["dst"], m["name"]
         LOG.info("  [MOVE] '%s' -> %s  (%s)", name, short(os.path.dirname(dst)), m["reason"])
 
@@ -929,7 +996,17 @@ def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
                         if target_modlist in file_demands[f] and f not in disk_index)
         from_game = [f for f in absent if f in gamefile_names]
         missing = [f for f in absent if f not in gamefile_names]
-        stats["missing"] = missing
+        # On disk under the right name, but not one copy at a size this list
+        # states: another list's build. It is as missing as an absent one,
+        # and build_plan() left it where it was. Counting names alone said
+        # "0 missing" while the list had nothing it could install.
+        sizes = (list_sizes or {}).get(target_modlist, {})
+        other_build = sorted(
+            f for f in file_demands
+            if target_modlist in file_demands[f] and f in disk_index
+            and f not in gamefile_names and sizes.get(f)
+            and not any(s in sizes[f] for _p, _n, s in disk_index[f]))
+        stats["missing"] = missing + other_build
         stats["from_game"] = len(from_game)
         if from_game:
             LOG.info("%d archive(s) come from your game install (Wabbajack copies "
@@ -940,6 +1017,14 @@ def run_stage(stage_label, target_modlist, file_demands, expected_sizes,
                         target_modlist, len(missing))
             for f in missing:
                 LOG.warning("  ? %s", f)
+        if other_build:
+            LOG.warning("[WARN] '%s' needs %d archive(s) of which only a DIFFERENT build is "
+                        "on disk - another list's. Left where they are; these have to be "
+                        "fetched too:", target_modlist, len(other_build))
+            for f in other_build:
+                LOG.warning("  ? %s (wants %s; on disk at %s)", f,
+                            ", ".join(str(s) for s in sorted(sizes[f])),
+                            ", ".join(str(s) for _p, _n, s in disk_index[f]))
 
     LOG.info("\nPlan: %d move(s), %d already in place, %d missing.",
              len(moves), stats["already_in_place"], len(stats["missing"]))
@@ -1003,6 +1088,10 @@ def main():
 
     # Nothing below may run concurrently with a download into the same pools.
     acquire_pool_lock(run_dir)
+    # The window that started this sort asks it to stop through this file:
+    # between two moves, every one of which is whole (watch_stop_file).
+    if os.environ.get("WJ_STOP_FILE"):
+        watch_stop_file(os.environ["WJ_STOP_FILE"])
 
     # Manifests may live elsewhere (see change 3 in the docstring). The log
     # stays in the runtime folder beside this script regardless.
@@ -1095,12 +1184,14 @@ def main():
                   "into Master. Re-download or remove these files, then re-run.")
         sys.exit(2)
 
-    # Reserved-name collision check (only for in-scope lists).
+    # Reserved-name collision check (only for in-scope lists). Judged as
+    # Windows reads the name: 'Master.' is Master.
     modlists_map = {}
     for i, rec in enumerate(in_scope):
-        if rec["name"].lower() in RESERVED_NAMES:
-            LOG.error("[TERMINATED] Modlist '%s' clashes with a reserved pool folder name. "
-                      "Rename the .wabbajack file.", rec["name"])
+        why = CFG.list_name_problem(rec["name"])
+        if why:
+            LOG.error("[TERMINATED] Modlist '%s' cannot have a folder of its own: %s. "
+                      "Rename the .wabbajack file.", rec["name"], why)
             sys.exit(1)
         modlists_map[str(i + 1)] = rec["name"]
 
@@ -1153,6 +1244,9 @@ def main():
     reset_stats = run_stage("CLEANUP", None, file_demands, reset_expected,
                             modlists_map, protected, chosen_game, args,
                             list_sizes=list_sizes)
+    if _STOP.is_set():
+        LOG.info("\n[STOP] Stopped as asked; nothing is staged this time.")
+        sys.exit(130)
 
     if args.cleanup_only:
         c = reset_stats["counters"]
@@ -1174,6 +1268,10 @@ def main():
                             target_expected, modlists_map, protected, chosen_game, args,
                             gamefile_names=(target_rec or {}).get("gamefile", frozenset()),
                             list_sizes=list_sizes)
+    if _STOP.is_set():
+        LOG.info("\n[STOP] Stopped as asked; '%s' is staged only in part. Stage it again "
+                 "before installing it.", target_modlist)
+        sys.exit(130)
 
     if args.dry_run:
         LOG.info("\n[DRY-RUN COMPLETE] Re-run without --dry-run to apply.")

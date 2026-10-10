@@ -209,13 +209,39 @@ def key_file(folder):
 
 
 def read_file(folder):
-    """The key in nexus_api_key.txt in `folder`: its first line, or None."""
+    """The key in nexus_api_key.txt in `folder`: its first line, or None.
+
+    Read whatever Windows wrote it as: UTF-8 with or without a BOM, or
+    UTF-16, which is what Windows PowerShell 5.1's `"key" > file` writes and
+    used to crash every lookup of the key with a UnicodeDecodeError - the
+    downloader, the Settings tab and --nexus-key-status alike. A file that is
+    not text in any of those reads as no key."""
     try:
-        with open(key_file(folder), encoding="utf-8-sig") as f:
-            key = f.readline().strip()
+        with open(key_file(folder), "rb") as f:
+            raw = f.read(64 * 1024)
     except OSError:
         return None
+    text = _decode_key_text(raw)
+    if text is None:
+        return None
+    key = text.splitlines()[0].strip() if text.strip() else ""
     return key or None
+
+
+def _decode_key_text(raw):
+    """Text from a small file's bytes, by its BOM, or None if it is not text."""
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        codecs_ = ("utf-16",)
+    elif len(raw) >= 2 and raw[1:2] == b"\x00":
+        codecs_ = ("utf-16-le",)        # UTF-16 written without a BOM
+    else:
+        codecs_ = ("utf-8-sig",)
+    for c in codecs_:
+        try:
+            return raw.decode(c).lstrip("﻿")
+        except UnicodeDecodeError:
+            continue
+    return None
 
 
 def resolve(cli_key, folder):

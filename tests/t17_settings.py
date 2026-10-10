@@ -207,7 +207,11 @@ check("  and the reason is a problem the helper names",
       "modlist" in (A.trash_name_problem() or ""), str(A.trash_name_problem()))
 CFG.TRASH_FOLDER = "Trash"
 rows, rec = A.purge_trash()
-check("17.11c the real trash still is emptied on time",
+check("17.11c a file in the real trash that no cleanup recorded is not deleted",
+      rows == [] and os.path.exists(trash_old), str(rows))
+box.trash_record(GAME, "gone.7z", 64, days_ago=40)
+rows, rec = A.purge_trash()
+check("17.11d the real trash still is emptied on time, of what a cleanup put there",
       [r[1] for r in rows] == ["gone.7z"] and not os.path.exists(trash_old), str(rows))
 
 # ---------------------------------------------------------------- 17.12
@@ -262,6 +266,195 @@ fresh()
 A.reload_settings()
 check("17.14c going back reaches it too", W_.game_folder("Fallout4VR") == "Fallout4VR"
       and W_.PARALLEL_SMALL == 1 and W_.ASSIST_WINDOW is True)
+
+# ---------------------------------------------------------------- 17.15
+print("\n 17.15  a modlist's name, judged as Windows reads it")
+# Windows drops a trailing dot: 'Master.' opens Master, and a manifest called
+# Master..wabbajack slipped past every check that compared 'master.' with
+# 'master' - deleting it emptied the Master pool. And a device name is no
+# folder at all.
+for bad in ("Master", "master.", "Master. ", "Shared", "Trash", "Unmanaged", "Nolvus",
+            "CON", "nul", "CONIN$", "conout$", "COM1", "COM\u00b9", "LPT\u00b3", "com1.backup",
+            "AUX .old", "a/b", "..", ""):
+    check("17.15 a list called %r is refused" % bad, bool(CFG.list_name_problem(bad)),
+          str(CFG.list_name_problem(bad)))
+for good in ("LoreRim", "Lorerim_@@_LoreRim", "Fallout Anomaly 2.0", "Comet", "Console Tweaks",
+             "COM10", "Masterpiece"):
+    check("17.15b %r may be one" % good, CFG.list_name_problem(good) is None,
+          str(CFG.list_name_problem(good)))
+check("17.15c a pool's name is called reserved, saying why",
+      "reserved for a pool folder" in CFG.list_name_problem("Shared"))
+check("17.15d a GameType is held to the same rule: no trailing dot, no device",
+      [CFG.valid_game_type(g) for g in ("Fallout4", "Skyrim.", "NUL", "a\\b", "", None)]
+      == [True, False, False, False, False, False])
+
+# ---------------------------------------------------------------- 17.16
+print("\n 17.16  ARCHIVE_ROOT: a folder of pools, and nothing more")
+# Everything under the archive root is judged by these tools: each folder in
+# it read as a game's pools, a stray in one offered for parking, a Trash in
+# any of them emptied on a timer. A drive's root, or the folder holding the
+# tools, would make the tools' own files - or the rest of the disk - pools.
+tools = os.path.normcase(os.path.abspath(box.tools))
+for bad, label in (("C:\\", "a drive's root"), ("D:/", "another drive's root"),
+                   ("\\\\server\\share", "a share's root"), (".", "the tools folder itself"),
+                   ("..", "the folder holding the tools"),
+                   (os.path.dirname(box.root), "a folder further up"),
+                   (box.tools, "the tools folder, spelled out"), ("", "empty"), ("   ", "blank")):
+    check("17.16 %s is refused" % label, bool(CFG.archive_root_problem(bad)),
+          "%r: %s" % (bad, CFG.archive_root_problem(bad)))
+for good in ("../Mod Archive", box.archives, "\\\\server\\share\\Mod Archive", "Z:\\Mod Archive"):
+    check("17.16b %r may be one" % good, CFG.archive_root_problem(good) is None,
+          str(CFG.archive_root_problem(good)))
+fresh()
+before = CFG.ARCHIVE_ROOT
+p = CFG.apply_settings({"ARCHIVE_ROOT": "C:\\"})
+check("17.16c a refused root keeps the default, and is reported",
+      CFG.ARCHIVE_ROOT == before and any(x.startswith("ARCHIVE_ROOT") for x in p), str(p))
+
+# ---------------------------------------------------------------- 17.17
+print("\n 17.17  TRASH_KEEP_DAYS: a number of days that means something")
+for bad in (0, -1, 3651, True, "30", 2.5, None):
+    fresh()
+    p = CFG.apply_settings({"TRASH_KEEP_DAYS": bad})
+    check("17.17 %r keeps the default" % (bad,),
+          CFG.TRASH_KEEP_DAYS == 30 and any(x.startswith("TRASH_KEEP_DAYS") for x in p), str(p))
+for good in (1, 7, 3650):
+    fresh()
+    check("17.17b %d is taken" % good, CFG.apply_settings({"TRASH_KEEP_DAYS": good}) == []
+          and CFG.TRASH_KEEP_DAYS == good)
+fresh()
+
+# ---------------------------------------------------------------- 17.18
+print("\n 17.18  a change is made to the file as it is now, and to nothing else")
+# Found 2026-10-10: the window wrote its whole form, filled hours before, so
+# a value typed into the file since went back to what the window started
+# with - and saving moved this process's ARCHIVE_ROOT while the downloader
+# and the sorter in it planned with the old one.
+sp = os.path.join(box.tools, "update.json")
+with io.open(sp, "w", encoding="utf-8") as f:
+    json.dump({"THEME": "dark", "KEEP_BACKUP_DAYS": 99, "A_FUTURE_SETTING": {"x": 1}}, f)
+fresh()
+path, problems = CFG.update_settings({"HIDE_NSFW": True}, path=sp)
+with io.open(sp, encoding="utf-8") as f:
+    saved = json.load(f)
+check("17.18 the change is written", saved.get("HIDE_NSFW") is True, str(saved))
+check("  what the file already said is kept, though this process never loaded it",
+      saved.get("THEME") == "dark" and saved.get("KEEP_BACKUP_DAYS") == 99, str(saved))
+check("  and a setting this version does not know is kept as it was",
+      saved.get("A_FUTURE_SETTING") == {"x": 1}, str(saved))
+check("  the running settings are now the file's", CFG.THEME == "dark" and CFG.HIDE_NSFW is True
+      and CFG.KEEP_BACKUP_DAYS == 99)
+CFG.update_settings(lambda now: {"HIDDEN": now["HIDDEN"] + ["r/one"]}, path=sp)
+CFG.update_settings(lambda now: {"HIDDEN": now["HIDDEN"] + ["r/two"]}, path=sp)
+with io.open(sp, encoding="utf-8") as f:
+    check("17.18b a change made relative to what is there builds on it",
+          json.load(f).get("HIDDEN") == ["r/one", "r/two"])
+with io.open(sp, "w", encoding="utf-8") as f:
+    f.write('{"THEME": "dark", ')                                   # cut short
+CFG.update_settings({"HIDE_NSFW": False}, path=sp)
+check("17.18c a file that cannot be read is kept aside, not overwritten",
+      os.path.isfile(sp + ".unreadable")
+      and io.open(sp + ".unreadable", encoding="utf-8").read() == '{"THEME": "dark", ')
+os.remove(sp + ".unreadable")
+fresh()
+root_before, resolved_before = CFG.ARCHIVE_ROOT, CFG.resolved_archive_root()
+manifests_before = CFG.MANIFEST_DIR
+elsewhere = os.path.join(box.root, "Archive Elsewhere")
+CFG.update_settings({"ARCHIVE_ROOT": elsewhere, "MANIFEST_DIR": "lists elsewhere"}, path=sp)
+with io.open(sp, encoding="utf-8") as f:
+    saved = json.load(f)
+check("17.18d the two paths are written", saved.get("ARCHIVE_ROOT") == elsewhere
+      and saved.get("MANIFEST_DIR") == "lists elsewhere", str(saved))
+check("  but this process keeps the ones it started with: they take effect at the next start",
+      CFG.ARCHIVE_ROOT == root_before and CFG.resolved_archive_root() == resolved_before
+      and CFG.MANIFEST_DIR == manifests_before, CFG.ARCHIVE_ROOT)
+os.remove(sp)
+fresh()
+
+print("\n      two changes at once, from two threads, both reach the file")
+# Found 2026-10-10 in review: the window's switches change the file on its
+# main thread while a job - a pool fold - changes it from a worker. Each read
+# the file, changed it and wrote it back, and one change could be lost.
+import threading
+
+
+def slow(key, value):
+    def change(now):
+        time.sleep(0.3)                        # the other writer reads the file meanwhile
+        return {key: value}
+    return change
+
+
+first_ = threading.Thread(target=CFG.update_settings, args=(slow("THEME", "dark"),), kwargs={"path": sp})
+second = threading.Thread(target=CFG.update_settings, args=(slow("HIDE_NSFW", True),), kwargs={"path": sp})
+first_.start()
+time.sleep(0.05)
+second.start()
+first_.join()
+second.join()
+with io.open(sp, encoding="utf-8") as f:
+    saved = json.load(f)
+check("17.18e neither change is lost", saved.get("THEME") == "dark" and saved.get("HIDE_NSFW") is True,
+      str(saved))
+os.remove(sp)
+fresh()
+
+# ---------------------------------------------------------------- 17.19
+print("\n 17.19  a child works under its parent's archive root until the parent restarts")
+# Found 2026-10-10 in review: a new ARCHIVE_ROOT saved in the window applies at
+# the next start, but a download or a sort the window started read it from the
+# file at once - two roots again, one planning and one moving.
+fresh()
+A.reload_settings()
+here = os.path.join(box.tools, CFG.SETTINGS_FILE)
+if os.path.exists(here):
+    os.remove(here)
+check("17.19 with nothing new saved, a child works its root out for itself",
+      A.archive_root_for_children() is None, str(A.archive_root_for_children()))
+elsewhere = os.path.join(box.root, "Archive Elsewhere")
+CFG.update_settings({"ARCHIVE_ROOT": elsewhere})
+check("  with a new root waiting in the file, a child is told this process's own",
+      A.archive_root_for_children() == A.WJ.ARCHIVE_ROOT == box.archives,
+      str((A.archive_root_for_children(), A.WJ.ARCHIVE_ROOT)))
+
+
+def child_root(env_root=None):
+    env = dict(os.environ)
+    env.pop("WJ_ARCHIVE_ROOT", None)
+    if env_root is not None:
+        env["WJ_ARCHIVE_ROOT"] = env_root
+    p = subprocess.run([harness.PY, "-c", "import json, wj_config as C; "
+                        "print(json.dumps([C.resolved_archive_root(), C.SETTINGS_PROBLEMS]))"],
+                       cwd=box.tools, env=env, capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
+    try:
+        return json.loads(p.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return [None, [p.stderr[-300:]]]
+
+
+root, _p = child_root(box.archives)
+check("  and works under it, not the one in the file",
+      os.path.normcase(root or "") == os.path.normcase(box.archives), str(root))
+root, _p = child_root()
+check("  while a process started afresh takes the file's",
+      os.path.normcase(root or "") == os.path.normcase(elsewhere), str(root))
+root, problems = child_root("C:\\")
+check("  and a root no setting could be is not taken from the environment either",
+      os.path.normcase(root or "") == os.path.normcase(elsewhere)
+      and any("WJ_ARCHIVE_ROOT" in p for p in problems), str((root, problems)))
+os.remove(here)
+fresh()
+A.reload_settings()
+
+# ---------------------------------------------------------------- 17.20
+print("\n 17.20  one game, every name it goes by")
+check("17.20 the feeds' vtmb and a manifest's VampireTheMasqueradeBloodlines are one game",
+      CFG.game_aliases("vtmb") == CFG.game_aliases("VampireTheMasqueradeBloodlines")
+      == {"vtmb", "vampirethemasqueradebloodlines"}, str(CFG.game_aliases("vtmb")))
+check("  a game with one name has just that one", CFG.game_aliases("Fallout4") == {"fallout4"})
+check("  one the tooling does not know is still itself", CFG.game_aliases("NewGame") == {"newgame"})
+check("  and nothing names nothing", CFG.game_aliases(None) == set())
 
 fresh()
 sys.exit(summary())

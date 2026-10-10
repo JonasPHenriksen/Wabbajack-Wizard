@@ -291,6 +291,9 @@ class App:
         self.lock_fd = lock_fd
         self.q = queue.Queue()
         self.busy = False
+        self.job_running = False        # a worker thread is out, its "done" not yet read
+        self.job_title = ""
+        self.closing = False            # the window closes once the job in hand is done
         self.action_buttons = []
         self.state = A.load_state()
         self.tracked = {}
@@ -318,6 +321,8 @@ class App:
 
         root.title(APP_TITLE)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # An error in a Tk callback reaches the log, not a stderr nobody reads.
+        root.report_callback_exception = self._callback_error
         self._build()
         self.apply_theme(CFG.THEME)
         self._route_output()
@@ -344,23 +349,68 @@ class App:
         sys.stderr = QueueWriter(self.q, "log")
 
     def _pump(self):
+        """Drain the queue onto the window, and always come back for more.
+
+        One failure while handling an item - a completion handler meeting
+        data of a shape it did not expect, say - used to end the pump for the
+        session: Tk does not reschedule a callback that raised, and the
+        re-arm came after the loop. The log pane froze, the next job's
+        "done" was never read, and the window stayed Busy with every button
+        off until it was closed. Each item is handled on its own now, an
+        error is shown and logged, and the pump re-arms whatever happens."""
         try:
-            while True:
-                item = self.q.get_nowait()
-                kind = item[0]
-                if kind == "log":
-                    self._append_log(item[1])
-                elif kind == "child":
-                    line = item[1]
-                    if is_progress(line):
-                        self.status.set(line.strip()[:140])
-                    else:
-                        self._append_log(line)
-                elif kind == "done":
-                    self._job_done(*item[1:])
-        except queue.Empty:
+            for _ in range(500):          # then yield to Tk, and come straight back
+                try:
+                    item = self.q.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle(item)
+                except Exception:
+                    self._callback_error(*sys.exc_info())
+        finally:
+            self.root.after(POLL_MS, self._pump)
+
+    def _handle(self, item):
+        kind = item[0]
+        if kind == "log":
+            self._append_log(item[1])
+        elif kind == "child":
+            line = item[1]
+            if is_progress(line):
+                self.status.set(line.strip()[:140])
+            else:
+                self._append_log(line)
+        elif kind == "done":
+            self._job_done(*item[1:])
+
+    def _callback_error(self, exc_type, exc, tb):
+        """An error in code run on the window's thread: into the log file and
+        the log pane, and said once in a dialog. Tk's own handler wrote it
+        to stderr - which here is the queue the pump drains, so a fault that
+        stopped the pump also hid itself."""
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        try:
+            A.LOG.error("[ERROR] in the window: %s", text)
+        except Exception:
             pass
-        self.root.after(POLL_MS, self._pump)
+        try:
+            self._append_log(text)
+        except Exception:
+            pass
+        if self.busy and not self.job_running:
+            # The job finished but its handler failed: the window is not busy.
+            self.busy = False
+            self._set_busy(False, "Ready")
+        if not getattr(self, "_error_shown", False):
+            self._error_shown = True
+            try:
+                messagebox.showerror("Something went wrong",
+                                     f"{exc}\n\nThe details are in the log pane and in "
+                                     f"wj_autoupdate.log. The window carries on.",
+                                     parent=self.root)
+            finally:
+                self._error_shown = False
 
     def _append_log(self, text):
         self.log.configure(state="normal")
@@ -373,11 +423,16 @@ class App:
 
     def run_job(self, title, fn, on_done=None, *args):
         """Run fn(*args) on a worker thread; on_done(result) on the main one."""
+        if self.closing:
+            return False                 # the window is closing: nothing new starts
         if self.busy:
             messagebox.showinfo("Busy", "Another job is still running. Wait for it "
                                         "to finish first.", parent=self.root)
             return False
         self.busy = True
+        self.job_running = True
+        self.job_title = title
+        A.allow_children()               # a stop asked of an earlier job is spent
         self._set_busy(True, title)
 
         def work():
@@ -391,7 +446,14 @@ class App:
 
     def _job_done(self, title, result, exc, on_done):
         self.busy = False
+        self.job_running = False
         self._set_busy(False, f"{title}: done")
+        if self.closing:
+            # The close that was waiting for this job. Nothing chained to it
+            # starts: the lock is released, and the window goes, only now
+            # that nothing of this session is still at work on the pools.
+            self._finish_close()
+            return
         if exc is not None:
             self._append_log(exc[1])
             messagebox.showerror(title, f"{title} failed:\n\n{exc[0]}\n\nThe "
@@ -457,6 +519,13 @@ class App:
         is closed, or give up."""
         while True:
             procs = WB.running_processes()
+            if procs is None:
+                # tasklist did not answer: asked, rather than assumed either way.
+                return messagebox.askyesno(
+                    "Is Wabbajack running?",
+                    f"Whether Wabbajack is running could not be checked (tasklist did not "
+                    f"answer).\n\n{what} moves archives it may be reading. Is it closed?",
+                    parent=self.root)
             if not procs:
                 return True
             names = ", ".join(f"{n} (pid {p})" for p, n in procs)
@@ -467,13 +536,56 @@ class App:
                 return False
 
     def on_close(self):
-        if self.busy and not messagebox.askyesno(
-                "A job is running",
-                "Closing now may leave it half done - a download resumes, but a "
-                "sort in progress leaves the pools as they are. Close anyway?",
-                parent=self.root):
+        """Close the window - but never out from under a job.
+
+        Closing mid-job used to release the run lock and destroy the window
+        at once. A download or a sort runs as a child process, and went on
+        running, unseen and now unlocked, so a second window or a scheduled
+        run could start work on the same pools beside it; work done in the
+        window's own process stopped wherever it happened to be. Now the
+        window waits for the job, and the lock is released only when it is
+        done. A child process can be asked to stop first: it stops at its
+        next safe point, keeping what it has done - a download its .part, a
+        sort every move already made."""
+        if self.closing:
             return
+        if not self.busy:
+            self._finish_close()
+            return
+        if A.child_running():
+            answer = messagebox.askyesnocancel(
+                "A job is running",
+                f"{self.job_title} is still running.\n\n"
+                "Yes - stop it now, at its next safe point, then close. A download keeps "
+                "what it has, and resumes next time.\n"
+                "No - close as soon as it finishes.\n"
+                "Cancel - keep the window open.", parent=self.root)
+            if answer is None:
+                return
+            stop = answer
+        else:
+            # Work in the window's own process, moving files one by one: it
+            # cannot be stopped half-way safely, so the window waits for it.
+            if not messagebox.askokcancel(
+                    "A job is running",
+                    f"{self.job_title} is still running, and cannot be stopped half-way "
+                    f"safely.\n\nOK - close as soon as it finishes.\n"
+                    f"Cancel - keep the window open.", parent=self.root):
+                return
+            stop = False
+        self.closing = True
+        for b in self.action_buttons:
+            b.configure(state="disabled")
+        if stop and A.request_child_stop():
+            self.status.set(f"Stopping {self.job_title} ... the window closes when it has.")
+            W.out(f"Asked {self.job_title} to stop; the window closes when it has.")
+        else:
+            self.status.set(f"The window closes when {self.job_title} finishes.")
+            W.out(f"The window closes when {self.job_title} finishes.")
+
+    def _finish_close(self):
         A.release_lock(self.lock_fd)
+        self.lock_fd = None
         self.root.destroy()
 
     # -- layout ------------------------------------------------------------
@@ -823,13 +935,17 @@ class App:
         yet saved is neither saved nor lost."""
         self.apply_theme(mode)
         if CFG.THEME != mode:
-            values = CFG.current_settings()
-            values["THEME"] = mode
-            CFG.save_settings(values)
+            # This one setting, over the file as it is now (CFG.update_settings):
+            # the in-memory settings written back whole used to undo any edit
+            # made to the file since the window started.
+            CFG.update_settings({"THEME": mode})
             A.reload_settings()
             var = getattr(self, "setting_vars", {}).get("THEME")
             if var is not None:
                 var.set(mode)
+            base = getattr(self, "_settings_baseline", None)
+            if base is not None:
+                base["THEME"] = mode
 
     def apply_theme(self, mode):
         """Paint the window: 'dark', or 'light' for the platform's own look."""
@@ -1028,7 +1144,7 @@ class App:
         self.browse_all = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="every game", variable=self.browse_all,
                         command=self.browse_load).pack(side="left", padx=(0, 8))
-        self.action(bar, "Reload gallery", self.browse_load).pack(side="left")
+        self.action(bar, "Reload gallery", self.browse_reload).pack(side="left")
         self.action(bar, "Fetch missing reports", lambda: self.browse_sync(False)).pack(side="left", padx=4)
         self.action(bar, "Refresh every report", lambda: self.browse_sync(True)).pack(side="left")
         self.browse_pool_btn = self.action(bar, "Set up a pool", self.browse_make_pool)
@@ -1085,6 +1201,11 @@ class App:
         self.browse_track.pack(fill="x")
         self.browse_hide = self.action(side, "Hide this list", self.browse_toggle_hidden)
         self.browse_hide.pack(fill="x", pady=(4, 0))
+
+    def browse_reload(self):
+        """Reload gallery: the feeds asked afresh, not this session's snapshot."""
+        A.reset_feed_cache()
+        self.browse_load()
 
     def browse_load(self):
         # Read on this thread: the worker must not touch a tk variable.
@@ -1254,6 +1375,9 @@ class App:
             var = getattr(self, "setting_vars", {}).get("HIDE_NSFW")
             if var is not None:
                 var.set(hide)
+            base = getattr(self, "_settings_baseline", None)
+            if base is not None:
+                base["HIDE_NSFW"] = hide
         self.browse_refilter()
 
     def _browse_apply_filter(self):
@@ -1404,6 +1528,14 @@ class App:
         view = self.browse.get("view")
         self.browse["detail"] = None
         self.data_changed("settings")
+        # What the Space tab's "any known modlist" rule protects has just
+        # changed: a hidden list protects nothing. The demand it loaded is
+        # dropped, so a clear made under that rule reads it again rather than
+        # going by a snapshot that still had this list the other way round.
+        if self.space.get("wide") is not None:
+            self.space["wide"] = None
+            if self.rule.get() == "a":
+                self.rule.set("y")
         self._browse_menu(keep=view)
         self._browse_summary()
         self.browse_show_game()
@@ -1455,7 +1587,12 @@ class App:
                    f"share that pool." if mapped else ""),
                 parent=self.root)
             self.reload_records()
-            self.data_changed("pools")
+            # A fold writes GAME_FOLDERS: the Settings tab has to show it, or
+            # its next save wrote back the mapping it was filled with and
+            # undid the fold.
+            self.data_changed("pools", "settings")
+            if mapped:
+                self.settings_fill()
             self.browse_load()
         self.run_job(f"Setting up a pool for {label}",
                      lambda: W.create_game_pool(game, folder), done)
@@ -1925,7 +2062,7 @@ class App:
         on the way: the launcher leaves them behind, at some 700 MB each.
         Worker-thread code; it only writes to the log."""
         wj = WB.find_wabbajack()
-        for name in WB.prune_old_versions(wj):
+        for name in WB.prune_old_versions(wj, keep=[A.MANIFESTS]):
             W.out(f"  Removed Wabbajack {name}, superseded by {wj['version']}.")
         return wj
 
@@ -2099,12 +2236,20 @@ class App:
 
     def space_measure(self, then=None):
         def job():
-            lists, masters = W.gather_space(self.records)
-            return {"lists": lists, "masters": masters, "strays": W.all_stray_folders(),
-                    "trash": W.trash_report(), "parked": W.unmanaged_report(),
-                    "orphans": W.orphan_sidecars()}
+            # The manifests as they are now, not as the window found them at
+            # its start: a list dropped into the folder since is demand, and
+            # measured without it its archives read as reclaimable.
+            records = W.load_records()
+            lists, masters = W.gather_space(records)
+            return {"records": records, "lists": lists, "masters": masters,
+                    "strays": W.all_stray_folders(), "trash": W.trash_report(),
+                    "trash_loose": W.unrecorded_trash(),
+                    "parked": W.unmanaged_report(), "orphans": W.orphan_sidecars()}
 
         def done(res):
+            if sorted(res["records"]) != sorted(self.records):
+                self.records = res["records"]
+                self.data_changed("records")
             self.tab_filled("Space")
             self.space.update(res)
             self.space["wide"] = None
@@ -2123,14 +2268,14 @@ class App:
         return self.run_job("Measuring the pools", job, done)
 
     def _fill_space(self):
-        reserved = A.WJ.reserved_list_names()
         rows = []
         for x in self.space["lists"]:
             stem = W.stem_of(x["file"])
+            why = CFG.list_name_problem(stem)
             rows.append((stem, A.WJ.game_label(x["game"]) if x["game"] else "?",
                          human(x["manifest_bytes"]),
                          f"{x['folder_files']} / {human(x['folder_bytes'])}" if x["folder_files"] else "-",
-                         "named after a pool folder; cannot be deleted here" if stem.lower() in reserved else ""))
+                         f"cannot be a list's folder ({why}); cannot be deleted here" if why else ""))
         fill(self.lists_table.tree, rows)
         try:
             import shutil
@@ -2167,12 +2312,19 @@ class App:
                           "of a list that went missing.")
         self.stray_note.set("  ".join(bits))
         trash = self.space["trash"]
+        # Files in a trash folder that no deletion record accounts for are
+        # never purged, so they are said rather than left to sit unseen.
+        loose = self.space.get("trash_loose") or []
         if trash:
             total = sum(b for _g, _f, b, _o in trash)
-            self.trash_note.set(f"Trash: {sum(f for _g, f, _b, _o in trash)} file(s), {human(total)}, "
-                                f"purged {W.keep_days()} days after arrival")
+            note = (f"Trash: {sum(f for _g, f, _b, _o in trash)} file(s), {human(total)}, "
+                    f"purged {W.keep_days()} days after arrival")
         else:
-            self.trash_note.set("Trash: empty")
+            note = "Trash: nothing a cleanup put there" if loose else "Trash: empty"
+        if loose:
+            note += (f"; {sum(f for _g, f, _b in loose)} file(s) in no deletion record, "
+                     f"never purged")
+        self.trash_note.set(note)
 
     def _fill_masters(self):
         mode = self.rule.get()
@@ -2207,7 +2359,8 @@ class App:
         pools = {m["folder"] for m in self.space["masters"]}
 
         def job():
-            want, note, pulled = W.gallery_protection(pools)
+            info = {}
+            want, note, pulled = W.gallery_protection(pools, info=info)
             if want is None:
                 return {"error": note}
             # The hidden lists for these pools, by title, for the confirmation:
@@ -2215,9 +2368,10 @@ class App:
             # so they are named where the deletion is agreed to. The feeds are
             # this run's snapshot; gallery_protection just read them.
             feeds, _complete = A.load_feeds()
-            hidden = sorted(str(e.get("title") or k) for k, e in feeds.items()
-                            if G.pool_key(e.get("game")) in pools and G.is_hidden(k))
+            hidden_keys = info.get("hidden") or []
+            hidden = sorted(str((feeds.get(k) or {}).get("title") or k) for k in hidden_keys)
             return {"want": want, "note": note, "pulled": pulled, "hidden": hidden,
+                    "hidden_keys": hidden_keys, "behind": info.get("behind") or [],
                     "masters": W.measure_masters(self.records, want)}
 
         def done(res):
@@ -2232,6 +2386,8 @@ class App:
             self.space["wide"] = res["want"]
             self.space["pulled"] = res["pulled"]
             self.space["hidden"] = res["hidden"]
+            self.space["hidden_keys"] = res["hidden_keys"]
+            self.space["behind"] = res["behind"]
             self.space["masters"] = res["masters"]
             W.out(f"  {res['note']}.")
             self._fill_masters()
@@ -2243,12 +2399,15 @@ class App:
             messagebox.showinfo("Space", "Select one or more modlists to delete.", parent=self.root)
             return
         chosen = [self.space["lists"][i] for i in sel]
-        reserved = A.WJ.reserved_list_names()
-        named = [W.stem_of(x["file"]) for x in chosen if W.stem_of(x["file"]).lower() in reserved]
+        # Judged as Windows reads the name, as delete_modlist() judges it:
+        # 'Master.' is Master as surely as 'Master' is.
+        named = [f"{W.stem_of(x['file'])} ({CFG.list_name_problem(W.stem_of(x['file']))})"
+                 for x in chosen if CFG.list_name_problem(W.stem_of(x["file"]))]
         if named:
-            messagebox.showerror("Space", f"Cannot delete {', '.join(named)}: a manifest named after a "
-                                          f"pool folder claims that pool as its own folder, and deleting "
-                                          f"it would empty the pool. Rename the .wabbajack file instead.",
+            messagebox.showerror("Space", f"Cannot delete {', '.join(named)}: a list's folder is "
+                                          f"named after its manifest, and this one's would be a pool "
+                                          f"or no folder of its own - deleting it could empty a "
+                                          f"pool. Rename the .wabbajack file instead.",
                                  parent=self.root)
             return
         lines = [f"{W.stem_of(x['file'])}  -  manifest {human(x['manifest_bytes'])}, "
@@ -2287,6 +2446,10 @@ class App:
         lines.append(f"\nNothing is deleted: each folder is moved intact into that game's "
                      f"{CFG.UNMANAGED_FOLDER} folder, which every tool then leaves alone.")
         if not self.confirm("Park folders", lines, undo="Reversible: move the folder back by hand."):
+            return
+        # Nothing that moves archives starts under a running Wabbajack - a
+        # folder an install is reading from is exactly the kind parked here.
+        if not self.wabbajack_clear("Parking folders"):
             return
 
         def job():
@@ -2349,6 +2512,12 @@ class App:
             if pulled:
                 lines.append(f"{len(pulled)} published list(s) have been pulled by their authors, so "
                              f"nothing is protected on their behalf: {', '.join(pulled[:6])}")
+            behind = self.space.get("behind") or []
+            if behind:
+                lines.append(f"{len(behind)} published list(s) were last validated for an older build "
+                             f"than their feed now publishes, so what only the new build wants is "
+                             f"not protected yet: {', '.join(behind[:6])}"
+                             + (f" and {len(behind) - 6} more" if len(behind) > 6 else ""))
         else:
             lines.append("\nProtected by: your modlists only. Archives a published list wants WILL go.")
         lines.append("Every file goes to that game's Trash, and into a CSV record, as it happens.")
@@ -2360,13 +2529,56 @@ class App:
             return
         if not self.wabbajack_clear("Clearing Master"):
             return
+        seen = sorted(self.records)
+        confirmed_hidden = sorted(self.space.get("hidden_keys") or [])
+        pools = {m["folder"] for m in self.space["masters"]}
 
-        def done(grand):
-            W.out(f"  {human(grand)} moved to Trash in total.")
+        def job():
+            # Read again here, as the console reads them right before it asks.
+            # What the window measured may be hours old: a manifest dropped
+            # into the folder since, or a list hidden or brought back in
+            # Browse, changes what this clear may take, and a snapshot taken
+            # before either used to be what it went by.
+            records = W.load_records()
+            if sorted(records) != seen:
+                return {"refused": "the manifests in the folder have changed since the "
+                                   "Space tab was measured. Measure it again, and check "
+                                   "the table, before clearing."}
+            # The same names may hold other contents now - a manifest copied
+            # over, or read back damaged - and one that cannot be read, or
+            # lists nothing, protects nothing.
+            unreadable, blocked = W.master_refusals(records, self.failed_rebuilds)
+            if unreadable or any(m["folder"] in blocked for m in chosen):
+                return {"refused": "a manifest changed since the Space tab was measured, and "
+                                   "can no longer be trusted to say what is wanted ("
+                                   + ", ".join(unreadable[:3] or [blocked[m["folder"]] for m in chosen
+                                                                  if m["folder"] in blocked][:1])
+                                   + "). Measure it again, and check the table, before clearing."}
+            wide = None
+            if mode == "a":
+                info = {}
+                wide, note, _pulled = W.gallery_protection(pools, progress=False, info=info)
+                if wide is None:
+                    return {"refused": f"{note}. Deleting on the strength of a list of "
+                                       f"published modlists known to be incomplete would "
+                                       f"remove archives that are still wanted."}
+                if sorted(info.get("hidden") or []) != confirmed_hidden:
+                    return {"refused": "the hidden lists have changed since the gallery's "
+                                       "demand was loaded, so what this would keep is not "
+                                       "what was confirmed. Choose the rule again."}
+            return {"grand": W.clear_masters(records, chosen, mode, wide)}
+
+        def done(res):
+            if "refused" in res:
+                messagebox.showwarning("Not clearing Master", res["refused"], parent=self.root)
+                self.space["wide"] = None
+                self.rule.set("y")
+                self._fill_masters()
+                return
+            W.out(f"  {human(res['grand'])} moved to Trash in total.")
             self.data_changed("pools")
             self.space_measure()
-        self.run_job("Clearing Master", lambda: W.clear_masters(self.records, chosen, mode, self.space["wide"]),
-                     done)
+        self.run_job("Clearing Master", job, done)
 
     def space_empty_trash(self):
         trash = self.space["trash"]
@@ -2648,9 +2860,22 @@ class App:
         self.key_fill()
 
     def settings_fill(self, values=None):
+        """Fill the form with the settings as they stand - or, given `values`
+        (Reset to defaults), with those, keeping what the form was last filled
+        from as the baseline, so that a save writes every field the reset
+        changed rather than nothing at all."""
         self.tab_filled("Settings")
         self.key_fill()
-        values = values or CFG.current_settings()
+        reset = values is not None
+        if not reset:
+            values = CFG.current_settings()
+            # The two paths as the next start will use them, which is what
+            # the file says: once a new one is saved, the running value is the
+            # old one, and shown that, a change could not be undone by typing
+            # the old value back - it read as no change at all.
+            upcoming = CFG.next_start_settings()
+            for key in CFG.RESTART_SETTINGS:
+                values[key] = upcoming[key]
         for key, var in self.setting_vars.items():
             v = values.get(key)
             if isinstance(var, tk.BooleanVar):
@@ -2662,6 +2887,10 @@ class App:
                 var.set(", ".join(sorted(v) if isinstance(v, (set, frozenset)) else v))
             else:
                 var.set("" if v is None else str(v))
+        # What the form says untouched, so a save can tell which fields were
+        # actually changed (settings_save).
+        if not reset:
+            self._settings_baseline, _problems = self.settings_collect()
 
     def settings_collect(self):
         values, problems = {}, []
@@ -2689,11 +2918,24 @@ class App:
         return values, problems
 
     def settings_save(self):
+        """Save the fields changed in the form, and only those.
+
+        The rest of the form is what was in it when it was filled, which can
+        be older than the file: a pool fold writes GAME_FOLDERS, another
+        window or a hand edit writes anything. Saving the whole form wrote
+        all of it back, so a fold was undone by the next save of any field,
+        and a TRASH_KEEP_DAYS typed into the file went back to what the
+        window started with. The changes go over the file as it is now."""
         values, problems = self.settings_collect()
         if problems:
             messagebox.showerror("Settings", "Not saved:\n\n" + "\n".join(problems), parent=self.root)
             return
-        path, more = CFG.save_settings(values)
+        base = getattr(self, "_settings_baseline", None) or {}
+        changes = {k: v for k, v in values.items() if base.get(k) != v}
+        if not changes:
+            self.settings_note.set("Nothing in the form was changed, so nothing was saved.")
+            return
+        path, more = CFG.update_settings(changes)
         A.reload_settings()
         self.assist = (A.NEXUS_MODE == "assist")
         self.apply_theme(CFG.THEME)
@@ -2706,14 +2948,14 @@ class App:
             messagebox.showwarning("Settings", "Saved, but these kept their defaults:\n\n" + "\n".join(more),
                                    parent=self.root)
         self.settings_note.set(f"Saved to {path}." + ("  Restart for path changes to take effect."
-                                                    if any(k in values for k in ("ARCHIVE_ROOT", "MANIFEST_DIR"))
+                                                    if any(k in changes for k in ("ARCHIVE_ROOT", "MANIFEST_DIR"))
                                                     else ""))
-        W.out(f"Settings saved to {os.path.basename(path)}.")
+        W.out(f"Settings saved to {os.path.basename(path)}: {', '.join(sorted(changes))}.")
 
     def _open_settings_file(self):
         path = CFG.settings_path()
         if not os.path.isfile(path):
-            CFG.save_settings(CFG.current_settings())
+            CFG.update_settings({})
         try:
             os.startfile(path)
         except OSError as e:

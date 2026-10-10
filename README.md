@@ -38,7 +38,16 @@ manifest and the folder goes dark, so deletion is handled explicitly (stage 5).
 
 Manifest filenames follow `<repo>_@@_<machineURL>.wabbajack`, which *is* the
 published feed key with `/` written as `_@@_`. That is how a local file is
-matched to its published list — exactly, with no guessing from titles.
+matched to its published list — exactly, with no guessing from titles. A file
+named any other way that looks like a published list by its title, or by the
+`Name` inside it, is not followed on that alone: an author's beta of a list
+carries the list's own Name, and a file followed by a guess was replaced by
+the published manifest at the next update. The log says `[SUGGEST]` with the
+key it looks like, and the file is followed once that key is pinned in
+`TRACK`. A file an older version followed by its title alone is no longer
+followed, and the log says `[UNTRACK]`. When two files stand for one list -
+the published list's own and a pinned beta, say - the one named after the
+key is followed, and the log says so.
 
 Every name that arrives from outside and becomes a path is held to one rule
 first: an archive's name in a manifest or a validation report, and a list's
@@ -49,6 +58,60 @@ none of the 17,238 archive names in the manifests held here, or the 302,621 in
 the published reports, is one. So a manifest that has one has been edited, and
 the downloader fetches nothing for it; a feed entry with such a key is left
 out, and counts as a feed that did not answer.
+
+A modlist's own name is judged as Windows will read it, because it becomes a
+folder. Windows drops a trailing dot or space, so `Master..wabbajack` - the
+list `Master.` - would have the Master pool as its folder, and deleting that
+list emptied the pool in a sandbox; and a device name such as `CON`, `NUL`,
+`COM1` (or `COM¹`), `CONIN$` is no folder at all. Such a list, or one named
+after a pool folder - `Master`, `Shared`, the trash, the unmanaged store,
+another installer's folder - is refused by the sorter, the downloader, stage 5
+and the scheduled run alike, with the reason; rename the `.wabbajack` file.
+
+### A file is never written over
+
+A filename does not identify content: `Synthesis.zip` sits in five folders on
+this share at five different sizes, each the build its own list pins. So
+nothing in this tooling puts a file where another one already is. The rule
+has one implementation, in `wj_paths.py`, and every tool uses it:
+
+- **A download keeps what it finds.** A finished download is checked against
+  the manifest while it is still a `.part`, and only then given its name. A
+  different file already under that name - in a list's folder this is often
+  another list's build, staged there - is moved aside to `Name~1.ext`, its
+  `.meta` with it, and the run says `[KEPT]`. Only a file with the very same
+  bytes is simply replaced. Before 1.5.0 the download deleted it, with no
+  trash and no record, and a download that then failed its check lost both.
+- **Staging hands a list only its own build.** When no copy of a name is at a
+  size the list states, staging moves nothing and reports the archive as
+  still to fetch, with the sizes wanted and found. It used to move whichever
+  copy there was into the list's folder - another list's build, under the
+  manifest's name - and report nothing missing, which is the road by which the
+  download above came to delete it.
+- **A move never lands on a file.** The sorter, stage 5 and the pool merge
+  move files by rename, or across volumes by copying to a temporary name
+  first; a destination that is taken refuses, and the caller parks one of the
+  two under a `~N` name instead. A sidecar travels with its archive, and an
+  orphaned one already at the destination is kept aside, not written over.
+- **The same size is not the same file.** Deleting a list used to delete any
+  file whose name and size matched one already in Master; now it parks it
+  beside under a `~N` name, and stage 5c removes one only when both files are
+  read in full and their xxHash64 agree.
+- **Nothing in the trash is written over**, and no deletion record by another
+  written in the same second.
+- **A move happens or it does not.** Across volumes a file is copied to a
+  temporary name first; a copy that fails leaves no temporary file behind,
+  and an original that will not go once copied has its copy removed again,
+  so a move reported as failed never leaves the file in two places. A file
+  set aside takes its sidecar with it, or neither moves.
+
+The `~N` suffix is storage only: every tool reads a name through it (see
+"What protects an archive from deletion"), and staging gives a build its
+manifest's name back. A build set aside that no list in the pool wants is
+moved into Master by the next sort, as any build nobody wants is, so stage 5c
+can judge it; in a list's folder it would never be reclaimed. A partial
+download, and the CDN downloader's record of the parts it holds, are never
+moved or reclaimed by anything: the next attempt resumes from them.
 
 ## Quick start
 
@@ -160,7 +223,10 @@ as `THEME`.
    then lays one out — see below. A list you will never want can be **hidden**,
    after which it shows only under **Hidden lists** in the Game menu — see below.
 2. **Updates** — which tracked modlists have a newer published version, and
-   which are already current. Fetches the manifests you pick.
+   which are already current. Fetches the manifests you pick. Each one
+   replaced is kept first as a `.bak` in `manifest_backups\` for
+   `KEEP_BACKUP_DAYS`, wherever `MANIFEST_DIR` points - another drive
+   included - and one whose old version cannot be kept is not replaced.
 3. **Incomplete** — which modlists are missing archives, and how many of those
    need a Nexus click. Downloads one list at a time, finishing each before
    offering the next.
@@ -201,6 +267,26 @@ archives on disk, so Browse keeps its pool index rather than paying the
 While a job runs, the other tabs are locked. Leaving mid-way landed you on a
 tab rebuilt from data the job had not finished writing.
 
+### Closing the window while a job runs
+
+The window never goes out from under a job. A download or a sort runs as a
+child process, and closing the window used to release the run lock and leave
+it running on, unseen and unlocked, beside whatever started next. Now closing
+mid-job asks: **Yes** stops the child at its next safe point and closes when
+it has - a download keeps its `.part` and resumes next time, a sort stops
+between two moves and keeps every one already made - and nothing further in
+that job starts, so a download of three lists stops with the first; **No**
+closes as soon as the job finishes; **Cancel** keeps the window open. Work the window does in its own process, moving files
+one by one, cannot be stopped half-way safely, so for that one the window
+offers only to close when it is done. Nothing new starts meanwhile, and the
+lock is released last.
+
+An error in the window itself - a completion handler meeting data it did not
+expect, say - goes into the log pane and `runtime\wj_autoupdate.log` with its
+traceback, is shown once, and the window carries on. One such error used to
+stop the window reading its own queue for the rest of the session: the log
+froze and the window stayed Busy with every button off.
+
 ## Stage 1: what you already own of what you do not have
 
 Wabbajack's gallery is not an API — it is a set of JSON files in the
@@ -226,7 +312,17 @@ The answer is rarely small. Measured against this share's Skyrim pool:
 Only games with a pool folder under the archive root are shown by default, since
 nothing else can overlap what you own. The whole sweep is 224 reports, about
 45 MB, and takes roughly nine seconds; it is cached under `.gallery-cache/` and
-served from there afterwards, including when GitHub is unreachable.
+served from there afterwards, including when GitHub is unreachable. A reply
+that is not JSON - a captive portal's sign-in page, an upstream file with a
+typo in it - is never cached: the older copy is used if there is one, and
+otherwise the stage says the gallery could not be read. It used to be cached
+for six hours, or fourteen days for a report, and every read of it crashed
+stage 1.
+
+The feeds themselves are read once and reused for six hours, or five minutes
+when one of them did not answer, so the next look tries that one again rather
+than going on without it. **Reload gallery** in the Browse tab reads them
+afresh at once.
 
 ### Taking on a game you keep nothing for
 
@@ -410,21 +506,51 @@ one blocks nothing, and the confirmation names them. An archive only a hidden
 list wants therefore goes; one that another list also wants stays, because
 protection is per archive, not per list.
 
+A feed that answered is not yet a feed that was read. One whose shape, or an
+entry in it, this version cannot read - the way a format that moved on would
+look - counts as a feed that did not answer, and so does a report with an
+archive entry it cannot read; either refuses, where it used to count as a
+list that wants less. A report validated for an older build than the feed now
+publishes is fetched again first, and if the validator has not caught up yet,
+the last report is used and the list is named in the confirmation, since what
+only its new build wants is not protected until the validator catches up. A game is
+matched under every name it goes by - the feeds call Vampire: The Masquerade -
+Bloodlines `vtmb` where a manifest says `VampireTheMasqueradeBloodlines`, and
+read apart, the feeds' lists for it protected nothing in its pool. And the
+window works all of this out again at the moment it clears, with the
+manifests read afresh: a manifest dropped into the folder since the table was
+measured, one rewritten since that can no longer be read or lists nothing,
+or a list hidden or brought back in Browse, stops the clear and asks for the
+table to be measured again.
+
 Name **and** size must match, every file is re-checked at the moment it goes
 rather than trusted from the table, and every file is recorded in
 `runtime\deleted_<game>_<timestamp>.csv`, one row as it goes, with the reason,
 where it went, the folder and the rule used.
 
 **Nothing is deleted outright.** What stage 5c reclaims moves into that game's
-`Trash` folder, stamped with the moment it arrived, and is purged
-`TRASH_KEEP_DAYS` days later (30) at the start of the next run, with a
-`purged_trash_<timestamp>.csv` record. Until then a whole cleanup can be put
+`Trash` folder - beside, under a `~N` name, any file an earlier cleanup left
+there with the same name - and its deletion record says when. It is purged
+`TRASH_KEEP_DAYS` days after that (30) at the start of the next run, with a
+`purged_trash_<timestamp>.csv` record. The purge goes by the records and by
+nothing else: a file is purged when a `deleted_*.csv` record says stage 5c
+sent it to this trash, at this size, long enough ago. A file in a trash folder
+that no record accounts for - put there by hand, or one whose record is gone -
+is never deleted by this tooling; stage 5d and the log say how many there are,
+and they are yours to keep or remove. Before 1.5.0 the purge went by the
+files' own dates, so a file whose arrival stamp could not be set on the share
+was purged at the next start, with no grace at all. For the same reason
+nothing is sent to the trash without its record: if the record cannot be
+written, stage 5c clears nothing.
+
+Until a file's time is up, a whole cleanup can be put
 back: **Undo a cleanup** in the Space tab, `[u]` in 5d, lists each cleanup's
 record with how much of it is still in the trash, moves that back into Master,
 and rebuilds the folder's pools, so whatever a list wants now goes home. A
-build that is back in Master already is left in the trash, one whose name
-another build has taken since comes back beside it under a `~N` suffix,
-sidecars go with their archives, and nothing is deleted on the way. Stage 5d
+build that is back in Master already - the same bytes, by hash, not only the
+same size - is left in the trash; one whose name another build has taken
+since comes back beside it under a `~N` suffix, sidecars go with their
+archives, and nothing is deleted on the way. Stage 5d
 shows what the trash holds and when each game's oldest file falls due, and
 offers to empty it at once. The trash is invisible to every tool: never indexed, never counted as
 present, never moved, and a modlist may not be called `Trash`. The purge, and
@@ -442,7 +568,7 @@ with the same name and size but different bytes is kept, since that is exactly
 the case a size-based identity cannot see. A copy in a stray, excluded or trash
 folder never counts, and the record names which copy made it redundant. Six
 further rules, each added after a sandbox run showed the deletion path
-removing something it should not have:
+removing something it should not have (the "same size" one in 1.5.0):
 
 - **A name is read through its `~N` suffix.** When two builds share a name and
   both must survive in one folder, the second is stored as `Name~1.ext`. No
@@ -460,7 +586,14 @@ removing something it should not have:
 - **A manifest named after a pool folder is never deleted.** Its "folder" *is*
   the pool. Deleting `Master.wabbajack` emptied Master in the sandbox, every
   file read as a redundant copy of itself. The sorter always refused such
-  names; the wizard and the downloader now do too.
+  names; the wizard and the downloader now do too - and since 1.5.0 they
+  judge the name as Windows reads it, so `Master..wabbajack`, whose folder
+  `Master.` Windows opens as Master, is refused as surely.
+- **A file of the same size is not the same file.** A deleted list's archive
+  whose name and size match a file already in Master used to be deleted on
+  the spot as a redundant copy, with no hash, no trash and no record; when
+  the bytes differed, a build a surviving list wanted was gone. It is parked
+  beside under a `~N` name now, and 5c's hash check decides.
 - **A failed rebuild disarms the step.** If the sorter's cleanup pass after a
   deletion exits non-zero, that game's Master may still hold what other lists
   need, and it is not offered for clearing.
@@ -483,6 +616,14 @@ hold, and offers to move it there **intact** — nothing is deleted. Both tools
 then ignore it completely: never indexed, never moved, never deleted, and a
 modlist may not claim the name. Stage 5 reports the store's size, because it is
 usually not small: **79.7 GB** across four folders on this share.
+
+Parking is one rename, confirmed first, and only once no Wabbajack process
+is running, since a folder an install is reading is exactly the kind parked
+here. A folder of that name already in the store is never merged into: the
+second one lands beside it as `TTW~1`. And a folder that will not rename - a
+file in it held open, or the store on another volume - stays whole where it
+was; it used to be copied and deleted instead, which a held file left half
+done.
 
 Parking is not always the right answer, so each stray says where it came from.
 Wabbajack writes a `.metadata` sidecar beside every modlist it downloads, so a
@@ -512,7 +653,13 @@ the debris that lands *beside* the archives, so it accumulates for good.
 | OS metadata | `.DS_Store`, `Thumbs.db`, `desktop.ini`, and the `._name` AppleDouble files a Mac writes beside real files on a non-HFS share |
 | orphaned sidecars | Wabbajack's `.metadata` for a modlist that is no longer here |
 
-It lists what it found and what it will free, and asks twice before deleting.
+It lists what it found and what it will free, and asks twice before deleting;
+at the second question only a plain yes deletes, and **change** narrows the
+sweep to the kinds you pick. It deletes files and nothing else - a folder that
+happens to carry a sidecar's name is left alone, contents and all - and it
+never follows a junction or a symbolic link out of the folders it sweeps, so
+a link inside the tools folder cannot lead it to `desktop.ini` files
+somewhere else entirely.
 
 Only debris that **stays** gone is swept. `__pycache__` and the captured output
 of the last child run are both rewritten by the very next run, so offering them
@@ -558,7 +705,11 @@ by name, and stage 4 has to be run again before installing that list.
 
 Nothing that moves archives starts while a Wabbajack process is running, in
 case it is reading them: stages 4 and 5 check with `tasklist` and wait for you
-to close it. A scheduled run skips its sort instead and says so.
+to close it. A scheduled run skips its sort instead and says so. When
+`tasklist` cannot answer - missing, stuck, or failing - that is "cannot tell",
+not "not running": the console and the window ask you, a scheduled run skips
+its sort and counts it as a problem, and Wabbajack's old version folders are
+not pruned. It used to read as "not running".
 
 ### What a run reads, and what it does not
 
@@ -583,25 +734,68 @@ duplicate being hashed before it goes.
 
 ## Scripted use
 
-Any action flag skips the wizard:
+A bare `run.bat` opens the window, and `run.bat --wizard` the console. An
+**action** flag does one thing instead, unattended, and exits; `--run` is the
+whole unattended run, and is what a scheduled task runs:
 
 ```
-run.bat --gui                         the window, from a console
+run.bat --run                         fetch every updated manifest and the archives it lacks, then stage a list
+run.bat --check                       report what has updates, change nothing
+run.bat --only <list>                 a run limited to one list's archive work
+run.bat --force <list>                a run that reprocesses one list whatever its version
+run.bat --dry-run                     a run that plans everything and changes nothing
 run.bat --gallery                     summarise the published gallery
 run.bat --gallery --sync-reports      refresh the validation-report cache
-run.bat --check                       report what has updates, change nothing
-run.bat --only <list>                 do the archive work for one list only
-run.bat --dry-run                     plan everything, change nothing
 run.bat --rediscover                  re-match local manifests against the feeds
-run.bat --nexus-mode skip             leave Nexus files to Wabbajack
 run.bat --selftest                    check upstream formats still read as expected
-run.bat --order largest               fetch the big files first for one run
+run.bat --gui                         the window, from a console
 run.bat --store-nexus-key             keep the Nexus API key in Windows Credential Manager
 run.bat --nexus-key-status            say where the key is found, never what it is
 ```
 
-Exit codes: `0` clean, `1` finished with problems, `2` could not start,
-`3` another run holds the lock, `4` unhandled error.
+`--no-download` (manifests only) and `--no-sort` (no staging at the end) are
+runs with that part left out. The **modifiers** change how a run, the window
+or the wizard behaves, and on their own start nothing - `run.bat --order
+largest` alone opens the wizard, exactly as a bare `run.bat --wizard` would:
+
+```
+--nexus-mode skip|assist              override NEXUS_MODE for this run
+--order smallest|largest|manifest     the order archives are fetched in, for this run
+--allow-size-only                     run without xxhash, checking sizes only
+--no-lock                             skip the single-instance lock
+```
+
+`--run` stages `STAGE_LIST` when it is set, else the most recently updated
+list, and only once no Wabbajack process is running; when that cannot be told
+it leaves the sort for the next run. With nobody at a console to click, a run
+whose settings say `NEXUS_MODE` assist leaves the Nexus files to Wabbajack, as
+`skip` does, rather than waiting three minutes per file for a click nobody
+makes; `--nexus-mode assist` on the command line insists. A `--dry-run`
+writes nothing but its log: no state, no to-do CSV, no backup pruned, no
+trash purged, no notification sent.
+
+Exit codes:
+
+| code | meaning |
+| --- | --- |
+| `0` | clean: every tracked list checked, and current or brought up to date |
+| `1` | finished with problems: the feed of a tracked list that did not answer (so "all current" is not claimed; one the run tracks nothing in does not count), a manifest that could not be fetched or replaced, archives still missing or refused for want of disk, the downloader failing, a list whose name cannot be a folder, the sort skipped or failing |
+| `2` | could not start: no xxhash, `ARCHIVE_ROOT` unreachable, the scripts disagreeing about the layout, a bad `WJ_MANIFEST_DIR` |
+| `3` | another run holds the lock, so nothing was done |
+| `4` | unhandled error, with its traceback in `runtime\wj_autoupdate.log` - the wizard's too |
+| `130` | stopped with Ctrl+C |
+
+With `NOTIFY_URL` set, a run that ends with anything but `0` says so there,
+unless it was a `--check` or a `--dry-run`, or you stopped it; a run that got
+as far as fetching reports what it did either way. `NOTIFY_URL` has to be a
+web address, and a password in it never appears in the log.
+
+`run.bat` hands the exit code back, and waits for a key at the end only when
+someone could press one: never with `WJ_NO_PAUSE` set, and never when its
+input is not a console. A scheduled task can have a console nobody watches,
+so for one, run the interpreter directly - program `.python\python.exe`,
+arguments `wj_autoupdate.py --run`, starting in the tools folder - or set
+`WJ_NO_PAUSE=1` for `run.bat`.
 
 ## Configuration
 
@@ -624,19 +818,43 @@ means what their row below says. The Settings tab never writes a refused value
 to the file, and writes a `GAME_FOLDERS` mapping as just the entries that
 differ from the default.
 
+`ARCHIVE_ROOT` is checked for what it would make of the disk, because
+everything under it is judged by these tools: each folder in it read as a
+game's pools, a stray in one offered for parking, a `Trash` in any of them
+emptied on a timer. It may not be a drive's or a share's root, the tools
+folder, or a folder holding the tools folder - `..` included - and a refused
+one keeps the default. `TRASH_KEEP_DAYS` runs from 1 to 3650: a trash kept
+0 days would be emptied at the next start, which nobody means by typing 0.
+
+A save writes the settings you changed, and nothing else, over the file as it
+is at that moment. The Settings tab used to write its whole form, filled
+perhaps hours before, so a value typed into the file since - or written by a
+pool fold, or another window - went back to what the window started with. A
+key the file holds that this version does not know is kept as it is, and a
+file that cannot be read is kept beside as `wj_settings.json.unreadable`
+rather than overwritten. Two changes made at once in one process - a pool
+fold and a switch in the window - both reach the file. **Reset to defaults**
+then **Save** takes the file back to the defaults.
+
+`ARCHIVE_ROOT` and `MANIFEST_DIR` are written at once and take effect at the
+next start, as the tab says: they move everything. Until then the window -
+and every download or sort it starts - works under the root it started with,
+and the Settings tab shows the root the next start will use, so a change can
+be undone by typing the old value back.
+
 | setting | default | meaning |
 | --- | --- | --- |
-| `ARCHIVE_ROOT` | `../Mod Archive` | where the per-game pools live; a relative path is resolved against the tools folder |
-| `MANIFEST_DIR` | `modlists` | where the `.wabbajack` manifests live |
+| `ARCHIVE_ROOT` | `../Mod Archive` | where the per-game pools live; a relative path is resolved against the tools folder. Not a drive's root, nor the tools folder or one holding it. Takes effect at the next start |
+| `MANIFEST_DIR` | `modlists` | where the `.wabbajack` manifests live. Takes effect at the next start |
 | `GAME_FOLDERS` | the Skyrim family, all to `Skyrim` | GameType to pool folder, for games that share one or whose folder is not named after them |
 | `GAME_DISPLAY` | | friendly names for menus; an unknown game shows its GameType |
 | `EXCLUDE_POOL_DIRS` | `nolvus` | folders under a game root that belong to another installer: never indexed, moved or deleted |
 | `UNMANAGED_FOLDER` | `Unmanaged` | where stage 5b parks folders that are not ours |
-| `TRASH_FOLDER`, `TRASH_KEEP_DAYS` | `Trash`, 30 | where stage 5c puts what it reclaims, and how long before it is purged |
+| `TRASH_FOLDER`, `TRASH_KEEP_DAYS` | `Trash`, 30 | where stage 5c puts what it reclaims, and how many days (1 to 3650) after its record before it is purged |
 | `WABBAJACK_DIR` | `null` | where Wabbajack is installed; `null` auto-detects |
 | `INSTALL_MODE` | `cli` | how a staged list is handed over: `cli`, `gui`, or `off` |
 | `AUTO_TRACK` | `true` | match every manifest in the folder against the feeds automatically |
-| `EXCLUDE`, `TRACK` | `[]` | lists to leave alone, and pins for lists auto-matching cannot resolve |
+| `EXCLUDE`, `TRACK` | `[]` | lists to leave alone, and pins, by feed key: a list pinned here is followed even when its file is matched only by its title, which nothing else is |
 | `HIDDEN` | `[]` | published lists hidden from the gallery, by feed key; the Browse tab's Hide button writes it |
 | `HIDE_NSFW` | `false` | keep the lists their authors mark NSFW out of the Browse tables; the window's "hide NSFW lists" box and the console's `[n]` write it. Display only |
 | `STAGE_LIST` | `null` | which list a scheduled run stages; `--only` overrides it |
@@ -649,7 +867,7 @@ differ from the default.
 | `ASSIST_CLICK_AHEAD` | `false` | assist mode opens the next Nexus page while the current file downloads |
 | `ASSIST_QUEUE_DEPTH` | 1 | with click-ahead, how many clicked files may wait behind the one downloading; 1 keeps you in step with the transfer |
 | `ASSIST_WINDOW` | `true` | show the Nexus pages in the wizard's own window rather than your browser; see "The download window" |
-| `NOTIFY_URL` | `null` | an ntfy topic or Discord webhook for a scheduled run's report |
+| `NOTIFY_URL` | `null` | an ntfy topic or Discord webhook for a scheduled run's report; a web address only |
 | `THEME` | `light` | the window's colours, `light` or `dark`; the Dark mode switch writes it |
 
 The downloader decides where an archive is written and the sorter decides where
@@ -663,7 +881,29 @@ account the website mints one per click, which assist mode captures: it
 registers itself as the `nxm://` handler, shows each mod's download page in
 turn, and waits for you to click *Slow download*. The handler is always handed
 back on exit, including Ctrl+C — without that, Wabbajack's own downloads keep
-landing here instead.
+landing here instead. A run that could not hand it back - killed from Task
+Manager, its console closed, the power cut - leaves it to the next start of
+the window, the console wizard or a run that changes something (not a
+`--check`, a `--dry-run` or a `--gallery`), which hands it back unless a
+session is listening for clicks right now. A handler taken on purpose with
+`wj_downloader.py --register-nxm`, to collect clicks for a later `--nxm-file`,
+stays this tool's until `--unregister-nxm`. The handler restored is the one
+saved when it was taken, and never this tool's own command, however it was
+started; one that another program registered meanwhile is left exactly as
+it is; and when the one in place cannot be saved first, it is not taken at
+all.
+
+Each page waits for its own file's click. A second click on the same page -
+the page shows no reaction while the file downloads, and people click again -
+is ignored, where it used to be taken for the next page's click, which then
+went unrecorded. A click for a file further down the list is taken at once,
+and the page goes on waiting for its own, with the time that file took to
+download given back to it. A page nobody clicks within three
+minutes is recorded as a failure, so a run whose every page timed out no
+longer exits 0. A request to the Nexus API that fails - a connection dropped
+mid-reply, a reply that is not JSON, a 502, 503 or 504, a `Retry-After` given
+as a date - is waited out and tried again, and ends as an error the run
+reports, never as a traceback two hours into a session.
 
 Before a page is opened, the API is asked which game's site serves the mod,
 because manifests name a game several ways and not all of them are site names.
@@ -743,7 +983,10 @@ session, which is the only thing that actually works.
 An API key is required either way — it is what redeems the key from each click.
 It is looked for on the command line (`--apikey`), then in `NEXUS_API_KEY`, then
 in Windows Credential Manager, then in `nexus_api_key.txt` beside the scripts
-(gitignored). The file is plain text in a folder on a share another machine
+(gitignored). That file is read in whatever encoding Windows wrote it: UTF-8,
+with or without a byte order mark, or UTF-16, which is what Windows
+PowerShell 5.1's `"key" > nexus_api_key.txt` writes and which used to stop
+every lookup of the key with a decoding error. The file is plain text in a folder on a share another machine
 mounts too, so the Settings tab's **Nexus API key** section can move the key
 into Credential Manager, so the folder holds no secret, and deletes the file
 only once the stored copy reads back the same. It also takes a key typed in, or forgets the stored one.
@@ -789,6 +1032,14 @@ game is installed; the game is missing; or Wabbajack does not support that game
 at all (Dark Souls 3, for one, is not in its list). A missing CLI reports
 "unknown" rather than guessing either way.
 
+The install folder is checked before anything starts. It may not be the
+downloads folder, inside it or around it, since Wabbajack would read what it
+is writing; and it may not be inside, or hold, the archive root, this tool's
+folder or the modlist file. Wabbajack owns the folder it installs into:
+inside the archive root it would be read as a game's pools, a stray to park
+or Master's content to reclaim, and around the tools it would be installing
+over them. Only the list's own downloads folder used to be checked.
+
 ### The list's readme comes first
 
 What a list needs done before its install - Windows and Steam settings,
@@ -823,7 +1074,10 @@ readme opened and read), names every step in one confirmation, then fetches the
 new manifest if one is published,
 downloads what that manifest is missing (a click per Nexus file in assist
 mode), stages it, and runs Wabbajack's installer into the same folder, which
-updates it in place. It stops at the first step that fails, and says which.
+updates it in place. It stops at the first step that fails, and says which: a
+download refused for want of space, or a downloader that fails outright,
+stops it before anything is staged or installed over the folder Wabbajack
+keeps the list in.
 The Start tab lists what is installed, and which installs are behind.
 
 ### Is Wabbajack itself current?
@@ -846,9 +1100,16 @@ folder is gitignored. Wabbajack updates itself: run `Wabbajack.exe` and its
 launcher downloads the new version into a subfolder of its own, leaving the old
 one where it was at some 700 MB. Whenever this tooling next looks at Wabbajack
 it removes those superseded version folders, and says so in the log. Only
-folders that are version-named and hold the program go, only ones older than
-the newest, only once the newest is whole, and never while a Wabbajack process
-is running, since the launcher is one and the new version may still be arriving.
+folders named exactly like a version (`4.2.3.0`) and holding the program go,
+only ones older than the newest, only once the newest is whole, and never
+while a Wabbajack process is running, since the launcher is one and the new
+version may still be arriving - nor when whether one runs cannot be told. A
+copy Explorer named `4.2.3.0 - Copy (2)`, or a `backup_20261010` holding the
+CLI, is neither a version nor the newest: either used to be ranked by every
+digit in its name, taken for the newest, and had the real versions pruned as
+superseded. A version folder holding your manifests stays whatever its age,
+since `MANIFEST_DIR` may point into Wabbajack's own versioned
+`downloaded_mod_lists`.
 
 It also warns when archives are still outstanding — Wabbajack will try to fetch
 those itself, which on a free account means its own click-per-file flow rather
@@ -861,6 +1122,40 @@ into portable MO2 instances without Vortex, Stardew Valley VERY Expanded among
 them, and a survey of all 16,076 published collections found little that
 Wabbajack does not already serve. What was learned, and what picking the work
 up again would take, is in [docs/nexus-collections.md](docs/nexus-collections.md).
+
+## How a download is checked
+
+Every file is fetched into a `.part` beside its destination, and resumes from
+there after a dropped connection, a stall or a restart. Before it takes its
+name it is checked against the manifest - its size and its xxHash64 - and a
+file that fails is discarded, while whatever already had that name is left
+exactly as it was (see "A file is never written over"). A file whose hash
+cannot be read, because the share dropped mid-read or another program holds
+it open, fails as well: not read is not checked, and it used to pass. The
+resume is checked too. A server that answers a resume from another place than
+the one asked for, or sends more than the manifest says the file is, has the
+`.part` started again or discarded rather than spliced or left to fill the
+disk. A `.part` that is already the whole file is finished rather than
+fetched again, and a server that refuses even a fresh start is given up on
+rather than asked again for as long as the `.part` could not be removed.
+
+Only web addresses are fetched, `http` and `https`, wherever the address came
+from, and a redirect is followed only to another web address: urllib follows
+one anywhere, `ftp:` included. A redirect to another host leaves the
+request's credentials behind, the Nexus API key among them; it used to carry
+every header along.
+
+Wabbajack's CDN serves a file in parts. At most two parts per worker are
+fetched or held at once, however large the file - every part used to be kept
+until the last one arrived, the whole file in memory, 4.7 GB for the largest
+manifest here - and a definition whose hash or size is not the build the
+manifest pins is refused before a part is fetched. A part that keeps failing,
+a full disk or a stop ends the transfer at once, and what was written is kept
+for the next run to resume.
+
+A stop - Ctrl+C, or the window asking the download it started to stop - ends
+a transfer at its next chunk and keeps its `.part`; it used to wait for every
+download in flight, and the CDN for every part it had queued.
 
 ## Download order
 
@@ -939,7 +1234,7 @@ recognised (if unfetchable) source rather than "unknown".
 | --- | --- |
 | `wj_config.py` | every setting's default, the archive layout, and the naming rules the rest share: reserved names, the `~N` suffix, which GameTypes share a folder |
 | `wj_settings.json` | your settings; `wj_settings.example.json` documents every key |
-| `runtime\` | what the tools write as they run: `wj_autoupdate.log` and the sorter's and downloader's logs; the state file and the manifest cache; `wj_overview.json`, what the Start tab shows; the lock; the files an assist session shares with the `nxm://` handler; and the `deleted_`, `purged_trash_` and `merged_` records of what stage 5 took |
+| `runtime\` | what the tools write as they run: `wj_autoupdate.log` and the sorter's and downloader's logs; the state file and the manifest cache; `wj_overview.json`, what the Start tab shows; the lock; the files an assist session shares with the `nxm://` handler, and the stop file the window leaves for a child it asks to stop; and the `deleted_`, `purged_trash_` and `merged_` records of what stage 5 took, each under a name of its own |
 | `wj_wabbajack.py` | finding Wabbajack, whether it is the newest release, the game preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_gallery.py` | the published gallery and its validation reports: what exists, and how much of it you hold |
@@ -951,7 +1246,7 @@ recognised (if unfetchable) source rather than "unknown".
 | `wj_sorter.py` | moves archives between pools |
 | `wj_cdn.py` | the Wabbajack CDN's multi-part protocol |
 | `wj_merge_pool.py` | folds one game's pool folder into another's, once: renames, hash-proven drops, a record |
-| `wj_paths.py` | which folder is ours, and how a script is launched — the two answers that differ between running from source and running from a build |
+| `wj_paths.py` | which folder is ours, and how a script is launched — the two answers that differ between running from source and running from a build; and the two rules every tool keeps: only web addresses are fetched (`urlopen`), and no file is ever put where another one is (`move_file`, `publish`, `unique_path`) |
 | `wj_launcher.py` | a build's entry point: decides which of the programs above the binary is being asked to be |
 | `build.py`, `WabbajackWizard.spec` | make the Windows binaries; `release.py` makes the source zip |
 
@@ -962,35 +1257,43 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1246 checks across eighteen suites. None of them touch the live archive pools:
+environment instead). 1605 checks across nineteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
-a temporary pool, with no changes to the code under test. The download suites
-serve their own localhost HTTP server, so they need no internet and can force
-exactly the failure they want to check. A full run removes its sandboxes from
-`%TEMP%` when every suite passes, and keeps them, named, when one fails; a
-suite run on its own keeps its sandbox either way.
+a temporary pool, with no changes to the code under test. The suites that
+fetch serve their own localhost HTTP server - downloads, the CDN, the feed
+registry and its feeds, a notification endpoint - so they need no internet and
+can force exactly the failure they want to check; every other run is pointed
+at a feed registry nobody serves (`WJ_FEED_REGISTRY`), so nothing reaches
+GitHub by accident. Nor does any suite reach this Windows account's own
+state: `WJ_NO_CREDENTIAL_STORE` keeps the Nexus key in Credential Manager out
+of reach, and `WJ_NO_REGISTRY` keeps every run from taking or handing back the
+`nxm://` handler, which the suites exercise against a registry of their own.
+A full run removes its sandboxes from `%TEMP%` when every suite passes, and
+keeps them, named, when one fails; a suite run on its own keeps its sandbox
+either way.
 
 | suite | covers |
 | --- | --- |
-| `t1_sorter` | aborting on an unreadable manifest, reserved names, demand-based pooling, staging, size-checked collisions, dry-run purity, bad arguments, identical extras settling in one pass, the shared manifest cache |
-| `t2_download` | hard vs transient HTTP failures, retry and resume, truncated transfers, verification, `.meta` sidecars, URL encoding, several small files at once with a stalled slot holding up nothing else, assist mode's click-ahead, the pages shown by a window that ends the run when closed, a progress line that cannot be written, and which program is registered for `nxm://` |
-| `t3_cdn` | broken definitions in four shapes, bad part bytes and lengths, whole-file hash mismatch, resume from a partial download, stale and impossible sidecars |
-| `t4_updater` | filename-to-feed-key matching, negative-cache expiry, damaged state files, odd feed shapes, the start-up guards |
-| `t5_wizard` | empty data in every stage, missing folders, deleting a modlist whose pieces are already gone, awkward filenames |
+| `t1_sorter` | aborting on an unreadable manifest, reserved names and names Windows reads as a pool, demand-based pooling, staging that never hands a list another list's build, builds nobody wants parked in Master, size-checked collisions, a move that never lands on a file, a stop taken between two whole moves, a partial download and its resume record left in place, dry-run purity, bad arguments, identical extras settling in one pass, the shared manifest cache |
+| `t2_download` | hard vs transient HTTP failures, retry and resume, truncated transfers, verification before a file takes its name and failing when the file cannot be read, a file already under the name kept rather than replaced, a resume the server cannot serve or serves from elsewhere, an oversize reply, redirects refused off the web and stripped of credentials across hosts, Nexus API errors as answers, a stop at the next chunk, `.meta` sidecars, URL encoding, several small files at once, assist mode's click-ahead, second clicks, clicks ahead and timeouts, the window that ends the run when closed, and the `nxm://` handler taken, handed back, recovered after a crash and kept when taken on purpose, against a registry of its own |
+| `t3_cdn` | broken definitions in four shapes and parts that do not lay out as a file, bad part bytes and lengths, a body cut short, whole-file hash mismatch, a hash that cannot be read, never more than a few parts in hand, a stop and a full disk ending the transfer with what was written kept and no part retrying after it, a different build refused before download, the file already under the name kept, resume from a partial download, stale and impossible sidecars |
+| `t4_updater` | filename-to-feed-key matching, title matches only followed when pinned and the file named after the key preferred, negative-cache expiry, damaged state files, odd feed shapes and feeds that answered but could not be read, the snapshot's lifetime and what it says of the feeds asked for, manifests checked when a feed states nothing, the old manifest kept before it is replaced - from another volume too - or not replaced, notifications only to web addresses and not from a dry run, the start-up guards, and whole `--run`s against feeds of its own: exit codes, notifications, a dry run that writes nothing, unattended assist mode |
+| `t5_wizard` | empty data in every stage, missing folders, deleting a modlist whose pieces are already gone, awkward filenames, a sidecar-named folder, an unhandled error exiting 4 |
 | `t6_planning` | present vs stale vs absent decisions, `--force`, foreign-installer exclusion, manifest cache invalidation, backup pruning |
-| `t7_identity` | one filename, several builds: the wrong copy must never satisfy a list that wants a different one |
+| `t7_identity` | one filename, several builds: the wrong copy must never satisfy a list that wants a different one, and whole staging-and-download runs in which a build another list pins must survive |
 | `t8_order` | download order — smallest, largest, manifest — and where unknown sizes land |
-| `t9_wabbajack` | finding the newest CLI, the game preflight, path overlap, the install command |
+| `t9_wabbajack` | finding the newest CLI and only version-named folders, pruning that keeps your manifests and never runs on a guess, a `tasklist` that cannot answer, the game preflight, path overlap and installs kept out of the tooling's own folders, the install command, an update in place that stops at a failed download |
 | `t10_lookup` | every location an archive may sit in and still count as already downloaded |
-| `t11_gallery` | the gallery's hand-edited JSON, case-inconsistent game tokens, cache fallback when the network is down, the gap maths, Wabbajack's own "Unavailable" rule, and the hidden flag never reaching a tracked list |
-| `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized, the refusal to delete on an incomplete picture, and a hidden list protecting nothing and blocking nothing |
-| `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, `~N` copies protected and restored, reserved names refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row record, the un-staging warning, hash-proven duplicates, the trash and its purge, stale CSVs, waiting for Wabbajack |
+| `t11_gallery` | the gallery's hand-edited JSON, a reply that is not JSON never cached, case-inconsistent game tokens and one game under two names, cache fallback when the network is down, reports for an older build fetched again and reports that cannot be read counted as gaps, the gap maths, Wabbajack's own "Unavailable" rule, and the hidden flag never reaching a tracked list |
+| `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized and parked, the refusal to delete on an incomplete picture, a hidden list protecting nothing and blocking nothing, and stage 5e's two questions, its files-only sweep and the junction it does not follow |
+| `t13_delete` | stage 5 driven end to end with scripted answers: a build another list needs surviving a deletion, a same-size file parked rather than deleted, `~N` copies protected and restored, reserved names and `Master.` refused, a failed rebuild or an untrustworthy manifest disarming the step, folder-level demand, the per-row record and no clearing without one, records that never overwrite each other, the manifests checked again as a clear runs, moves across volumes and set-asides that happen whole or not at all, the un-staging warning, hash-proven duplicates, the trash, its record-based purge and the files no record accounts for, a cleanup put back by hash, stale CSVs, waiting for Wabbajack and asking when that cannot be told |
 | `t14_merge` | folding one game folder into another: refusals on anything unrecognised, a dry run that changes nothing, hash-proven drops, same-size-different-content kept, suffixed collisions, the record |
-| `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, and the Start tab opening a second window from the first one's file without measuring anything |
+| `t15_gui` | the window built for real on a withdrawn root against a sandbox, every tab loaded, the destructive flows driven through the buttons with dialogs stubbed, the Settings tab round-tripped against a sandbox file and saving only what changed, browsing a game with no pool and giving it one, hiding a list and bringing it back, dark mode, the Start tab opening a second window from the first one's file without measuring anything, a clear that re-reads the manifests before it runs, a failing handler that does not freeze the window, closing it mid-job with nothing further started, a new archive root left for the next start, Reset to defaults, and a delete refused for a name Windows reads as a pool |
 | `t16_pool` | laying out a pool for a new game: the layout produced, running it twice, an existing folder reused whatever its case, names that would collide with a pool folder or escape the root, folding one game into another game's pool and the mapping that writes |
-| `t17_settings` | what each setting may be: folder names checked for what they would name, one folder never two things at once, text that has to say something, a bad file at start-up, a refused value never written, and the purge and 5c refusing a trash folder that is a pool or a modlist's own |
-| `t18_keystore` | where the Nexus API key is looked for and in what order, moving the file's key into Credential Manager and keeping the file when the store refuses or gives back something else, the console flags; against a stand-in store, so no suite reaches the account's credentials (`WJ_TEST_CREDMAN=1` adds one round trip through the real one, under a test name) |
+| `t17_settings` | what each setting may be: folder names checked for what they would name, a list's name judged as Windows reads it, `ARCHIVE_ROOT` never a drive's root or around the tools, `TRASH_KEEP_DAYS`' range, one folder never two things at once, text that has to say something, a bad file at start-up, a refused value never written, a change made to the file as it is now with the two paths left for the next start - for a child process too - two changes at once both kept, and the purge and 5c refusing a trash folder that is a pool or a modlist's own |
+| `t18_keystore` | where the Nexus API key is looked for and in what order, a key file in UTF-16 or with a BOM, moving the file's key into Credential Manager and keeping the file when the store refuses or gives back something else, the console flags; against a stand-in store, so no suite reaches the account's credentials (`WJ_TEST_CREDMAN=1` adds one round trip through the real one, under a test name) |
+| `t19_safety` | the source itself, read and never run: every call that deletes or overwrites a file is in a reviewed list saying what it may destroy and why that is safe, nothing fetches but through the web-only opener, the never-overwrite rules have one implementation, the launchers keep their line ends and exit codes, and the version agrees with the changelog |
 
 Seven real bugs were found this way and are covered by regression checks: a
 connection closing part-way through a download was reported as success (so the
@@ -1005,6 +1308,13 @@ the Master pool; and a list adopted and fetched in one run read as entirely
 missing, because the set of legitimate list folders was snapshotted at start-up.
 A CDN archive was also accepted on the CDN's own hash alone; it is now refused
 before download when that differs from the manifest's.
+
+The review behind 1.5.0 added the rest, each reproduced in a sandbox before it
+was fixed - first among them a download that deleted, with no trash and no
+record, the build another list still pinned, and staging that had handed it
+the wrong build to begin with. `CHANGELOG.md` lists them all. Every check
+added for them fails when run against 1.4.1, which is how the checks were
+shown to catch what they are for.
 
 ## Building the binaries
 
