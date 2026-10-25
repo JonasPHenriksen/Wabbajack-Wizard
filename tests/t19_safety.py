@@ -65,6 +65,8 @@ ALLOWED = {
     ("wj_downloader", "load_light_records"): ({"os.replace"}, "the manifest cache, from its .tmp"),
     ("wj_downloader", "save_speeds"): ({"os.replace"}, "the measured speeds, from their .tmp"),
     ("wj_downloader", "_forget_backup"): ({"os.remove"}, "the nxm:// handler backup, once restored"),
+    ("wj_downloader", "_write_small"): ({"f.truncate"},
+        "its own nxm:// backup, --register-nxm note or port file, cut to what was just written"),
     ("wj_downloader", "NxmListener.close"): ({"os.remove"}, "the listener's own port file"),
     ("wj_downloader", "watch_stop_file.watch"): ({"os.remove"}, "the stop file, once read"),
     ("wj_sorter", "watch_stop_file.watch"): ({"os.remove"}, "the stop file, once read"),

@@ -1905,8 +1905,13 @@ def download_list(records, fn, st, assist):
     A.WJ.invalidate_existing_cache()
     after = list_status(records[fn]) or st
     if after["missing"]:
-        out(f"  {after['missing']} archive(s) still missing "
-            f"({human(after['bytes'])}). Re-run to continue.")
+        # Any exit but 0, 1 (some files failed) or 130 (interrupted) is the
+        # downloader stopping on an error - the Nexus click capture that could
+        # not start, say - that a re-run meets again; "re-run to continue"
+        # sent people round that loop.
+        out(f"  {after['missing']} archive(s) still missing ({human(after['bytes'])})."
+            + (" The downloader stopped on an error; a re-run meets it again until what "
+               "the log names is fixed." if rc not in (0, 1, 130) else " Re-run to continue."))
     else:
         out("  Complete.")
     if rc not in (0, 1):

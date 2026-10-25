@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.5.1 — 2026-10-25
+
+### Fixed
+
+- **The Nexus click capture would not start in a copied folder.** Taking the
+  nxm:// handler first saves the one in place to `runtime\.nxm_prev_handler`.
+  A copy made by something that hides dotfiles leaves that file hidden, and
+  Windows will not overwrite a hidden file the ordinary way - Access Denied -
+  so every `--nxm-assist` run stopped at "Could not save the current nxm://
+  handler" before its first page. That backup, the `--register-nxm` note and
+  the listener's port file are now written in a way a hidden file allows.
+- **A Nexus step that could not start looked like one with nothing to do.**
+  The download window opened first and was shut again while WebView2 was
+  still starting, which printed an `E_ABORT` stack trace over the real error;
+  the run then exited 0, and the wizard said "Re-run to continue", which met
+  the same error. The handler and the click listener are now had before any
+  window opens. A run that cannot have them opens none, reports "Nexus not
+  tried" in its summary and exits 2, so the wizard says a re-run will meet
+  the error again, and an update in place stops before staging.
+
+Found on 2026-10-25 with CyberpunkTHING: 305 Nexus files, none tried, and two
+runs that both exited 0.
+
+Tests: 1612 checks across 19 suites, up from 1605.
+
 ## 1.5.0 — 2026-10-10
 
 A review of the whole suite for what it could lose. Every fix below was first

@@ -897,7 +897,10 @@ stays this tool's until `--unregister-nxm`. The handler restored is the one
 saved when it was taken, and never this tool's own command, however it was
 started; one that another program registered meanwhile is left exactly as
 it is; and when the one in place cannot be saved first, it is not taken at
-all.
+all. The handler and the listener for its clicks are had before the window
+opens: a run that cannot have them opens none, tries no Nexus file, says so
+in its summary and exits 2, so neither the wizard nor an update in place
+takes it for a run that left files for the next one.
 
 Each page waits for its own file's click. A second click on the same page -
 the page shows no reaction while the file downloads, and people click again -

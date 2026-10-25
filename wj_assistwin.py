@@ -197,9 +197,10 @@ class AssistWindow:
         webview.start(func=go, gui="edgechromium", private_mode=False,
                       storage_path=storage_dir())
         # The window closing returns control here at once, while the work is
-        # still noticing and tidying up: handing the nxm handler back, closing
-        # its listener. Without this wait the caller printed its summary and
-        # went on before that had happened.
+        # still noticing and winding down: stopping the download in flight,
+        # counting what it had. Without this wait the caller handed the nxm
+        # handler back, printed its summary and went on before that had
+        # happened.
         self.finished.wait(60)
         if self.error is not None:
             raise self.error

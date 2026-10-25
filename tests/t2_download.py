@@ -1416,9 +1416,68 @@ try:
     def no_listener(run_dir):
         raise OSError(10048, "Only one usage of each socket address is normally permitted")
     D.NxmListener = no_listener
-    D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args, opener=ScriptedOpener({}))
+    got = D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args, opener=ScriptedOpener({}))
     check("a click listener that cannot start hands the nxm handler straight back",
           calls == ["register", "unregister"], str(calls))
+    check("  and the run is told no Nexus file was tried, for its exit code to say", got is False, repr(got))
+    D.NxmListener = saved_assist[-1]
+
+    # The window path, through a stand-in for wj_assistwin: what it is asked
+    # for, and when.
+    saved_win = D._ASSISTWIN
+    made = []
+
+    def windows(cls):
+        def make():
+            made.append(cls.__name__)
+            return cls()
+        return types.SimpleNamespace(available=lambda: True, AssistWindow=make)
+
+    class RunsLoop(ScriptedOpener):
+        """A window that runs the loop, its one page clicked."""
+        def __init__(self):
+            super().__init__({1: [(0.2, 1, 10)]})
+
+        def run(self, work):
+            work(self)
+
+    class WontStart:
+        """A window whose engine fails before the loop is ever run."""
+        def run(self, work):
+            raise RuntimeError("WebView2 would not start")
+
+    D.ASSIST_WINDOW = True
+    try:
+        calls.clear()
+        D.register_nxm = lambda sd: calls.append("register") or False
+        D._ASSISTWIN = windows(RunsLoop)
+        got = D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args)
+        check("a handler that cannot be taken: no window is opened, and nothing was tried",
+              got is False and made == [] and calls == ["register"], str((got, made, calls)))
+
+        calls.clear()
+        D.register_nxm = lambda sd: calls.append("register") or True
+        dest("nx1.bin")
+        res = {"done": 0, "failed": 0, "failures": []}
+        got = D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args)
+        check("taken first, then the window opens and its click lands the file",
+              got is True and made == ["RunsLoop"] and res["done"] == 1, str((got, made, res)))
+        check("  and the handler is handed back and the listener closed once, after it",
+              calls == ["register", "unregister"]
+              and not os.path.exists(os.path.join(TMP, D.NXM_PORT_FILE)), str(calls))
+
+        calls.clear()
+        D._ASSISTWIN = windows(WontStart)
+        try:
+            D.download_nexus_assist(nx_items, FakeNexus(), TMP, res, TMP, args)
+            raised = False
+        except RuntimeError:
+            raised = True
+        check("a window that fails before its loop runs still hands the handler back",
+              raised and calls == ["register", "unregister"]
+              and not os.path.exists(os.path.join(TMP, D.NXM_PORT_FILE)), str((raised, calls)))
+    finally:
+        D._ASSISTWIN = saved_win
 finally:
     (D.register_nxm, D.unregister_nxm, D.resolve_browser_domain, D.CLICK_AHEAD,
      D.NXM_CLICK_TIMEOUT, D.ASSIST_WINDOW, D.NxmListener) = saved_assist
@@ -1541,6 +1600,17 @@ try:
     D.unregister_nxm(run_dir)
     check("a backup that is ourselves is never 'restored': the handler is removed instead",
           reg.command() is None and "software\\classes\\nxm" not in reg.keys, str(reg.keys))
+
+    if os.name == "nt":
+        import ctypes
+        reg.set_command(WABBAJACK)
+        io.open(backup, "w", encoding="utf-8").write(OURS_ELSEWHERE)   # stale, and longer
+        ctypes.windll.kernel32.SetFileAttributesW(backup, 0x2)         # FILE_ATTRIBUTE_HIDDEN
+        check("a backup Windows has marked hidden is still written over, and the handler taken",
+              D.register_nxm(run_dir) is True and read(backup, True) == WABBAJACK, str(read(backup, True)))
+        D.unregister_nxm(run_dir)
+        check("  and handing it back restores Wabbajack's from it",
+              reg.command() == WABBAJACK and not os.path.exists(backup), str(reg.command()))
 
     reg.set_command(WABBAJACK)
     D.register_nxm(run_dir)                      # a run took the handler and was killed

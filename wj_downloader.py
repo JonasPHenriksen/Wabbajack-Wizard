@@ -1386,8 +1386,7 @@ def register_nxm(run_dir, keep=False):
         LOG.debug("nxm handler is already ours; keeping the saved previous handler.")
     else:
         try:
-            with open(os.path.join(run_dir, NXM_PREV_HANDLER), "w", encoding="utf-8") as f:
-                f.write(prev or "")
+            _write_small(os.path.join(run_dir, NXM_PREV_HANDLER), prev or "")
         except OSError as e:
             # Without the backup, handing the handler back could only remove
             # it: whatever was registered before would be lost. Not taken.
@@ -1409,8 +1408,8 @@ def register_nxm(run_dir, keep=False):
         LOG.info("     Previous handler saved; --unregister-nxm restores it.")
     if keep:
         try:
-            with open(os.path.join(run_dir, NXM_KEPT_FILE), "w", encoding="utf-8") as f:
-                f.write("taken with --register-nxm; kept until --unregister-nxm\n")
+            _write_small(os.path.join(run_dir, NXM_KEPT_FILE),
+                         "taken with --register-nxm; kept until --unregister-nxm\n")
         except OSError as e:
             LOG.warning("[WARN] Could not note that the handler is taken on purpose (%s); the "
                         "next start of the tool may hand it back.", e)
@@ -1511,6 +1510,20 @@ def _forget_backup(path):
         pass
 
 
+def _write_small(path, text):
+    """Write `text` to `path`, replacing whatever it held.
+
+    Not open(path, "w"): Windows will not overwrite a hidden file that way -
+    Access Denied - and these dotfiles come out hidden when the folder is
+    copied by something that hides dotfiles. A hidden backup left a run
+    unable to save the nxm:// handler, and so unable to take it. Opened
+    without truncating, written, then cut to length, hidden is no matter."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0))
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.truncate()
+
+
 def forward_nxm(url, run_dir):
     """Handler-invocation entry point: hand the nxm URL to a running listener,
     or append it to the fallback file if no listener is up."""
@@ -1548,8 +1561,7 @@ class NxmListener:
         self.sock.bind((NXM_LISTEN_HOST, 0))
         self.sock.listen(8)
         self.port = self.sock.getsockname()[1]
-        with open(os.path.join(run_dir, NXM_PORT_FILE), "w", encoding="utf-8") as f:
-            f.write(str(self.port))
+        _write_small(os.path.join(run_dir, NXM_PORT_FILE), str(self.port))
 
     def wait(self, timeout):
         """Block up to `timeout` s for one nxm URL; return it or None."""
@@ -2926,44 +2938,69 @@ def download_nexus_assist(items, nexus, dest_dir, results, run_dir, args, opener
     Where the pages are shown: `opener` if given; else a window of our own
     when ASSIST_WINDOW is on and the engine is there (see wj_assistwin); else
     the browser. The window owns the main thread while it is open, so the
-    capture loop then runs on a thread of the window's making."""
+    capture loop then runs on a thread of the window's making.
+
+    Returns False when the capture could not be set up - the nxm:// handler
+    not taken, or nothing listening for clicks - so no page was shown and no
+    file tried; the run's exit code says so rather than 'nothing failed'."""
     if not _HAVE_WINREG:
         LOG.error("[ERROR] winreg unavailable; cannot register the nxm handler.")
-        return
-    if opener is None:
-        if ASSIST_WINDOW and _ASSISTWIN is not None and _ASSISTWIN.available():
-            LOG.info("The Nexus pages open in a window of their own. Sign in to Nexus there "
-                     "if it asks - once; the window keeps its login. Closing it ends the run.")
-            win = _ASSISTWIN.AssistWindow()
-            win.run(lambda w: _assist_loop(items, nexus, dest_dir, results, run_dir, args, w))
-            return
-        if ASSIST_WINDOW:
-            LOG.info("The Nexus pages open in your browser (%s).",
-                     _ASSISTWIN.why_not() if _ASSISTWIN is not None else "wj_assistwin is missing")
-        opener = _BrowserOpener()
-    _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener)
+        return False
+    # Before any window opens. Taken inside it, a handler that could not be
+    # had shut the window again while its engine was still starting, and
+    # WebView2 printed an E_ABORT stack trace over the real error.
+    listener = _start_capture(run_dir)
+    if listener is None:
+        return False
+    try:
+        if opener is None:
+            if ASSIST_WINDOW and _ASSISTWIN is not None and _ASSISTWIN.available():
+                LOG.info("The Nexus pages open in a window of their own. Sign in to Nexus there "
+                         "if it asks - once; the window keeps its login. Closing it ends the run.")
+                win = _ASSISTWIN.AssistWindow()
+                win.run(lambda w: _assist_loop(items, nexus, dest_dir, results, run_dir, args, w,
+                                               listener))
+                return True
+            if ASSIST_WINDOW:
+                LOG.info("The Nexus pages open in your browser (%s).",
+                         _ASSISTWIN.why_not() if _ASSISTWIN is not None else "wj_assistwin is missing")
+            opener = _BrowserOpener()
+        _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener, listener)
+        return True
+    finally:
+        listener.close()
+        # Hand the nxm:// handler back to whatever owned it (normally
+        # Wabbajack). Without this, every "download with manager" click on
+        # Nexus keeps landing on this script until you notice and fix it by
+        # hand - including the clicks Wabbajack itself is waiting for. Here,
+        # not in the loop, so a window that never got as far as running the
+        # loop hands it back too.
+        unregister_nxm(run_dir)
 
 
-def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
-    global _ACTIVE_OPENER
-    by_ids = {nexus_ids(a): a for a in items}
-    fetched = set()
-    handled = set()             # every file a click has been taken for this run
-    learned_domains = {}
-
-    # Make sure we are the nxm handler (so clicks reach us).
+def _start_capture(run_dir):
+    """Take the nxm:// handler and start the listener its clicks are
+    forwarded to. The listener, or None - with the reason logged - when
+    either cannot be had."""
     if not register_nxm(run_dir):
         LOG.error("[ERROR] Could not register the nxm handler; aborting assist mode.")
-        return
-
+        return None
     try:
-        listener = NxmListener(run_dir)
+        return NxmListener(run_dir)
     except OSError as e:
         # Registered, and nothing listening: hand the handler straight back,
         # or every mod manager's click would land in a file until next time.
         LOG.error("[ERROR] Could not start the click listener (%s); aborting assist mode.", e)
         unregister_nxm(run_dir)
-        return
+        return None
+
+
+def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener, listener):
+    global _ACTIVE_OPENER
+    by_ids = {nexus_ids(a): a for a in items}
+    fetched = set()
+    handled = set()             # every file a click has been taken for this run
+    learned_domains = {}
     _ACTIVE_OPENER = opener
     if hasattr(opener, "on_link"):
         # The window catches the nxm:// link itself and hands it here; the
@@ -3120,12 +3157,6 @@ def _assist_loop(items, nexus, dest_dir, results, run_dir, args, opener):
             _abort_worker(worker)
     finally:
         _ACTIVE_OPENER = None
-        listener.close()
-        # Hand the nxm:// handler back to whatever owned it (normally
-        # Wabbajack). Without this, every "download with manager" click on
-        # Nexus keeps landing on this script until you notice and fix it by
-        # hand - including the clicks Wabbajack itself is waiting for.
-        unregister_nxm(run_dir)
 
 
 # ----------------------------------------------------------------------
@@ -3410,6 +3441,7 @@ def main():
         return
 
     results = {"done": 0, "failed": 0, "failures": []}
+    nexus_not_tried = False     # the click capture could not start: no Nexus file was tried
 
     # What this run will cost, from the speeds downloads here have measured,
     # and the counter the progress line reads its time left from. The Nexus
@@ -3444,7 +3476,8 @@ def main():
                                      args.nxm_file, limit=args.limit)
         elif args.nxm_assist:
             banner("STEP 6: DOWNLOADING (NEXUS, CLICK-CAPTURE)")
-            download_nexus_assist(nexus_items, nexus, dest_dir, results, run_dir, args)
+            nexus_not_tried = not download_nexus_assist(nexus_items, nexus, dest_dir, results,
+                                                        run_dir, args)
         else:
             # Free account, no capture method chosen: explain and write a helper file.
             banner("STEP 6: NEXUS (FREE ACCOUNT) - ACTION NEEDED")
@@ -3473,6 +3506,10 @@ def main():
     banner("DOWNLOAD COMPLETE")
     LOG.info("-> Downloaded:        %d", results["done"])
     LOG.info("-> Failed/skipped:    %d", results["failed"])
+    if nexus_not_tried:
+        LOG.error("-> Nexus not tried:   %d - the click capture could not start; the [ERROR] "
+                  "above says why, and a re-run meets it again until that is fixed",
+                  len(nexus_items))
     LOG.info("-> Already present:   %d", skipped_present)
     LOG.info("-> Game-file sources: %d", skipped_gamefile)
     LOG.info("-> Unsupported source:%d", len(unsupported))
@@ -3496,7 +3533,10 @@ def main():
         except OSError:
             pass
     LOG.info("========================================================")
-    sys.exit(1 if results["failed"] else 0)
+    # 2, as for the other things that stop a run before it starts: the
+    # wizard and the updater read it as the download step having failed,
+    # not as files left for a re-run to pick up.
+    sys.exit(2 if nexus_not_tried else 1 if results["failed"] else 0)
 
 
 if __name__ == "__main__":
