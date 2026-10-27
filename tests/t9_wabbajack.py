@@ -585,5 +585,109 @@ try:
 finally:
     CFG.ARCHIVE_ROOT = saved_root
 
+# ---------------------------------------------------------------- 9.11
+print("\n 9.11  an archive of the right size and the wrong bytes is missing before Wabbajack")
+# Found on 2026-10-27 installing Lost Legacy: FloatingSwordFollower.zip was
+# the manifest's 500,008,225 bytes, real for the first fifth and zeros after
+# - a download cut short once its file had been laid out at full length.
+# Every table here counted it present, staging handed it over, and Wabbajack
+# read it, called it missing, and stopped the install.
+from harness import wj_hash
+box = Sandbox(os.path.join(BOXROOT, "sb9c"))
+saved_paths = (A.HERE, A.MANIFESTS, A.WJ.ARCHIVE_ROOT, CFG.ARCHIVE_ROOT)
+A.HERE, A.MANIFESTS = box.tools, box.manifests
+A.WJ.ARCHIVE_ROOT = CFG.ARCHIVE_ROOT = box.archives
+GOOD = b"a good archive " * 70
+FULL = bytes(range(256)) * 40
+CUT = FULL[:len(FULL) // 5] + b"\0" * (len(FULL) - len(FULL) // 5)
+OURS, THEIRS = b"o" * 50, b"t" * 50
+fn, stem = "Lost_@@_legacy.wabbajack", "Lost_@@_legacy"
+box.manifest(stem, "Fallout4", [("good.7z", len(GOOD), "nexus", None, wj_hash(GOOD)),
+                                ("cut.zip", len(FULL), "nexus", None, wj_hash(FULL)),
+                                ("same.7z", 50, "nexus", None, wj_hash(OURS)),
+                                ("Fallout4.esm", 7, "gamefile")])
+box.manifest("Other_@@_list", "Fallout4", [("same.7z", 50, "nexus", None, wj_hash(THEIRS))])
+folder = os.path.join(box.archives, "Fallout4", stem)
+trash = os.path.join(box.archives, "Fallout4", "Trash")
+box.pool_file("Fallout4", stem, "good.7z", len(GOOD), GOOD)
+box.pool_file("Fallout4", stem, "cut.zip", len(CUT), CUT)
+box.pool_file("Fallout4", stem, "cut.zip.meta", 5)
+box.pool_file("Fallout4", stem, "same.7z", 50, THEIRS)     # the other list's build, staged here
+A.WJ.set_known_list_dirs(A.WJ.known_list_dirs_from(box.manifests))
+A.WJ.invalidate_existing_cache()
+said = []
+real_out, real_run = W.out, A.run_script
+W.out = lambda msg="": said.append(str(msg))
+try:
+    records = A.load_plan_records()
+    st = W.list_status(records[fn])
+    check("by name and size the cut-short archive counts as present",
+          st["missing"] == 0 and st["present"] == 3, str({k: st[k] for k in ("present", "missing")}))
+    res = W.verify_staged(fn, st)
+    check("reading what was staged finds it", [b[0] for b in res["bad"]] == ["cut.zip"], str(res))
+    check("  and says so, with both hashes",
+          any("[WRONG] cut.zip" in s and wj_hash(CUT) in s and wj_hash(FULL) in s for s in said),
+          " | ".join(said))
+    check("  while the archive holding its bytes passes", res["ok"] == 1, str(res))
+    check("  and the game file, Wabbajack's to copy, is not looked for",
+          not any("Fallout4.esm" in s for s in said), " | ".join(said))
+    check("it goes to the trash with its sidecar",
+          sorted(os.listdir(trash)) == ["cut.zip", "cut.zip.meta"]
+          and not os.path.exists(os.path.join(folder, "cut.zip"))
+          and not os.path.exists(os.path.join(folder, "cut.zip.meta")), str(os.listdir(trash)))
+    got = A.trash_contents().get("Fallout4") or []
+    check("  recorded as stage 5 records what it reclaims, so it can be put back or purged",
+          res["record"] and {n for n, _p, _s, when in got if when} == {"cut.zip", "cut.zip.meta"},
+          str((res["record"], got)))
+    check("another list's build of the same name and size is not ours to move",
+          res["theirs"] == [("same.7z", "Other_@@_list")]
+          and os.path.isfile(os.path.join(folder, "same.7z")), str(res["theirs"]))
+    A.WJ.invalidate_existing_cache()
+    after = W.list_status(records[fn])
+    check("from then on it counts as missing, to every tool that asks",
+          after["missing"] == 1 and after["nexus"] == 1
+          and A.WJ.present_match(A.WJ.index_existing(os.path.join(box.archives, "Fallout4")),
+                                 {"name": "cut.zip", "size": len(FULL)})[0] is None,
+          str({k: after[k] for k in ("present", "missing")}))
+
+    print("\n      what was read once is not read again, unless it changed")
+    said.clear()
+    again = W.verify_staged(fn, after)
+    check("a second staging reads nothing it read before",
+          again["read"] == 0 and again["ok"] == 1 and again["bad"] == [], str(again))
+    box.pool_file("Fallout4", stem, "good.7z", len(GOOD), b"\0" * len(GOOD))
+    later = os.path.getmtime(os.path.join(folder, "good.7z")) + 10
+    os.utime(os.path.join(folder, "good.7z"), (later, later))
+    third = W.verify_staged(fn, after)
+    check("  but a file written since is read, and caught",
+          third["read"] == 1 and [b[0] for b in third["bad"]] == ["good.7z"], str(third))
+
+    print("\n      an update in place stops before Wabbajack is handed the folder")
+    box.pool_file("Fallout4", stem, "good.7z", len(GOOD), GOOD)
+    box.pool_file("Fallout4", stem, "cut.zip", len(CUT), CUT)  # staged again from elsewhere
+    A.WJ.invalidate_existing_cache()
+    installs = []
+    stubs = (W.download_list, WB.running_processes, WB.run_install)
+    A.run_script = lambda script, args, label, interactive=False: 0      # the sorter "ran"
+    WB.running_processes = lambda: []
+    WB.run_install = lambda *a, **k: installs.append(a) or 0
+    state = {"lists": {"Lost/legacy": {"version": "2.0.2", "file": fn}},
+             "installed": {stem: {"path": os.path.join(box.root, "Installed"), "version": "2.0.2"}}}
+    ent = {"version": "2.0.2", "size": 1, "hash": "h", "title": "Lost", "updated": ""}
+    try:
+        ok, message = W.update_install(state, ("Lost/legacy", ent, state["lists"]["Lost/legacy"],
+                                               fn, False, True), False, {"cli": "stub-cli"})
+    finally:
+        W.download_list, WB.running_processes, WB.run_install = stubs
+    check("staging finds the wrong bytes, and the installer is never started",
+          not ok and "wrong bytes" in message and installs == [], str((ok, message, installs)))
+    check("  the archive is in the trash, and missing",
+          W.list_status(records[fn])["missing"] == 1
+          and not os.path.exists(os.path.join(folder, "cut.zip")), " | ".join(said[-6:]))
+finally:
+    W.out, A.run_script = real_out, real_run
+    A.HERE, A.MANIFESTS, A.WJ.ARCHIVE_ROOT, CFG.ARCHIVE_ROOT = saved_paths
+    shutil.rmtree(box.root, ignore_errors=True)
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

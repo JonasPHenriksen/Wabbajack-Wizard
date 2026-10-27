@@ -1493,6 +1493,13 @@ def allow_children():
     _CHILD["stopping"] = False
 
 
+def stop_requested():
+    """Has the job running now been asked to stop (request_child_stop)? For
+    long work done in this process rather than in a child script, which
+    reads its stop file instead."""
+    return bool(_CHILD.get("stopping"))
+
+
 def archive_root_for_children():
     """The archive root a child script has to be told to use, or None when
     it works it out the same way itself.

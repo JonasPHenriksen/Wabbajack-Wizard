@@ -64,7 +64,9 @@ class Sandbox:
         """archives: [(filename, size, kind)] ; kind -> State $type. An entry
         may carry two more, (filename, size, kind, url, hash): where an http
         archive is fetched from - a suite's own localhost server - and the
-        hash it must have."""
+        hash it must have. Without one, the hash is that of what pool_file()
+        writes by default, so a pool built of those holds the bytes its
+        manifests pin, as a healthy one does, and staging reads it as such."""
         path = os.path.join(self.manifests, name + ".wabbajack")
         if corrupt == "notzip":
             io.open(path, "wb").write(b"this is not a zip file at all")
@@ -80,7 +82,9 @@ class Sandbox:
             fn, size, kind = entry[:3]
             url, hsh = (tuple(entry[3:5]) + (None, None))[:2]
             entries.append({
-                "Name": fn, "Size": size, "Hash": hsh or "AAAAAAAAAAA=",
+                "Name": fn, "Size": size,
+                "Hash": hsh or (wj_hash(b"x" * size) if isinstance(size, int) and size >= 0
+                                else "AAAAAAAAAAA="),
                 "Meta": "[General]\ngameName=fallout4\nmodID=%d\nfileID=%d\n"
                         % (100 + i, 900 + i),
                 "State": {"$type": kinds[kind], "GameName": "Fallout4",

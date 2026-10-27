@@ -237,10 +237,11 @@ as `THEME`.
    need a Nexus click. Downloads one list at a time, finishing each before
    offering the next.
 4. **Prepare** — gathers everything one modlist needs into its own folder for
-   Wabbajack, then offers to hand it straight over (see below), after checking
-   that Wabbajack is installed, can see the game, and is the newest release. One
-   at a time by design: staging a second list pulls the shared archives back out
-   of the first.
+   Wabbajack, reads what it gathered against the manifest's hashes, then offers
+   to hand it straight over (see below), after checking that Wabbajack is
+   installed, can see the game, and is the newest release. One at a time by
+   design: staging a second list pulls the shared archives back out of the
+   first.
 5. **Space** — what the manifests and the per-game Master pools are costing,
    with the option to delete modlists, park folders that are not ours, clear
    Master under a protection rule you choose, empty the trash, and sweep the
@@ -1049,6 +1050,35 @@ inside the archive root it would be read as a game's pools, a stray to park
 or Master's content to reclaim, and around the tools it would be installing
 over them. Only the list's own downloads folder used to be checked.
 
+### What Wabbajack is handed is read first
+
+Everything else here judges an archive by its name and size, which is quick
+enough to measure every list on every tab, and cannot see a file of the right
+size holding the wrong bytes. A download cut short after its file had been
+laid out at full length is one: on 2026-10-27 Lost Legacy's
+`FloatingSwordFollower.zip` was the manifest's 500,008,225 bytes, real for the
+first fifth and zeros after. Every table counted it present, staging handed it
+over, and Wabbajack - which reads every archive - called it missing, tried to
+fetch it, and stopped the install.
+
+So staging, for Prepare, the console's stage 4 and an update in place, ends by
+reading every archive it gathered in full and holding it to the xxHash64 the
+manifest pins, as Wabbajack will. A copy with the wrong bytes says
+`[WRONG]` with both hashes and goes to the game's trash, recorded as stage 5c
+records what it reclaims - so it can be put back from stage 5, and is purged
+`TRASH_KEEP_DAYS` later - and from then on it is missing to every tool: the
+install panel says so, Incomplete offers to fetch it, and an update in place
+stops before Wabbajack starts. A copy holding the build another list in the
+same pool pins under that name and size is that list's, says `[THEIRS]`, and
+stays where it is.
+
+Reading a big list takes about as long as Wabbajack's own first pass over it,
+so what has been read is remembered in `runtime\wj_hashes.json`, by name, size
+and modified time: staging a list again reads only what changed since. Game
+files are Wabbajack's to copy and are not read; nor is anything without
+xxhash, when Wabbajack is the only check. A stop from the window ends the
+reading where it is.
+
 ### The list's readme comes first
 
 What a list needs done before its install - Windows and Steam settings,
@@ -1086,7 +1116,9 @@ mode), stages it, and runs Wabbajack's installer into the same folder, which
 updates it in place. It stops at the first step that fails, and says which: a
 download refused for want of space, or a downloader that fails outright,
 stops it before anything is staged or installed over the folder Wabbajack
-keeps the list in.
+keeps the list in; and an archive staging finds holding the wrong bytes
+stops it before Wabbajack starts, so running it again fetches that archive
+first.
 The Start tab lists what is installed, and which installs are behind.
 
 ### Is Wabbajack itself current?
@@ -1243,7 +1275,7 @@ recognised (if unfetchable) source rather than "unknown".
 | --- | --- |
 | `wj_config.py` | every setting's default, the archive layout, and the naming rules the rest share: reserved names, the `~N` suffix, which GameTypes share a folder |
 | `wj_settings.json` | your settings; `wj_settings.example.json` documents every key |
-| `runtime\` | what the tools write as they run: `wj_autoupdate.log` and the sorter's and downloader's logs; the state file and the manifest cache; `wj_overview.json`, what the Start tab shows; the lock; the files an assist session shares with the `nxm://` handler, and the stop file the window leaves for a child it asks to stop; and the `deleted_`, `purged_trash_` and `merged_` records of what stage 5 took, each under a name of its own |
+| `runtime\` | what the tools write as they run: `wj_autoupdate.log` and the sorter's and downloader's logs; the state file and the manifest cache; `wj_hashes.json`, the archives staging has read; `wj_overview.json`, what the Start tab shows; the lock; the files an assist session shares with the `nxm://` handler, and the stop file the window leaves for a child it asks to stop; and the `deleted_`, `purged_trash_` and `merged_` records of what stage 5 took, each under a name of its own |
 | `wj_wabbajack.py` | finding Wabbajack, whether it is the newest release, the game preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_gallery.py` | the published gallery and its validation reports: what exists, and how much of it you hold |
@@ -1266,7 +1298,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1605 checks across nineteen suites. None of them touch the live archive pools:
+environment instead). 1625 checks across nineteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The suites that
@@ -1292,7 +1324,7 @@ either way.
 | `t6_planning` | present vs stale vs absent decisions, `--force`, foreign-installer exclusion, manifest cache invalidation, backup pruning |
 | `t7_identity` | one filename, several builds: the wrong copy must never satisfy a list that wants a different one, and whole staging-and-download runs in which a build another list pins must survive |
 | `t8_order` | download order — smallest, largest, manifest — and where unknown sizes land |
-| `t9_wabbajack` | finding the newest CLI and only version-named folders, pruning that keeps your manifests and never runs on a guess, a `tasklist` that cannot answer, the game preflight, path overlap and installs kept out of the tooling's own folders, the install command, an update in place that stops at a failed download |
+| `t9_wabbajack` | finding the newest CLI and only version-named folders, pruning that keeps your manifests and never runs on a guess, a `tasklist` that cannot answer, the game preflight, path overlap and installs kept out of the tooling's own folders, the install command, an update in place that stops at a failed download, and staging that reads what it hands over, so an archive of the right size with the wrong bytes is missing before Wabbajack is handed it |
 | `t10_lookup` | every location an archive may sit in and still count as already downloaded |
 | `t11_gallery` | the gallery's hand-edited JSON, a reply that is not JSON never cached, case-inconsistent game tokens and one game under two names, cache fallback when the network is down, reports for an older build fetched again and reports that cannot be read counted as gaps, the gap maths, Wabbajack's own "Unavailable" rule, and the hidden flag never reaching a tracked list |
 | `t12_cleanup` | both protection rules measured from one scan, the merge of two bodies of demand, folders that are nobody's and how they are sized and parked, the refusal to delete on an incomplete picture, a hidden list protecting nothing and blocking nothing, and stage 5e's two questions, its files-only sweep and the junction it does not follow |

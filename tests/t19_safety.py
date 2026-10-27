@@ -72,6 +72,8 @@ ALLOWED = {
     ("wj_sorter", "watch_stop_file.watch"): ({"os.remove"}, "the stop file, once read"),
     ("wj_gallery", "_write_cache"): ({"os.replace"}, "a gallery cache file, from its .tmp"),
     ("wj_gui", "save_overview"): ({"os.replace"}, "the Start tab's overview, from its .tmp"),
+    ("wj_wizard", "save_known_hashes"): ({"os.replace"},
+        "the hashes staging has read, from its .tmp"),
     ("wj_sorter", "prune_old_logs"): ({"os.remove"}, "its own older logs"),
     ("wj_merge_pool", "Record.close"): ({"os.remove"}, "its own record, when nothing was recorded"),
     ("wj_wizard", "DeletionRecord.close"): ({"os.remove"}, "its own record, when nothing was recorded"),

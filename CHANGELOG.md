@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.5.2 — 2026-10-27
+
+### Fixed
+
+- **An archive of the right size with the wrong bytes was handed to
+  Wabbajack.** Everything judged an archive by its name and size, so a
+  download cut short after its file had been laid out at full length - real
+  bytes, then zeros to the end - counted as present in every table, was
+  staged, and stopped Wabbajack's install when it read it. Staging now reads
+  every archive it gathers, for Prepare, the console's stage 4 and an update
+  in place, and holds it to the xxHash64 its manifest pins. A copy with the
+  wrong bytes says `[WRONG]`, goes to the game's trash with a deletion record
+  - put back from stage 5, or purged `TRASH_KEEP_DAYS` later - and counts as
+  missing from then on: the install panel says so, Incomplete fetches it,
+  and an update in place stops before Wabbajack starts. A copy holding the
+  build another list pins under that name and size stays where it is. What
+  was read is remembered in `runtime\wj_hashes.json` by name, size and
+  modified time, so staging a list again reads only what changed.
+
+Found on 2026-10-27 installing Lost Legacy: `FloatingSwordFollower.zip` was
+its 500,008,225 bytes, the last four fifths zeros, and every table said 847
+of 847 present.
+
+The test fixtures' archives now carry the hash of the bytes the harness
+writes, where every one used to carry a placeholder no file matched.
+
+Tests: 1625 checks across 19 suites, up from 1612.
+
 ## 1.5.1 — 2026-10-25
 
 ### Fixed

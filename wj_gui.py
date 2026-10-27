@@ -2048,14 +2048,20 @@ class App:
 
         def job():
             readme = WB.manifest_readme(os.path.join(A.MANIFESTS, fn))
+            # Measured again rather than taken from the table: staging has
+            # just read what it gathered, and sent any archive holding the
+            # wrong bytes to the trash (W.verify_staged).
+            rec = self.records.get(fn)
+            fresh = (W.list_status(rec) if rec else None) or st
             wj = self._find_wabbajack()
             if not wj:
-                return {"wj": None, "update": WB.update_status(None), "readme": readme}
+                return {"wj": None, "update": WB.update_status(None), "readme": readme, "st": fresh}
             ready, detail = WB.game_ready(wj.get("cli"), game)
             return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj),
-                    "readme": readme}
+                    "readme": readme, "st": fresh}
 
-        self.run_job("Checking Wabbajack", job, lambda res: self._show_install_offer(fn, st, mode, res))
+        self.run_job("Checking Wabbajack", job,
+                     lambda res: self._show_install_offer(fn, res.get("st") or st, mode, res))
 
     def _find_wabbajack(self):
         """Wabbajack, with the version folders an update superseded removed

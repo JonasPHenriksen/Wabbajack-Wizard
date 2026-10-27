@@ -1920,8 +1920,10 @@ def download_list(records, fn, st, assist):
 
 
 def stage_list(state, fn, st):
-    """Run the sorter to gather one list, and remember that it is staged.
-    Returns the sorter's exit code. The caller checks for Wabbajack first."""
+    """Run the sorter to gather one list, and remember that it is staged;
+    then read what it gathered (verify_staged), so an archive holding the
+    wrong bytes is missing before Wabbajack is handed the folder. Returns
+    the sorter's exit code. The caller checks for Wabbajack first."""
     rc = A.run_script(A.SORTER_SCRIPT,
                       ["--game", st["game"], "--list", stem_of(fn), "--yes"],
                       "sorter")
@@ -1932,7 +1934,228 @@ def stage_list(state, fn, st):
         state.setdefault("staged", {})[A.WJ.folder_key(st["game"])] = stem_of(fn)
         A.save_state(state)
         A.WJ.invalidate_existing_cache()
+    if rc == 0:
+        verify_staged(fn, st)
     return rc
+
+
+# ----------------------------------------------------------------------
+# What Wabbajack is handed, read in full first
+# ----------------------------------------------------------------------
+# The xxHash64 of every archive staging has read, by canonical name, size and
+# modified time: a file whose three are what they were when it was read holds
+# what it held then, so staging a list again reads only what changed since.
+# Builds no manifest held here asks for any more are dropped as it is written.
+HASHES_FILE = "wj_hashes.json"
+
+
+def _hash_key(name, size, mtime_ns):
+    return f"{A.WJ.canonical_name(name).lower()}|{size}|{mtime_ns}"
+
+
+def load_known_hashes():
+    """{_hash_key: xxHash64} from HASHES_FILE; {} when it is not there or
+    cannot be read, which costs only a re-read."""
+    try:
+        with open(A.runtime_path(HASHES_FILE, make=False), encoding="utf-8") as f:
+            known = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(known, dict):
+        return {}
+    return {k: v for k, v in known.items() if isinstance(v, str)}
+
+
+def save_known_hashes(known, records):
+    """Write `known` back, less the builds no manifest in `records` asks for:
+    those are never staged again, and the file would only grow."""
+    wanted = {f"{str(a.get('name') or '').lower()}|{a.get('size')}"
+              for e in records.values() for a in e.get("archives") or []}
+    keep = {k: v for k, v in known.items() if k.rsplit("|", 1)[0] in wanted}
+    path = A.runtime_path(HASHES_FILE)
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(keep, f)
+        os.replace(path + ".tmp", path)
+    except OSError as e:
+        out(f"    could not keep what was read for next time: {e}")
+
+
+def _pinned_elsewhere(fn, game, builds):
+    """{(name_lower, size): {xxHash64: list}} for the builds in `builds`, a
+    set of (name_lower, size), that another list in the same pool pins: the
+    bytes that list expects under that name and size. Only a manifest that
+    wants one of those names at that size is opened, which for an archive
+    no other list shares is none at all."""
+    found = {}
+    for other, entry in A.load_plan_records().items():
+        if other == fn or not A.WJ.same_pool(entry.get("game"), game):
+            continue
+        if not any((str(a.get("name") or "").lower(), a.get("size")) in builds
+                   for a in entry.get("archives") or []):
+            continue
+        for a in A.WJ.parse_manifest(os.path.join(A.MANIFESTS, other))["archives"]:
+            key = (a["name"].lower(), a.get("size"))
+            if key in builds and a.get("hash"):
+                found.setdefault(key, {})[a["hash"]] = stem_of(other)
+    return found
+
+
+def verify_staged(fn, st):
+    """Read every archive staged for one list in full and hold it to the
+    xxHash64 its manifest pins, before Wabbajack is handed the folder.
+
+    Everything else here judges a copy by its name and size, and a file of
+    the right size can hold the wrong bytes: a download cut short after its
+    file had been laid out at full length is zeros from there on. The sorter
+    staged such a file, every table counted it present, and Wabbajack, which
+    reads every archive, stopped the install over it. So the staged folder
+    is read here as Wabbajack will read it. A copy whose bytes are wrong goes
+    to the game's trash, recorded as stage 5c records what it reclaims - so
+    it can be put back, and is purged TRASH_KEEP_DAYS later - and is missing
+    from then on, to every tool, until a download brings the right bytes. A
+    copy holding the build another list in the pool pins under the same name
+    and size is that list's, and stays where it is.
+
+    A file read before is not read again while its name, size and modified
+    time are what they were (HASHES_FILE). Game files are Wabbajack's to
+    copy and are not here; nor is an archive absent or of another size,
+    which list_status() already counts as missing, or one the manifest gives
+    no hash. Without xxhash nothing is read, and Wabbajack is the check.
+
+    Returns {"read": files hashed now, "ok": count, "bad": [(name, size,
+    got, want, trashed_to)], "theirs": [(name, list)], "unread": [name],
+    "record": deletion record or None, "skipped": why or None}."""
+    res = {"read": 0, "ok": 0, "bad": [], "theirs": [], "unread": [],
+           "record": None, "skipped": None}
+    stem = stem_of(fn)
+
+    def skip(why):
+        res["skipped"] = why
+        out(f"  Not reading what was staged: {why}. Wabbajack will read it.")
+        return res
+
+    if not getattr(A.WJ, "_HAVE_XXHASH", False):
+        return skip("xxhash is not installed")
+    parsed = A.WJ.parse_manifest(os.path.join(A.MANIFESTS, fn))
+    if not parsed.get("readable"):
+        return skip("its manifest could not be read")
+    folder = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
+    # One listing carries every size and modified time; nothing below stats
+    # a file to learn them.
+    staged = {}
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                try:
+                    if e.is_file():
+                        s = e.stat()
+                        staged[e.name.lower()] = (e.path, e.name, s.st_size, s.st_mtime_ns)
+                except OSError:
+                    continue
+    except OSError as e:
+        return skip(f"{folder} cannot be read ({e})")
+
+    todo = []
+    for a in parsed["archives"]:
+        hit = staged.get(a["name"].lower())
+        if (hit and a.get("hash") and hit[2] == a.get("size")
+                and A.WJ.state_type(a["state"]) != "gamefile"):
+            todo.append((a, hit))
+    known = load_known_hashes()
+    fresh = [h for _a, h in todo if _hash_key(h[1], h[2], h[3]) not in known]
+    total = sum(h[2] for h in fresh)
+    if todo:
+        out(f"  Reading what was staged for {stem}, as Wabbajack will: {len(todo)} archive(s), "
+            + (f"{len(fresh)} not read before ({human(total)})." if fresh else "all read before."))
+
+    wrong, done, last = [], 0, time.time()
+    for i, (a, (path, name, size, mtime)) in enumerate(todo):
+        if A.stop_requested():
+            res["unread"] += [h[1] for _a, h in todo[i:]]
+            out(f"  Stopped as asked; {len(todo) - i} archive(s) not read.")
+            break
+        key = _hash_key(name, size, mtime)
+        got = known.get(key)
+        if got is None:
+            got = A.WJ.wabbajack_hash(path)
+            res["read"] += 1
+            done += size
+            if time.time() - last >= 30:
+                out(f"    {human(done)} of {human(total)} read ...")
+                last = time.time()
+            if got is None:
+                # Held open elsewhere, or the share dropped: not read is not
+                # wrong, and Wabbajack will read it again anyway.
+                res["unread"].append(name)
+                out(f"    {name} could not be read; Wabbajack will judge it.")
+                continue
+            known[key] = got
+        if got == a["hash"]:
+            res["ok"] += 1
+        else:
+            wrong.append((a, path, name, size, got))
+    save_known_hashes(known, A.load_plan_records())
+    if not wrong:
+        if todo and not res["unread"]:
+            out(f"  All {res['ok']} hold the bytes {stem}'s manifest pins.")
+        return res
+
+    theirs = _pinned_elsewhere(fn, st["game"], {(n.lower(), s) for _a, _p, n, s, _g in wrong})
+    trash = trash_folder_for(st["game"])
+    why = A.trash_name_problem()
+    record = None
+    for a, path, name, size, got in wrong:
+        owner = theirs.get((name.lower(), size), {}).get(got)
+        if owner:
+            res["theirs"].append((name, owner))
+            out(f"  [THEIRS] {name}: the bytes {owner} pins under this name and size, not "
+                f"{stem}'s. Left where it is; Wabbajack will not take it for {stem}.")
+            continue
+        out(f"  [WRONG] {name}: the right size, but not the bytes {stem}'s manifest pins "
+            f"(xxh64 {got}, not {a['hash']}).")
+        if why:
+            out(f"          Left where it is: the trash folder cannot be used ({why}).")
+            continue
+        if record is None:
+            record = DeletionRecord(st["game"], f"the wrong bytes, found staging {stem}", folder)
+        if not record.ok:
+            out("          Left where it is: without its record it could be neither put "
+                "back nor purged.")
+            continue
+        try:
+            dst = send_to_trash(path, trash)
+        except (OSError, shutil.Error) as ex:
+            out(f"          Could not move it to the trash: {ex}")
+            continue
+        record.note(name, size, f"xxh64 {got}; {stem} pins {a['hash']}", dst)
+        res["bad"].append((name, size, got, a["hash"], dst))
+        # Its sidecar goes with it, under the name the archive ended up with.
+        meta = path + ".meta"
+        if os.path.isfile(meta):
+            mdst = dst + ".meta"
+            try:
+                msize = os.path.getsize(meta)
+                wj_paths.move_file(meta, mdst)
+            except OSError as ex:
+                out(f"          Could not move {name}.meta to the trash: {ex}")
+                continue
+            # Moved, so recorded, whether or not the stamp below takes: the
+            # record is what the purge and the undo go by.
+            try:
+                now = time.time()
+                os.utime(mdst, (now, now))
+            except OSError:
+                pass
+            record.note(name + ".meta", msize, f"sidecar of {name}", mdst)
+    if record is not None:
+        res["record"] = record.close()
+    A.WJ.invalidate_existing_cache()
+    if res["bad"]:
+        out(f"  {len(res['bad'])} archive(s) are in the trash, and count as missing now: "
+            f"fetch them before installing {stem}"
+            + (f"  ({os.path.basename(res['record'])})" if res["record"] else "") + ".")
+    return res
 
 
 def delete_modlists(state, records, chosen):
@@ -2286,6 +2509,14 @@ def update_install(state, row, assist, wj):
     rc = stage_list(state, fn, st)
     if rc != 0:
         return False, f"staging failed (sorter exited {rc})"
+    # Staging read what it gathered (verify_staged), and an archive holding
+    # the wrong bytes went to the trash: missing now, so Wabbajack is not
+    # handed the folder until a download has brought the right ones.
+    after = list_status(load_records().get(fn) or entry) or st
+    if after["missing"] > st["missing"]:
+        return False, (f"{after['missing'] - st['missing']} archive(s) held the wrong bytes "
+                       f"and are in the trash now; nothing was installed, and running the "
+                       f"update again fetches them")
     manifest = os.path.join(A.MANIFESTS, fn)
     downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
     problems = WB.check_paths(manifest, downloads, target)
