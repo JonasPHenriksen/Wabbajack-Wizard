@@ -30,6 +30,7 @@ without losing the one already there (move_file, publish).
 import errno
 import os
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -145,6 +146,41 @@ def console_exe():
     has been deleted, ourselves is still better than failing outright."""
     twin = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), CONSOLE_EXE)
     return twin if os.path.isfile(twin) else sys.executable
+
+
+def window_exe():
+    """The binary with no console, beside ourselves: the one to hand work
+    that has nothing to say, so that Windows opens no console window for it.
+    Ourselves when it has been deleted."""
+    twin = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), GUI_EXE)
+    return twin if os.path.isfile(twin) else sys.executable
+
+
+def has_console():
+    """Does this process have a console of its own? The console side does;
+    the window, pythonw, and a stage the window started (no_window) do not."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        return bool(ctypes.windll.kernel32.GetConsoleWindow())
+    except Exception:                   # no kernel32 to ask: assume the old way
+        return True
+
+
+def no_window():
+    """Keyword arguments for subprocess that keep a console program - tasklist,
+    wabbajack-cli, our own console binary - from opening a console window.
+
+    Only for a process with no console to share. One started from the window
+    got a console window of its own from Windows, flashing up for every
+    tasklist and staying up for a whole install, though everything it printed
+    went down a pipe to the log pane. A process that has a console hands it
+    down as before, so the console side's children still print into it, and
+    still read from it."""
+    if has_console() or not hasattr(subprocess, "CREATE_NO_WINDOW"):
+        return {}
+    return {"creationflags": subprocess.CREATE_NO_WINDOW}
 
 
 def stage_argv(script, script_dir):

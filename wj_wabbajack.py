@@ -91,7 +91,7 @@ def running_processes():
     try:
         proc = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
                               capture_output=True, text=True, errors="replace",
-                              timeout=30, stdin=subprocess.DEVNULL)
+                              timeout=30, stdin=subprocess.DEVNULL, **wj_paths.no_window())
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
@@ -495,7 +495,7 @@ def detected_games(cli, refresh=False):
     try:
         proc = subprocess.run([cli, "list-games"], capture_output=True,
                               text=True, errors="replace", timeout=300,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, **wj_paths.no_window())
     except (OSError, subprocess.SubprocessError):
         return {}
     found = parse_games(proc.stdout + proc.stderr)
@@ -694,10 +694,12 @@ def run_install(cli, manifest, downloads, output, on_line=None):
         # stdin is deliberately NOT closed off. If Wabbajack needs to ask
         # something mid-install - its own Nexus sign-in, for a file this tooling
         # did not fetch - a closed stdin turns that into a confusing failure
-        # instead of a question you can answer.
+        # instead of a question you can answer, at the console. The window has
+        # no console to answer from, and gives the CLI none (no_window): the
+        # one Windows used to open for it stayed blank, its output being here.
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True,
-                                errors="replace", bufsize=1)
+                                errors="replace", bufsize=1, **wj_paths.no_window())
     except OSError as e:
         if on_line:
             on_line("could not start wabbajack-cli: %s" % e)

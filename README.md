@@ -962,8 +962,10 @@ assemblies from a mapped drive unless the host program's config allows it, so
 writes `WabbajackWizard.exe.config` and `WabbajackWizard-console.exe.config`
 beside its binaries, each one line of substance: `loadFromRemoteSources`. And
 the browser side: Firefox will not launch a protocol handler whose program is
-`python.exe`, so the handler registered is the console exe whenever a build
-sits beside the scripts, from source and from the build alike.
+`python.exe`, so the handler registered is a build's exe whenever one sits
+beside the scripts, from source and from the build alike: the window's,
+`WabbajackWizard.exe`, which has no console, so no console window flashes up
+for each click (the console exe when it is the only one there).
 
 The page URL is confirmed against the API rather than taken from the manifest.
 Manifests disagree with themselves: this collection records `skyrimse` in a
@@ -1313,7 +1315,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1657 checks across nineteen suites. None of them touch the live archive pools:
+environment instead). 1667 checks across nineteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The suites that

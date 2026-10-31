@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.5.4 — 2026-10-31
+
+### Fixed
+
+- **Console windows flashed up from the window.** Programs it starts that
+  have a console of their own - `tasklist` before anything is moved,
+  `wabbajack-cli list-games` for the game check, and `wabbajack-cli install`
+  for a whole install - each got a console window from Windows, blank because
+  everything they print goes to the log pane. Started from a process with no
+  console, they now get none (`wj_paths.no_window`); from the console side
+  they share its console as before, so they can still print and be answered.
+  The `nxm://` handler is now the window's exe, which has no console, so a
+  click on "Mod manager download" no longer flashes one up either.
+- **The window froze after fetching or tracking a manifest.** The manifests
+  were read again on the window's own thread, and a new one is read whole -
+  hundreds of MB for a large list. They are read in the job now.
+- **Controls other than buttons worked mid-job.** The Game menu, the Browse
+  filters and search, and the Space tab's protection rule started jobs, or
+  re-sorted a table, while one was running: a "Busy" box, and a menu naming a
+  game the table was not showing. They are off while a job runs, as the
+  buttons are.
+- **"Undo a cleanup…" froze the window before it opened**, looking for every
+  file each cleanup record names, on the share. That is a job now, and its
+  window is modal, so nothing else starts while you choose.
+- **The install button stayed on for a list no longer staged** - deleted, a
+  cleanup put back, another list staged over it. It goes off, and a click
+  that gets through says why. It also follows `INSTALL_MODE` set to `off`.
+- **Clicks that did nothing now say why:** Browse with no manifests yet (it
+  loads now: it is where you find one), "Fetch missing reports" and "Set up a
+  pool" with no list or game shown, and a Wabbajack window that would not
+  open in `gui` install mode.
+
+Found by a review of every control in the window, after 1.5.3's install
+button.
+
+Tests: 1667 checks across 19 suites, up from 1657.
+
 ## 1.5.3 — 2026-10-31
 
 ### Added

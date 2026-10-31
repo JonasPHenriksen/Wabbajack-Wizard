@@ -1278,23 +1278,28 @@ def _python_launcher():
 def nxm_handler_command():
     """The command line Windows runs when you click a mod's download link.
 
-    Frozen there is no script to hand an interpreter, so the console binary is
-    told to be the downloader instead. The --nxm flag lands in the same place
-    either way, and so does the URL Windows substitutes for %1.
+    Frozen there is no script to hand an interpreter, so a binary of the
+    build is told to be the downloader instead. The --nxm flag lands in the
+    same place either way, and so does the URL Windows substitutes for %1.
+    It is the window's binary, which has no console: the handler forwards
+    the link and exits without a word, and the console binary had Windows
+    flash a console window up for every click.
 
     From source the same binary is used whenever a build sits beside the
-    scripts, and the interpreter only when none does. Firefox will not launch
+    scripts - the console one when that is all there is - and the interpreter
+    only when neither is. Firefox will not launch
     a protocol handler whose program is python.exe: the click ends on
     Windows' 'no app associated' dialog, although Windows itself runs the
     very same command from a shell. The exe is launched without complaint,
     and all the handler does is forward the link to the run that is waiting
     for it, which every build has done the same way."""
     if wj_paths.frozen():
-        return (f'"{wj_paths.console_exe()}" {wj_paths.STAGE_FLAG}wj_downloader'
+        return (f'"{wj_paths.window_exe()}" {wj_paths.STAGE_FLAG}wj_downloader'
                 f' --nxm "%1"')
-    built = os.path.join(wj_paths.app_dir(__file__), wj_paths.CONSOLE_EXE)
-    if os.path.isfile(built):
-        return f'"{built}" {wj_paths.STAGE_FLAG}wj_downloader --nxm "%1"'
+    for name in (wj_paths.GUI_EXE, wj_paths.CONSOLE_EXE):
+        built = os.path.join(wj_paths.app_dir(__file__), name)
+        if os.path.isfile(built):
+            return f'"{built}" {wj_paths.STAGE_FLAG}wj_downloader --nxm "%1"'
     exe, script = _python_launcher()
     return f'"{exe}" "{script}" --nxm "%1"'
 

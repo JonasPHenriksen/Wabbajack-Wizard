@@ -295,6 +295,7 @@ class App:
         self.job_title = ""
         self.closing = False            # the window closes once the job in hand is done
         self.action_buttons = []
+        self.busy_widgets = []          # (widget, its state when idle): see quiet_while_busy
         self.state = A.load_state()
         self.tracked = {}
         self.records = {}
@@ -470,6 +471,8 @@ class App:
             self.progress.stop()
         for b in self.action_buttons:
             b.configure(state="disabled" if busy else "normal")
+        for w, idle in self.busy_widgets:
+            w.configure(state="disabled" if busy else idle)
         if not busy:
             # Three of those depend on more than idleness: two on what is
             # selected, one on what the last Wabbajack check found.
@@ -492,6 +495,15 @@ class App:
         b = ttk.Button(parent, text=text, command=command, **kw)
         self.action_buttons.append(b)
         return b
+
+    def quiet_while_busy(self, widget, idle="normal"):
+        """A control that is not a button but starts a job, or changes what one
+        is showing - the Game menu, a filter, a rule - off while a job runs,
+        as the buttons are. They used to stay live: a second game picked while
+        the first was measured met the "Busy" box, and the menu then named a
+        game the table was not showing."""
+        self.busy_widgets.append((widget, idle))
+        return widget
 
     def confirm(self, title, lines, total=None, total_label="Total to be freed",
                 undo="This cannot be undone."):
@@ -682,7 +694,9 @@ class App:
 
     def _tab_changed(self):
         name = self.nb.tab(self.nb.select(), "text")
-        if self.busy or (not self.records and name not in ("Start", "Settings")):
+        # Browse reads the published gallery, not your manifests: with none
+        # yet, it is where you go to find one, and used to stay "Not loaded".
+        if self.busy or (not self.records and name not in ("Start", "Settings", "Browse")):
             return
         if not self.tab_is_stale(name):
             return
@@ -715,9 +729,16 @@ class App:
         self._tab_changed()
 
     def reload_records(self):
+        self.records = self.read_records()
+
+    def read_records(self):
+        """The manifests as they are now. A job that brought a new one in
+        calls this in its worker and hands the result to its done: a manifest
+        new to the cache is read whole, hundreds of MB for a large list, and
+        read on the window's thread it froze the window after "done"."""
         A.WJ.invalidate_existing_cache()
         W.refresh_known_dirs()
-        self.records = W.load_records()
+        return W.load_records()
 
     # ==================================================================
     # Start
@@ -1137,15 +1158,19 @@ class App:
         bar = ttk.Frame(f)
         bar.grid(row=1, column=0, sticky="ew", pady=(0, 4))
         ttk.Label(bar, text="Game:").pack(side="left")
-        self.browse_game = self._register_combo(ttk.Combobox(bar, state="readonly", width=36))
+        self.browse_game = self.quiet_while_busy(
+            self._register_combo(ttk.Combobox(bar, state="readonly", width=36)), idle="readonly")
         self.browse_game.pack(side="left", padx=(4, 8))
         self.browse_game.bind("<<ComboboxSelected>>", lambda _e: self.browse_show_game())
         self.browse_only = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text="only lists that can be completed", variable=self.browse_only,
-                        command=self.browse_refilter).pack(side="left", padx=(0, 8))
+        self.quiet_while_busy(ttk.Checkbutton(bar, text="only lists that can be completed",
+                                              variable=self.browse_only,
+                                              command=self.browse_refilter)).pack(side="left",
+                                                                                  padx=(0, 8))
         self.browse_all = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="every game", variable=self.browse_all,
-                        command=self.browse_load).pack(side="left", padx=(0, 8))
+        self.quiet_while_busy(ttk.Checkbutton(bar, text="every game", variable=self.browse_all,
+                                              command=self.browse_load)).pack(side="left",
+                                                                              padx=(0, 8))
         self.action(bar, "Reload gallery", self.browse_reload).pack(side="left")
         self.action(bar, "Fetch missing reports", lambda: self.browse_sync(False)).pack(side="left", padx=4)
         self.action(bar, "Refresh every report", lambda: self.browse_sync(True)).pack(side="left")
@@ -1158,13 +1183,14 @@ class App:
         find.grid(row=2, column=0, sticky="ew", pady=(0, 4))
         ttk.Label(find, text="Search:").pack(side="left")
         self.browse_search = tk.StringVar(value="")
-        ttk.Entry(find, textvariable=self.browse_search, width=36).pack(side="left", padx=(4, 8))
+        self.quiet_while_busy(ttk.Entry(find, textvariable=self.browse_search, width=36)).pack(
+            side="left", padx=(4, 8))
         self.browse_search.trace_add("write", lambda *_a: self.browse_refilter())
         ttk.Label(find, text="title, key, game or tag; every word must match",
                   style="Hint.TLabel").pack(side="left", padx=(0, 12))
         self.browse_nsfw = tk.BooleanVar(value=bool(CFG.HIDE_NSFW))
-        ttk.Checkbutton(find, text="hide NSFW lists", variable=self.browse_nsfw,
-                        command=self.browse_toggle_nsfw).pack(side="left")
+        self.quiet_while_busy(ttk.Checkbutton(find, text="hide NSFW lists", variable=self.browse_nsfw,
+                                              command=self.browse_toggle_nsfw)).pack(side="left")
         # On a row of its own: beside the buttons it was cut off at the
         # window's default width.
         self.browse_summary = tk.StringVar(value="Not loaded yet.")
@@ -1316,6 +1342,9 @@ class App:
     def browse_sync(self, force):
         keys = [r["key"] for r in self.browse["rows"] if not r["retired"]]
         if not keys:
+            messagebox.showinfo("Validation reports", "No published list is shown, so there is no "
+                                "report to fetch. Load the gallery first, or tick 'every game' to "
+                                "include games you keep no pool for.", parent=self.root)
             return
         self.run_job("Fetching validation reports",
                      lambda: W.sync_gallery_reports(keys, force=force),
@@ -1355,6 +1384,8 @@ class App:
     def browse_sort_by(self, cid):
         """A heading was clicked: sort by that column, the other way when it
         is clicked again, and mark the heading with the direction."""
+        if self.busy:
+            return                      # the table is the job's until it is done
         cur = self.browse.get("sort")
         rev = (not cur[1]) if cur and cur[0] == cid else BROWSE_SORT[cid][1]
         self.browse["sort"] = (cid, rev)
@@ -1545,6 +1576,9 @@ class App:
     def browse_make_pool(self):
         i = self.browse_game.current()
         if i < 0 or i >= len(self.browse["games"]):
+            messagebox.showinfo("Set up a pool", "Pick the game in the Game menu first. With no "
+                                "game there, load the gallery, and tick 'every game' to list the "
+                                "ones you keep no pool for.", parent=self.root)
             return
         gk = self.browse["games"][i]
         if gk == HIDDEN_GAME:
@@ -1682,13 +1716,18 @@ class App:
                                    f"tracking it?", parent=self.root):
             return
 
-        def done(ok):
+        def job():
+            ok = W.adopt_gallery_list(self.state, r)
+            return ok, (self.read_records() if ok else None)
+
+        def done(res):
+            ok, records = res
             if ok:
                 self.tracked = A.resolve_tracking(self.state)
-                self.reload_records()
+                self.records = records
                 self.data_changed("records")
                 self.browse_detail()
-        self.run_job(f"Downloading {r['title']}", lambda: W.adopt_gallery_list(self.state, r), done)
+        self.run_job(f"Downloading {r['title']}", job, done)
 
     def _set_text(self, widget, text):
         widget.configure(state="normal")
@@ -1775,12 +1814,13 @@ class App:
         def job():
             if not A.free_space_ok(A.MANIFESTS, need):
                 W.out("  Not enough free space for these manifests.")
-                return 0
-            return W.fetch_updates(self.state, want)
+                return 0, self.records
+            n = W.fetch_updates(self.state, want)
+            return n, self.read_records()
 
-        def done(n):
+        def done(res):
+            n, self.records = res
             W.out(f"  {n} of {len(want)} manifest(s) updated.")
-            self.reload_records()
             self.data_changed("records")
             self.updates_check()
         self.run_job("Fetching manifests", job, done)
@@ -2011,6 +2051,13 @@ class App:
             rows.append((W.stem_of(fn), A.WJ.game_label(st["game"]), st["present"],
                          st["missing"], "staged" if is_staged else ""))
         fill(self.prepare_table.tree, rows)
+        # The last check was for a list that is staged no more - deleted,
+        # a cleanup put back, or another list staged over it: its verdict
+        # goes with it, and the panel says what is staged now.
+        ctx = getattr(self, "install_ctx", None)
+        if ctx and not self._still_staged(ctx):
+            self.install_ctx = None
+            self.install_info.set("Stage a list first.")
         # A list staged by an earlier session is in the table as staged, but
         # nothing has checked Wabbajack for it yet: say so, rather than "Stage
         # a list first" beside a list marked staged.
@@ -2043,9 +2090,17 @@ class App:
             can = CFG.INSTALL_MODE != "off" and bool(self._staged_lists())
         self.install_button.configure(state="normal" if can and not self.busy else "disabled")
 
-    @staticmethod
-    def _install_blocker(ctx):
+    def _still_staged(self, ctx):
+        staged = self.state.get("staged") or {}
+        return staged.get(A.WJ.folder_key(ctx["st"]["game"])) == W.stem_of(ctx["fn"])
+
+    def _install_blocker(self, ctx):
         """Why the checked list cannot be handed to Wabbajack, or None."""
+        if CFG.INSTALL_MODE == "off":
+            return "Installing is switched off (INSTALL_MODE)."
+        if not self._still_staged(ctx):
+            return (f"{W.stem_of(ctx['fn'])} is not staged any more: stage it again, and "
+                    f"Wabbajack is checked for it again.")
         wj = ctx.get("wj")
         if not wj:
             return ("Wabbajack was not found. Set WABBAJACK_DIR in Settings if it is "
@@ -2233,6 +2288,9 @@ class App:
         if ctx["mode"] == "gui":
             if WB.launch_gui(ctx["wj"]["exe"]):
                 W.out(f"Wabbajack is starting. Modlist: {ctx['manifest']}   Downloads: {ctx['downloads']}")
+            else:
+                messagebox.showerror("Install", f"{ctx['wj']['exe']} could not be started.",
+                                     parent=self.root)
             return
         target = self.install_path.get().strip().strip('"')
         if not target:
@@ -2297,11 +2355,12 @@ class App:
         bar2.grid(row=4, column=0, sticky="ew", pady=(10, 4))
         ttk.Label(bar2, text="Master pools - protected by:").pack(side="left")
         self.rule = tk.StringVar(value="y")
-        ttk.Radiobutton(bar2, text="your modlists only", variable=self.rule, value="y",
-                        command=self._fill_masters).pack(side="left", padx=(6, 0))
-        ttk.Radiobutton(bar2, text="any known modlist, yours or published (hidden lists excluded)",
-                        variable=self.rule, value="a", command=self.space_wide).pack(side="left",
-                                                                                     padx=(6, 0))
+        self.quiet_while_busy(ttk.Radiobutton(bar2, text="your modlists only", variable=self.rule,
+                                              value="y", command=self._fill_masters)).pack(
+            side="left", padx=(6, 0))
+        self.quiet_while_busy(ttk.Radiobutton(
+            bar2, text="any known modlist, yours or published (hidden lists excluded)",
+            variable=self.rule, value="a", command=self.space_wide)).pack(side="left", padx=(6, 0))
         self.action(bar2, "Clear Master for selected", self.space_clear).pack(side="left", padx=12)
         self.masters_note = tk.StringVar(value="")
         ttk.Label(bar2, textvariable=self.masters_note).pack(side="right")
@@ -2697,8 +2756,15 @@ class App:
 
     def space_undo(self):
         """The cleanups whose files are still in the trash, in a window of
-        their own: pick one, and it is put back into Master and sorted."""
-        records = [r for r in W.cleanup_records() if r["waiting"]]
+        their own: pick one, and it is put back into Master and sorted.
+
+        Which files are still there is a look at each one a record names, on
+        the share - tens of thousands of them once a few cleanups have run - so
+        it is a job, where it used to freeze the window before this one opened."""
+        self.run_job("Reading the cleanup records",
+                     lambda: [r for r in W.cleanup_records() if r["waiting"]], self._undo_window)
+
+    def _undo_window(self, records):
         if not records:
             messagebox.showinfo("Undo a cleanup", "No cleanup has files left in the trash: "
                                                   "nothing to put back.", parent=self.root)
@@ -2706,6 +2772,13 @@ class App:
         win = tk.Toplevel(self.root)
         win.title("Undo a cleanup")
         win.transient(self.root)
+        # Modal: a job started from the main window while this one is open
+        # would have met "Put it back" with the "Busy" box, after the window
+        # it was chosen in was gone.
+        try:
+            win.grab_set()
+        except tk.TclError:             # not viewable yet, or no display to grab
+            pass
         win.configure(background=self.root.cget("background"))
         frame = ttk.Frame(win, padding=8)
         frame.pack(fill="both", expand=True)

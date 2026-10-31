@@ -738,12 +738,33 @@ try:
     exe = os.path.join(fake_dir, D.wj_paths.CONSOLE_EXE)
     io.open(exe, "wb").write(b"MZ")
     cmd = D.nxm_handler_command()
-    check("with a build beside the scripts, the console exe is the handler, as the build itself uses",
+    check("with only the console exe beside the scripts, it is the handler",
           cmd.startswith('"' + exe + '"') and D.wj_paths.STAGE_FLAG + "wj_downloader" in cmd
           and '--nxm "%1"' in cmd, cmd)
     check("  and never the interpreter: Firefox refuses a python.exe handler", "python" not in cmd.lower())
+    win = os.path.join(fake_dir, D.wj_paths.GUI_EXE)
+    io.open(win, "wb").write(b"MZ")
+    cmd = D.nxm_handler_command()
+    check("with the window's exe there too, it is the handler: no console window flashes per click",
+          cmd.startswith('"' + win + '"') and D.wj_paths.STAGE_FLAG + "wj_downloader" in cmd
+          and '--nxm "%1"' in cmd and D._is_our_handler(cmd), cmd)
 finally:
     D.wj_paths.frozen, D.wj_paths.app_dir = saved_paths
+
+print("\n      a console program started from the window opens no console window")
+import subprocess
+saved = D.wj_paths.has_console
+try:
+    D.wj_paths.has_console = lambda: False
+    flags = D.wj_paths.no_window()
+    check("with no console of our own, the child is told to open none",
+          flags == ({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+          str(flags))
+    D.wj_paths.has_console = lambda: True
+    check("  with one, it inherits ours as before, so it can still print and be answered",
+          D.wj_paths.no_window() == {})
+finally:
+    D.wj_paths.has_console = saved
 
 # ---------------------------------------------------------------- 2.14
 print("\n 2.14  which game's page to open for a Nexus mod, and when there is none to click")

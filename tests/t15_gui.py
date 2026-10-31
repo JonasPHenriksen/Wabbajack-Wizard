@@ -148,6 +148,12 @@ def rows(table):
     return [t.item(i, "values") for i in t.get_children()]
 
 
+def stage_keep():
+    """Keep, staged as staging leaves it in the state: the install panel only
+    hands Wabbajack a list that is staged."""
+    app.state["staged"] = {A.WJ.folder_key(GAME): "Keep"}
+
+
 # ---------------------------------------------------------------- 15.1
 print("\n 15.1  it starts, and says what it found")
 check("start-up finished", settle(), "still busy")
@@ -803,7 +809,9 @@ real_find, real_latest = WB.find_wabbajack, WB.latest_release
 WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": r"stub-dir\Wabbajack.exe",
                                        "cli": None, "version": "4.2.2.1"}
 WB.latest_release = lambda force=False: {"version": "4.2.3.0", "url": "https://x/rel", "published": ""}
+staged_before_installs = app.state.get("staged")
 try:
+    stage_keep()
     app.status_refresh()
     settle()
     app._offer_install("Keep.wabbajack")
@@ -1057,6 +1065,8 @@ trash = os.path.join(box.archives, GAME, "Trash")
 check("clearing Master sent the file to the trash", os.path.isfile(os.path.join(trash, "undo-me.7z")),
       str(os.listdir(trash)))
 app.space_undo()
+check("reading which cleanups can be undone is a job, not a frozen window", app.busy)
+settle()
 check("the undo window lists that cleanup first",
       bool(app.undo_records) and rows(app.undo_table)
       and app.undo_records[0]["waiting"] >= 1, str(app.undo_records))
@@ -1080,6 +1090,7 @@ WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None, "cli": "s
 WB.latest_release = lambda force=False: {"version": "4.2.3.0", "url": "u", "published": ""}
 WB.game_ready = lambda cli, game: (True, "found")
 try:
+    stage_keep()                          # 15.20's put-back rebuilt Keep's pools, un-staging it
     app.status_refresh()
     settle()
     app._offer_install("Keep.wabbajack")
@@ -1113,6 +1124,7 @@ WB.game_ready = lambda cli, game: (True, "found")
 WB.manifest_readme = lambda manifest: README
 WB.open_readme = lambda url: shown.append(url)            # None: it opened
 try:
+    stage_keep()
     app._offer_install("Keep.wabbajack")
     settle()
     check("the install panel names the readme", README in app.install_info.get(),
@@ -1157,7 +1169,6 @@ print("\n 15.22b  the install button does something whenever it is on")
 # back on - with nothing checked behind it, so the click did nothing at all.
 ran, real_stage = [], W.stage_list
 real = (WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready)
-saved_staged = app.state.get("staged")
 WB.run_install = lambda cli, manifest, downloads, into, on_line=None: ran.append(into) or 0
 WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None, "cli": "stub-cli",
                                        "version": "4.2.3.0"}
@@ -1201,13 +1212,59 @@ try:
     check("staging checks Wabbajack after the refresh, not beside it",
           not DLG.shown("Another job") and "stub-dir" in app.install_info.get(), str(DLG.calls))
     check("  and the button is on again", str(app.install_button.cget("state")) == "normal")
+    # Deleting a list, putting a cleanup back or an update in place can
+    # un-stage the list the last check was for, behind the panel's back.
+    app.state["staged"] = {}
+    DLG.calls.clear()
+    ran.clear()
+    app.prepare_install()
+    check("a list un-staged since its check is not installed, and the click says why",
+          ran == [] and DLG.shown("not staged any more"), str(DLG.calls))
+    app.status_refresh()
+    settle()
+    check("  the next look at Prepare drops that check, and the button goes off",
+          app.install_ctx is None and app.install_info.get() == "Stage a list first."
+          and str(app.install_button.cget("state")) == "disabled", app.install_info.get())
 finally:
     WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready = real
     W.stage_list = real_stage
-    app.state["staged"] = saved_staged
-    if saved_staged is None:
+    app.state["staged"] = staged_before_installs
+    if staged_before_installs is None:
         app.state.pop("staged", None)
     DLG.answer = True
+
+print("\n 15.22c  the rest of the window, while a job runs and when there is nothing to do")
+import threading
+release = threading.Event()
+app.run_job("Holding the window", release.wait)
+check("while a job runs, the Game menu, the filters, the search and the rules are off too",
+      all(str(w.cget("state")) == "disabled" for w, _idle in app.busy_widgets)
+      and len(app.busy_widgets) >= 7, str([(str(w), str(w.cget("state"))) for w, _i in app.busy_widgets]))
+release.set()
+settle()
+check("  and back as they were after it: the Game menu read-only, not typed into",
+      str(app.browse_game.cget("state")) == "readonly"
+      and all(str(w.cget("state")) == idle for w, idle in app.busy_widgets))
+saved_rows = app.browse["rows"]
+app.browse["rows"] = []
+DLG.calls.clear()
+app.browse_sync(False)
+check("fetching reports with no list shown says why nothing happens",
+      not app.busy and DLG.shown("no report to fetch"), str(DLG.calls))
+app.browse["rows"] = saved_rows
+on_main = []
+real = (W.load_records, W.fetch_updates)
+W.load_records = lambda *a, **k: on_main.append(
+    threading.current_thread() is threading.main_thread()) or real[0](*a, **k)
+W.fetch_updates = lambda state, want: 1
+app.update_rows = [("r/one", {"version": "2.0", "size": 1}, {}, "Keep.wabbajack", True, True)]
+try:
+    app.updates_fetch(all_updates=True)
+    settle()
+finally:
+    W.load_records, W.fetch_updates = real
+check("a fetched manifest is read in the job, not on the window's thread after it",
+      on_main and not any(on_main) and "Keep.wabbajack" in app.records, str(on_main))
 
 # ---------------------------------------------------------------- 15.23
 print("\n 15.23  one failure while the window handles its queue does not freeze it")

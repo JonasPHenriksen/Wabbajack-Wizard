@@ -23,7 +23,7 @@ import threading
 
 import wj_paths
 
-__version__ = "1.5.3"
+__version__ = "1.5.4"
 APP_NAME = "WabbajackWizard"
 USER_AGENT = f"{APP_NAME}/{__version__}"
 
