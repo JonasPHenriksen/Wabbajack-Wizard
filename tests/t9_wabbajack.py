@@ -689,5 +689,199 @@ finally:
     A.HERE, A.MANIFESTS, A.WJ.ARCHIVE_ROOT, CFG.ARCHIVE_ROOT = saved_paths
     shutil.rmtree(box.root, ignore_errors=True)
 
+# ---------------------------------------------------------------- 9.12
+print("\n 9.12  an out-of-date Wabbajack is brought up to date before an install")
+import hashlib
+import threading
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def wj_zip(names, wrap=""):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for n in names:
+            z.writestr(wrap + n, b"program " + n.encode())
+    return buf.getvalue()
+
+
+WHOLE = ("Wabbajack.exe", "cli/wabbajack-cli.exe", "Extractors/7z.exe")
+SERVE, HITS = {}, []
+
+
+class Serve(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        HITS.append(self.path)
+        body = SERVE.get(self.path)
+        if body is None:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), Serve)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+BASE = "http://127.0.0.1:%d" % srv.server_port
+
+
+def release(body, path="/4.3.2.1.zip", sha=True, size=None):
+    SERVE[path] = body
+    return {"version": "4.3.2.1", "url": "https://x/tag", "published": "",
+            "asset": {"name": "4.3.2.1.zip", "url": BASE + path,
+                      "size": len(body) if size is None else size,
+                      "sha256": hashlib.sha256(body).hexdigest() if sha else None}}
+
+
+def fresh_install():
+    root = os.path.join(BOX, "wj-update")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "4.2.3.0", "cli"))
+    io.open(os.path.join(root, "4.2.3.0", "Wabbajack.exe"), "wb").write(b"old")
+    io.open(os.path.join(root, "4.2.3.0", "cli", "wabbajack-cli.exe"), "wb").write(b"old")
+    io.open(os.path.join(root, "Wabbajack.exe"), "wb").write(b"launcher")
+    return root, WB.find_wabbajack(hint=root)
+
+
+def leftovers(root):
+    return sorted(n for n in os.listdir(root) if n not in ("4.2.3.0", "Wabbajack.exe"))
+
+
+api = {"tag_name": "4.3.2.1", "assets": [
+    {"name": "4.3.2.1-linux-x64.tar.gz", "size": 5, "browser_download_url": "https://x/linux",
+     "digest": "sha256:" + "0" * 64},
+    {"name": "4.3.2.1.zip", "size": 171776039, "browser_download_url": "https://x/win",
+     "digest": "sha256:" + "AB" * 32},
+    {"name": "Wabbajack.exe", "size": 9, "browser_download_url": "https://x/launcher"}]}
+a = WB.release_asset(api, "4.3.2.1")
+check("the Windows build is the asset named for the tag, with its size and SHA-256",
+      a == {"name": "4.3.2.1.zip", "url": "https://x/win", "size": 171776039,
+            "sha256": "ab" * 32}, str(a))
+api["assets"][1].pop("digest")
+check("  a release published without digests has none, rather than a guess",
+      WB.release_asset(api, "4.3.2.1")["sha256"] is None)
+check("  and a release with no such asset has no Windows build",
+      WB.release_asset(api, "9.9.9.9") is None and WB.release_asset(None, "4.3.2.1") is None)
+
+root, wj = fresh_install()
+up = WB.update_status(wj, latest=release(wj_zip(WHOLE)))
+check("an outdated install carries the build to update to", up["outdated"] and up["asset"], str(up))
+said = []
+ok, message = WB.update_wabbajack(wj, up, on_line=said.append, running=[])
+check("the release is downloaded, checked and unpacked into a folder named for it",
+      ok and os.path.isfile(os.path.join(root, "4.3.2.1", "cli", "wabbajack-cli.exe"))
+      and os.path.isfile(os.path.join(root, "4.3.2.1", "Extractors", "7z.exe")), message)
+check("  saying how far the download has got", any("100% of" in s for s in said), str(said))
+check("  the version in use is untouched, and nothing of the download is left",
+      os.path.isfile(os.path.join(root, "4.2.3.0", "cli", "wabbajack-cli.exe"))
+      and leftovers(root) == ["4.3.2.1"], str(leftovers(root)))
+wj2 = WB.find_wabbajack(hint=root)
+check("  the new version is the one found from then on, and the old one is pruned",
+      wj2["version"] == "4.3.2.1" and WB.prune_old_versions(wj2, running=[]) == ["4.2.3.0"])
+
+for what, kwargs, why in (
+        ("a download whose SHA-256 is not the published one",
+         dict(body=wj_zip(WHOLE)), "SHA-256"),
+        ("a download of another size than the published one",
+         dict(body=wj_zip(WHOLE), size=7), "larger than"),
+        ("a zip naming a file outside its own folder",
+         dict(body=wj_zip(WHOLE + ("../escaped.txt",))), "outside its own folder"),
+        ("a zip without the CLI", dict(body=wj_zip(("Wabbajack.exe",))), "does not hold")):
+    root, wj = fresh_install()
+    rel = release(**kwargs)
+    if why == "SHA-256":
+        rel["asset"]["sha256"] = "0" * 64
+    ok, message = WB.update_wabbajack(wj, WB.update_status(wj, latest=rel), running=[])
+    check(f"{what} is refused, and leaves nothing behind",
+          not ok and why in message and leftovers(root) == []
+          and not os.path.exists(os.path.join(BOX, "escaped.txt")), f"{message} {leftovers(root)}")
+
+root, wj = fresh_install()
+ok, message = WB.update_wabbajack(
+    wj, WB.update_status(wj, latest=release(wj_zip(WHOLE, wrap="4.3.2.1/"), sha=False)), running=[])
+check("a zip that wraps the program in a folder of its own is unpacked from inside it",
+      ok and os.path.isfile(os.path.join(root, "4.3.2.1", "Wabbajack.exe"))
+      and leftovers(root) == ["4.3.2.1"], f"{message} {leftovers(root)}")
+
+root, wj = fresh_install()
+up = WB.update_status(wj, latest=release(wj_zip(WHOLE)))
+HITS.clear()
+ok, message = WB.update_wabbajack(wj, up, running=[(1, "Wabbajack.exe")])
+check("nothing is fetched while Wabbajack runs", not ok and "running" in message and HITS == [],
+      message)
+real_running = WB.running_processes
+WB.running_processes = lambda: None
+try:
+    ok, message = WB.update_wabbajack(wj, up)
+finally:
+    WB.running_processes = real_running
+check("  nor when whether it runs cannot be told",
+      not ok and "could not be checked" in message and HITS == [], message)
+os.makedirs(os.path.join(root, "4.3.2.1"))
+io.open(os.path.join(root, "4.3.2.1", "half.dll"), "wb").write(b"x")
+ok, message = WB.update_wabbajack(wj, up, running=[])
+check("a folder already bearing the new version's name is never written into",
+      not ok and "already there" in message and HITS == []
+      and os.listdir(os.path.join(root, "4.3.2.1")) == ["half.dll"], message)
+ok, message = WB.update_wabbajack(wj, WB.update_status(wj, latest={"version": "4.3.2.1", "url": "u"}),
+                                  running=[])
+check("a release with no Windows build is said, not guessed at",
+      not ok and "no Windows build" in message, message)
+ok, message = WB.update_wabbajack(dict(wj, version="4.3.2.1"), up, running=[])
+check("the newest release is left alone", ok and "already the newest" in message and HITS == [],
+      message)
+
+print("\n      the one way every install learns which Wabbajack to use")
+real = (WB.latest_release, WB.running_processes, WB.CFG.WABBAJACK_DIR)
+try:
+    root, wj = fresh_install()
+    WB.CFG.WABBAJACK_DIR = root
+    rel = release(wj_zip(WHOLE))
+    WB.latest_release = lambda force=False: rel
+    WB.running_processes = lambda: []
+    HITS.clear()
+    wj2, up, why = WB.bring_up_to_date(wj, auto=False)
+    check("with WABBAJACK_AUTO_UPDATE off, it only says how things stand",
+          wj2 is wj and up["outdated"] and why is None and HITS == [])
+    said = []
+    wj2, up, why = WB.bring_up_to_date(wj, on_line=said.append)
+    check("on, the new version is the one to use, current, and the old one gone",
+          wj2["version"] == "4.3.2.1" and up["outdated"] is False and why is None
+          and not os.path.exists(os.path.join(root, "4.2.3.0")), str((wj2, up, said)))
+    check("  each step said", any("updating it" in s for s in said)
+          and any("Removed Wabbajack 4.2.3.0" in s for s in said), str(said))
+    root, wj = fresh_install()
+    SERVE.clear()
+    wj2, up, why = WB.bring_up_to_date(wj)
+    check("a failed update keeps the version in use, and says why",
+          wj2 is wj and up["outdated"] and why and "could not be installed" in why, str(why))
+finally:
+    WB.latest_release, WB.running_processes, WB.CFG.WABBAJACK_DIR = real
+
+print("\n      the console says when Wabbajack could not be updated")
+heard = []
+real_bits = (W.out, WB.find_wabbajack, WB.latest_release, WB.update_wabbajack)
+W.out = lambda msg="": heard.append(str(msg))
+WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None, "cli": "stub",
+                                       "version": "4.2.3.0"}
+WB.latest_release = lambda force=False: {"version": "4.3.2.1", "url": "https://x/tag",
+                                         "asset": {"url": "https://x/win"}}
+WB.update_wabbajack = lambda wj, update, on_line=None, running=None: (False, "the network is down")
+blocked_st = {"game": "SkyrimSpecialEdition", "missing": 0, "bytes": 0}
+try:
+    W.offer_install({}, "Some_@@_list.wabbajack", blocked_st)   # BLOCKED: stops before asking
+finally:
+    W.out, WB.find_wabbajack, WB.latest_release, WB.update_wabbajack = real_bits
+said_text = "\n".join(heard)
+check("it tries, and says what stopped it",
+      "updating it" in said_text and "the network is down" in said_text
+      and "Not updated, so run Wabbajack.exe" in said_text, said_text[:600])
+srv.shutdown()
+
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

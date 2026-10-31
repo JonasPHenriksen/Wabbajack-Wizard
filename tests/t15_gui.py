@@ -812,6 +812,8 @@ try:
     check("the panel names the installed and the newest version",
           "4.2.2.1" in info and "4.2.3.0" in info and "update is available" in info, info[:300])
     check("  with where to get it", "https://x/rel" in info, info[:300])
+    check("  and why it was not brought up to date: this release has no Windows build",
+          "Not updated" in info and "no Windows build" in info, info[:500])
     check("  the Start tab remembers the verdict",
           (GUI.load_overview().get("wabbajack") or {}).get("outdated") is True,
           str(GUI.load_overview().get("wabbajack")))
@@ -1146,6 +1148,65 @@ try:
 finally:
     WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready, \
         WB.manifest_readme, WB.open_readme = real
+    DLG.answer = True
+
+# ---------------------------------------------------------------- 15.22b
+print("\n 15.22b  the install button does something whenever it is on")
+# Found 2026-10-31: a list staged in one session, the window reopened, and
+# "Start the Wabbajack install" was on - every job turns the action buttons
+# back on - with nothing checked behind it, so the click did nothing at all.
+ran, real_stage = [], W.stage_list
+real = (WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready)
+saved_staged = app.state.get("staged")
+WB.run_install = lambda cli, manifest, downloads, into, on_line=None: ran.append(into) or 0
+WB.find_wabbajack = lambda hint=None: {"dir": "stub-dir", "exe": None, "cli": "stub-cli",
+                                       "version": "4.2.3.0"}
+WB.latest_release = lambda force=False: {"version": "4.2.3.0", "url": "u", "published": ""}
+WB.game_ready = lambda cli, game: (True, "found")
+try:
+    app.state["staged"] = {A.WJ.folder_key(GAME): "Keep"}
+    app.install_ctx = None                    # as in a window opened after the staging
+    app.status_refresh()
+    settle()
+    check("a list staged by an earlier session is named in the install panel",
+          "Keep is staged" in app.install_info.get(), app.install_info.get()[:200])
+    check("  and the button is on for it", str(app.install_button.cget("state")) == "normal")
+    DLG.calls.clear()
+    app.prepare_install()
+    settle()
+    check("one click checks Wabbajack, then carries on into the install",
+          app.install_ctx and app.install_ctx["fn"] == "Keep.wabbajack" and len(ran) == 1,
+          str((ran, DLG.calls)))
+    WB.game_ready = lambda cli, game: (False, "no game here")
+    app._offer_install("Keep.wabbajack")
+    settle()
+    check("a check that says no turns the button off",
+          str(app.install_button.cget("state")) == "disabled", app.install_info.get()[-200:])
+    app.status_refresh()
+    settle()
+    check("  and the next job does not turn it back on",
+          str(app.install_button.cget("state")) == "disabled")
+    DLG.calls.clear()
+    ran.clear()
+    app.prepare_install()
+    check("  a click that gets through anyway says why, and starts nothing",
+          ran == [] and DLG.shown("no game here"), str(DLG.calls))
+    WB.game_ready = lambda cli, game: (True, "found")
+    W.stage_list = lambda state, fn, st: 0
+    app.prepare_table.tree.selection_set(
+        str([fn for fn, _st in app.prepare_order].index("Keep.wabbajack")))
+    DLG.calls.clear()
+    app.prepare_stage()
+    settle()
+    check("staging checks Wabbajack after the refresh, not beside it",
+          not DLG.shown("Another job") and "stub-dir" in app.install_info.get(), str(DLG.calls))
+    check("  and the button is on again", str(app.install_button.cget("state")) == "normal")
+finally:
+    WB.run_install, WB.find_wabbajack, WB.latest_release, WB.game_ready = real
+    W.stage_list = real_stage
+    app.state["staged"] = saved_staged
+    if saved_staged is None:
+        app.state.pop("staged", None)
     DLG.answer = True
 
 # ---------------------------------------------------------------- 15.23

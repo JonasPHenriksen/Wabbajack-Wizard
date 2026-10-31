@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.5.3 — 2026-10-31
+
+### Added
+
+- **Wabbajack is brought up to date before an install.** When the check
+  before an install - a new one from Prepare or the console's stage 4, or an
+  update in place - finds a newer Wabbajack release, the wizard fetches its
+  Windows build (`<version>.zip`, the file Wabbajack's own launcher fetches),
+  holds it to the size and SHA-256 GitHub publishes for it, and unpacks it
+  into a folder named for the version beside the one in use. Once that folder
+  is whole, the old version's is pruned as before. Not while a Wabbajack
+  process runs, nor when that cannot be told, and never into a folder that
+  already bears the new version's name. A download or unpack that fails
+  leaves nothing behind, says why in the install panel, and the install asks,
+  as it did, whether to carry on with the version you have.
+  `WABBAJACK_AUTO_UPDATE` (on by default) turns it off.
+
+### Fixed
+
+- **"Start the Wabbajack install" did nothing after the window was
+  reopened.** Every job turns the action buttons back on, the install button
+  among them, but what the install needs is learnt by the Wabbajack check
+  that follows staging - so in a window opened after the staging, the button
+  was on with nothing behind it, and a click did nothing at all. The button
+  now follows the last check, and a list staged by an earlier session is
+  named in the install panel; one click checks Wabbajack and the game for it,
+  then carries on into the install. A check that said no can no longer be
+  turned back on by the next job, and a click that gets through anyway says
+  why.
+- **Staging a list showed a "Busy" box.** The Wabbajack check started
+  alongside the refresh of the table, which then refused, and the table went
+  on showing the list unstaged. The check now follows the refresh.
+
+Found on 2026-10-31 installing Welcome to Night City (CyberpunkTHING),
+staged in one window and installed from the next.
+
+Tests: 1657 checks across 19 suites, up from 1625.
+
 ## 1.5.2 — 2026-10-27
 
 ### Fixed

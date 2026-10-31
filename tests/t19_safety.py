@@ -87,6 +87,9 @@ ALLOWED = {
     ("wj_cdn", "_drop_sidecar"): ({"os.remove"}, "its own .parts.json resume record"),
     ("wj_cdn", "download"): ({"os.remove", "fx.truncate"},
         "its own .part: trimmed to the definition's size, or dropped when its hash is wrong"),
+    ("wj_wabbajack", "_discard"): ({"os.remove", "shutil.rmtree"},
+        "a Wabbajack update's own '<version>.zip.part' and '<version>.unpacking' folder, "
+        "names no version folder has; the new version is renamed out of it first"),
     # -- manifests, which the feeds can always supply again ----------------------
     ("wj_autoupdate", "fetch_manifest"): ({"os.remove", "os.replace"},
         "its own staging copy and quarantine; the verified new manifest into place only "

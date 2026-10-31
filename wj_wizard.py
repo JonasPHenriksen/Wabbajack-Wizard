@@ -1823,6 +1823,7 @@ def install_update_step(state, rows):
         return False
     for name in WB.prune_old_versions(wj, keep=[A.MANIFESTS]):
         out(f"    Removed Wabbajack {name}, superseded by {wj['version']}.")
+    wj, update, not_updated = bring_wabbajack_up_to_date(wj)
     game = (load_records().get(fn) or {}).get("game")
     ready, detail = WB.game_ready(wj.get("cli"), game)
     out(f"    Game        {A.WJ.game_label(game) if game else '?'}  "
@@ -1831,8 +1832,9 @@ def install_update_step(state, rows):
     if ready is False:
         out("  Not updating: the check above has to pass first.")
         return False
-    update = WB.update_status(wj)
     out(f"    Wabbajack   {update['text']}")
+    if not_updated:
+        out(f"                Not updated: {not_updated}.")
     if update["outdated"] and ask("   [c] carry on with this version   [s] skip",
                                   ("c", "s")) == "s":
         out("  Skipped.")
@@ -2550,6 +2552,12 @@ def readme_read(stem, manifest):
     return ask("   Read it, and done what it asks?  [y] yes  [n] not yet", ("y", "n")) == "y"
 
 
+def bring_wabbajack_up_to_date(wj):
+    """WB.bring_up_to_date, as the console's settings and output have it."""
+    return WB.bring_up_to_date(wj, getattr(CFG, "WABBAJACK_AUTO_UPDATE", True),
+                               keep=[A.MANIFESTS], on_line=lambda line: out("    " + line))
+
+
 def offer_install(state, filename, st):
     """Hand a freshly staged list to Wabbajack.
 
@@ -2577,13 +2585,15 @@ def offer_install(state, filename, st):
 
     downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
     manifest = os.path.join(A.MANIFESTS, filename)
-    update = WB.update_status(wj)
+    wj, update, not_updated = bring_wabbajack_up_to_date(wj)
     out(f"    Wabbajack   {wj['dir']}" + (f"  ({wj['version']})" if wj["version"] else ""))
     out(f"                {update['text']}")
     if update["outdated"]:
         out(f"                {update['url']}")
-        out("                Run Wabbajack.exe once to let it update itself; the old")
-        out("                version's folder is removed from here the next time it is checked.")
+        out("                " + ("Not updated, so" if not_updated else
+                                  "WABBAJACK_AUTO_UPDATE is off:") + " run Wabbajack.exe once to")
+        out("                let it update itself; the old version's folder is removed from")
+        out("                here the next time it is checked.")
     out(f"    Modlist     {manifest}")
     out(f"    Downloads   {downloads}")
 

@@ -860,6 +860,7 @@ be undone by typing the old value back.
 | `TRASH_FOLDER`, `TRASH_KEEP_DAYS` | `Trash`, 30 | where stage 5c puts what it reclaims, and how many days (1 to 3650) after its record before it is purged |
 | `WABBAJACK_DIR` | `null` | where Wabbajack is installed; `null` auto-detects |
 | `INSTALL_MODE` | `cli` | how a staged list is handed over: `cli`, `gui`, or `off` |
+| `WABBAJACK_AUTO_UPDATE` | `true` | bring Wabbajack up to its newest release before an install; `false` leaves that to its own launcher |
 | `AUTO_TRACK` | `true` | match every manifest in the folder against the feeds automatically |
 | `EXCLUDE`, `TRACK` | `[]` | lists to leave alone, and pins, by feed key: a list pinned here is followed even when its file is matched only by its title, which nothing else is |
 | `HIDDEN` | `[]` | published lists hidden from the gallery, by feed key; the Browse tab's Hide button writes it |
@@ -1137,9 +1138,23 @@ only checks whether a Wabbajack process is running before moving archives.
 Wabbajack is looked for in `WABBAJACK_DIR` if set, then in a `Wabbajack\`
 folder inside this one, then beside this one, then in the per-user install
 location. Keeping it inside is the arrangement that moves as one piece, and the
-folder is gitignored. Wabbajack updates itself: run `Wabbajack.exe` and its
-launcher downloads the new version into a subfolder of its own, leaving the old
-one where it was at some 700 MB. Whenever this tooling next looks at Wabbajack
+folder is gitignored.
+
+When the check before an install finds a newer release, the wizard brings
+Wabbajack up to it first, the way Wabbajack's own launcher does (switch it off
+with `WABBAJACK_AUTO_UPDATE`): the release's Windows build, `<version>.zip`, is
+downloaded beside the install as a `.part`, held to the size and SHA-256 GitHub
+publishes for it, and unpacked into a `<version>.unpacking` folder, which is
+renamed to the version only once `Wabbajack.exe` and `cli\wabbajack-cli.exe`
+are both in it. A zip naming any file outside its own folder is refused. It
+does not run while a Wabbajack process does, nor when that cannot be told, and
+never writes into a folder that already has the new version's name; a failure
+leaves nothing behind and says why, and the install then asks whether to carry
+on with the version you have.
+
+Run `Wabbajack.exe` and its launcher does the same: it downloads the new
+version into a subfolder of its own, leaving the old one where it was at some
+700 MB. Whenever this tooling next looks at Wabbajack
 it removes those superseded version folders, and says so in the log. Only
 folders named exactly like a version (`4.2.3.0`) and holding the program go,
 only ones older than the newest, only once the newest is whole, and never
@@ -1298,7 +1313,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1625 checks across nineteen suites. None of them touch the live archive pools:
+environment instead). 1657 checks across nineteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The suites that

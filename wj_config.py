@@ -23,7 +23,7 @@ import threading
 
 import wj_paths
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 APP_NAME = "WabbajackWizard"
 USER_AGENT = f"{APP_NAME}/{__version__}"
 
@@ -152,6 +152,13 @@ WABBAJACK_DIR = None
 #   "off" - do not offer to install at all.
 INSTALL_MODE = "cli"
 
+# Bring Wabbajack up to its newest release before handing it a list, when the
+# check before an install finds it out of date: the release's Windows build
+# is downloaded, held to the size and SHA-256 GitHub publishes for it, and
+# unpacked beside the version in use, the way Wabbajack's own launcher does
+# it. False leaves it to you: run Wabbajack.exe once and it updates itself.
+WABBAJACK_AUTO_UPDATE = True
+
 # ---- What to follow, and how to fetch -----------------------------------
 # Every .wabbajack in the manifest folder is matched against the published
 # feeds on first sight and the match is cached, so adding a list is a matter
@@ -277,7 +284,8 @@ HIDE_NSFW = False
 USER_SETTINGS = (
     "ARCHIVE_ROOT", "MANIFEST_DIR", "GAME_FOLDERS", "GAME_DISPLAY",
     "EXCLUDE_POOL_DIRS", "UNMANAGED_FOLDER", "TRASH_FOLDER", "TRASH_KEEP_DAYS",
-    "WABBAJACK_DIR", "INSTALL_MODE", "AUTO_TRACK", "EXCLUDE", "TRACK", "HIDDEN",
+    "WABBAJACK_DIR", "INSTALL_MODE", "WABBAJACK_AUTO_UPDATE", "AUTO_TRACK", "EXCLUDE",
+    "TRACK", "HIDDEN",
     "HIDE_NSFW", "STAGE_LIST", "NEXUS_MODE", "KEEP_BACKUP_DAYS", "REQUIRE_HASH",
     "DOWNLOAD_ORDER", "FREE_SPACE_MARGIN_GB", "PARALLEL_SMALL_DOWNLOADS",
     "SMALL_DOWNLOAD_MB", "ASSIST_CLICK_AHEAD", "ASSIST_QUEUE_DEPTH", "ASSIST_WINDOW",

@@ -15,6 +15,7 @@
   "TRASH_KEEP_DAYS": 30,
   "WABBAJACK_DIR": null,
   "INSTALL_MODE": "cli",
+  "WABBAJACK_AUTO_UPDATE": true,
   "AUTO_TRACK": true,
   "EXCLUDE": [],
   "TRACK": [],

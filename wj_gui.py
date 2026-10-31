@@ -471,8 +471,10 @@ class App:
         for b in self.action_buttons:
             b.configure(state="disabled" if busy else "normal")
         if not busy:
-            # Two of those depend on what is selected, not only on idleness.
+            # Three of those depend on more than idleness: two on what is
+            # selected, one on what the last Wabbajack check found.
             self._browse_buttons()
+            self._install_button()
 
         # Hold the user on this tab until the job finishes. A job changes what
         # the other tabs are showing, and leaving mid-way used to land you on
@@ -1805,10 +1807,12 @@ class App:
             wj = self._find_wabbajack()
             if not wj or not wj.get("cli"):
                 return {"wj": wj}
+            wj, update, not_updated = self._bring_up_to_date(wj)
             ready, detail = WB.game_ready(wj.get("cli"), game)
             # The manifest on disk: a new version's arrives in step 1, and a
             # list's readme stays at one address.
-            return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj),
+            return {"wj": wj, "ready": ready, "detail": detail, "update": update,
+                    "not_updated": not_updated,
                     "readme": WB.manifest_readme(os.path.join(A.MANIFESTS, fn))}
 
         def checked(res):
@@ -1823,8 +1827,9 @@ class App:
                 return
             upd = res["update"]
             self._note_wabbajack(upd)
+            why = f"\n\nIt could not be updated: {res['not_updated']}." if res.get("not_updated") else ""
             if upd.get("outdated") and not messagebox.askyesno(
-                    "Wabbajack is out of date", f"{upd['text']}.\n\nA modlist built for a newer "
+                    "Wabbajack is out of date", f"{upd['text']}.{why}\n\nA modlist built for a newer "
                     f"Wabbajack can fail to install on an older one. Carry on anyway?",
                     icon="warning", parent=self.root):
                 return
@@ -2006,6 +2011,52 @@ class App:
             rows.append((W.stem_of(fn), A.WJ.game_label(st["game"]), st["present"],
                          st["missing"], "staged" if is_staged else ""))
         fill(self.prepare_table.tree, rows)
+        # A list staged by an earlier session is in the table as staged, but
+        # nothing has checked Wabbajack for it yet: say so, rather than "Stage
+        # a list first" beside a list marked staged.
+        ready = self._staged_lists()
+        if not getattr(self, "install_ctx", None) and ready and CFG.INSTALL_MODE != "off":
+            if len(ready) == 1:
+                self.install_info.set(f"{W.stem_of(ready[0][0])} is staged. Starting the install "
+                                      f"checks Wabbajack and the game first.")
+            else:
+                self.install_info.set("Staged: " + ", ".join(W.stem_of(fn) for fn, _st in ready)
+                                      + ". Select the one to install, then start the install.")
+        self._install_button()
+
+    def _staged_lists(self):
+        """The Prepare table's staged lists, as (fn, st): one per game at most."""
+        staged = self.state.get("staged") or {}
+        return [(fn, st) for fn, st in getattr(self, "prepare_order", [])
+                if staged.get(A.WJ.folder_key(st["game"])) == W.stem_of(fn)]
+
+    def _install_button(self):
+        """On when the last Wabbajack check allows an install - or, before any
+        check this session, when a list is staged, so the click can make the
+        check. Every action button is turned back on after each job, and this
+        one used to come on with nothing checked behind it: the click did
+        nothing at all."""
+        ctx = getattr(self, "install_ctx", None)
+        if ctx:
+            can = self._install_blocker(ctx) is None
+        else:
+            can = CFG.INSTALL_MODE != "off" and bool(self._staged_lists())
+        self.install_button.configure(state="normal" if can and not self.busy else "disabled")
+
+    @staticmethod
+    def _install_blocker(ctx):
+        """Why the checked list cannot be handed to Wabbajack, or None."""
+        wj = ctx.get("wj")
+        if not wj:
+            return ("Wabbajack was not found. Set WABBAJACK_DIR in Settings if it is "
+                    "installed somewhere other than beside this folder.")
+        if ctx["ready"] is False:
+            return f"The game check has to pass first: {ctx['detail']}"
+        if ctx["mode"] == "gui" and not wj["exe"]:
+            return f"Wabbajack.exe was not found in {wj['dir']}."
+        if ctx["mode"] == "cli" and not wj.get("cli"):
+            return "wabbajack-cli.exe was not found; set INSTALL_MODE to 'gui' to open the window."
+        return None
 
     def _pick_install_dir(self):
         d = filedialog.askdirectory(parent=self.root, title="Where should Wabbajack install this list?")
@@ -2027,17 +2078,22 @@ class App:
             return
 
         def done(rc):
+            self.data_changed("pools")
             if rc == 0:
                 self.staged_fn = fn
-                self._offer_install(fn)
-            self.data_changed("pools")
-            self.status_refresh()
+                # One job after the other: the check used to start alongside
+                # the refresh, which then refused with a "Busy" box and left
+                # the table as it was before staging.
+                self.status_refresh(then=lambda: self._offer_install(fn))
+            else:
+                self.status_refresh()
         self.run_job(f"Staging {W.stem_of(fn)}", lambda: W.stage_list(self.state, fn, st), done)
 
-    def _offer_install(self, fn):
-        """After staging: find Wabbajack, ask it about the game, and look up
-        whether it is the newest release - a folder listing, a child process
-        and a cached web request, so off the main thread - then fill the
+    def _offer_install(self, fn, then=None):
+        """After staging: find Wabbajack, look up whether it is the newest
+        release and bring it up to date when it is not (WABBAJACK_AUTO_UPDATE),
+        and ask it about the game - a folder listing, a cached web request, a
+        download and a child process, so off the main thread - then fill the
         panel and remember the verdict for the Start tab."""
         mode = CFG.INSTALL_MODE
         st = dict(self.status_rows).get(fn)
@@ -2056,12 +2112,16 @@ class App:
             wj = self._find_wabbajack()
             if not wj:
                 return {"wj": None, "update": WB.update_status(None), "readme": readme, "st": fresh}
+            wj, update, not_updated = self._bring_up_to_date(wj)
             ready, detail = WB.game_ready(wj.get("cli"), game)
-            return {"wj": wj, "ready": ready, "detail": detail, "update": WB.update_status(wj),
-                    "readme": readme, "st": fresh}
+            return {"wj": wj, "ready": ready, "detail": detail, "update": update,
+                    "not_updated": not_updated, "readme": readme, "st": fresh}
 
-        self.run_job("Checking Wabbajack", job,
-                     lambda res: self._show_install_offer(fn, res.get("st") or st, mode, res))
+        def done(res):
+            self._show_install_offer(fn, res.get("st") or st, mode, res)
+            if then is not None:
+                then()
+        self.run_job("Checking Wabbajack", job, done)
 
     def _find_wabbajack(self):
         """Wabbajack, with the version folders an update superseded removed
@@ -2071,6 +2131,12 @@ class App:
         for name in WB.prune_old_versions(wj, keep=[A.MANIFESTS]):
             W.out(f"  Removed Wabbajack {name}, superseded by {wj['version']}.")
         return wj
+
+    def _bring_up_to_date(self, wj):
+        """WB.bring_up_to_date, as the window's settings and log have it.
+        Worker-thread code; it only writes to the log."""
+        return WB.bring_up_to_date(wj, CFG.WABBAJACK_AUTO_UPDATE, keep=[A.MANIFESTS],
+                                   on_line=lambda line: W.out("  " + line))
 
     def wabbajack_check(self, then=None):
         """Is Wabbajack there, and is it the newest release? Cheap: a folder
@@ -2092,9 +2158,11 @@ class App:
         self._note_wabbajack(update)
         stem = W.stem_of(fn)
         if not wj:
-            self.install_info.set("Wabbajack was not found. Set WABBAJACK_DIR in Settings if it is "
-                                  "installed somewhere other than beside this folder.")
-            self.install_button.configure(state="disabled")
+            # Remembered all the same, so an earlier check's verdict cannot
+            # turn the button back on.
+            self.install_ctx = {"fn": fn, "st": st, "wj": None, "mode": mode, "ready": None}
+            self.install_info.set(self._install_blocker(self.install_ctx))
+            self._install_button()
             return
         downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
         manifest = os.path.join(A.MANIFESTS, fn)
@@ -2103,9 +2171,13 @@ class App:
         lines = [f"Wabbajack   {wj['dir']}" + (f"  ({wj['version']})" if wj["version"] else ""),
                  f"            {update['text']}"
                  + (f"   {update['url']}" if update["outdated"] else "")]
-        if update["outdated"]:
-            lines.append("            Run Wabbajack.exe once to let it update itself; the old "
-                         "version's folder is removed from here the next time it is checked.")
+        if update["outdated"] and res.get("not_updated"):
+            lines.append(f"            Not updated: {res['not_updated']}. Run Wabbajack.exe once to "
+                         f"let it update itself, or stage the list again to retry.")
+        elif update["outdated"]:
+            lines.append("            WABBAJACK_AUTO_UPDATE is off: run Wabbajack.exe once to let it "
+                         "update itself; the old version's folder is removed from here the next "
+                         "time it is checked.")
         lines += [f"Modlist     {manifest}", f"Downloads   {downloads}",
                   f"Game        {A.WJ.game_label(st['game'])}  [{mark}]   {detail}",
                   f"Readme      {res.get('readme') or 'none named in the manifest'}"
@@ -2121,21 +2193,38 @@ class App:
             lines.append("wabbajack-cli.exe was not found; set INSTALL_MODE to 'gui' to open the window.")
         self.install_info.set("\n".join(lines))
         self.install_ctx = {"fn": fn, "st": st, "wj": wj, "manifest": manifest, "downloads": downloads,
-                            "mode": mode, "ready": ready, "update": update, "readme": res.get("readme")}
+                            "mode": mode, "ready": ready, "detail": detail, "update": update,
+                            "not_updated": res.get("not_updated"), "readme": res.get("readme")}
         remembered = (self.state.get("install") or {}).get(stem)
         if remembered:
             self.install_path.set(remembered)
-        can = ready is not False and (mode == "gui" and wj["exe"] or mode == "cli" and wj.get("cli"))
-        self.install_button.configure(state="normal" if can else "disabled")
+        self._install_button()
 
     def prepare_install(self):
         ctx = getattr(self, "install_ctx", None)
         if not ctx:
+            # Staged by an earlier session, so not checked in this one: check
+            # it now, and carry on into the install from there.
+            staged = self._staged_lists()
+            chosen = {self.prepare_order[i][0] for i in selected_indices(self.prepare_table.tree)}
+            pick = [r for r in staged if r[0] in chosen] or staged
+            if len(pick) != 1:
+                messagebox.showinfo("Install", "Select the staged list to install." if pick else
+                                    "Stage a list first: select it above, then Stage selected list.",
+                                    parent=self.root)
+                return
+            W.out(f"Checking Wabbajack before installing {W.stem_of(pick[0][0])}...")
+            self._offer_install(pick[0][0], then=self.prepare_install)
+            return
+        blocker = self._install_blocker(ctx)
+        if blocker:
+            messagebox.showinfo("Install", f"Nothing started. {blocker}", parent=self.root)
             return
         upd = ctx.get("update") or {}
+        why = f"\n\nIt could not be updated: {ctx['not_updated']}." if ctx.get("not_updated") else ""
         if upd.get("outdated") and not messagebox.askyesno(
                 "Wabbajack is out of date",
-                f"{upd['text']}.\n\nA modlist built for a newer Wabbajack can fail to install on "
+                f"{upd['text']}.{why}\n\nA modlist built for a newer Wabbajack can fail to install on "
                 f"an older one. The newest release is at\n{upd['url']}\n\n"
                 f"Install with the version you have anyway?", icon="warning", parent=self.root):
             return
@@ -2801,6 +2890,8 @@ class App:
                     "HIDE_NSFW": "the Browse tab's 'hide NSFW lists' box writes this",
                     "STAGE_LIST": "empty = most recently updated",
                     "WABBAJACK_DIR": "empty = auto-detect", "NOTIFY_URL": "empty = off",
+                    "WABBAJACK_AUTO_UPDATE": "bring Wabbajack up to its newest release before "
+                                             "an install",
                     "THEME": "the Dark mode switch beside the progress bar writes this",
                     "PARALLEL_SMALL_DOWNLOADS": "files under the threshold in flight at once from "
                                                 "direct sources; 1 = one at a time",

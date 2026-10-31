@@ -25,12 +25,14 @@ have committed to it. Checking first turns that into a sentence beforehand.
 """
 
 import csv
+import hashlib
 import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import urllib.request
 import webbrowser
 import zipfile
 
@@ -265,7 +267,29 @@ def latest_release(force=False):
     if not tag:
         return None
     return {"version": tag, "url": str(data.get("html_url") or RELEASES_URL),
-            "published": str(data.get("published_at") or "")}
+            "published": str(data.get("published_at") or ""),
+            "asset": release_asset(data, tag)}
+
+
+def release_asset(data, tag):
+    """The Windows build among a release's assets, as {"name", "url", "size",
+    "sha256"}, or None when the release has none.
+
+    It is the asset named for the tag, "4.3.2.1.zip": the file Wabbajack's own
+    launcher fetches and unpacks into a folder of that name. GitHub gives each
+    asset's size and, on releases since mid-2025, its SHA-256; either may be
+    missing, and is then None."""
+    want = f"{tag}.zip"
+    for a in (data.get("assets") or []) if isinstance(data, dict) else []:
+        if not isinstance(a, dict) or a.get("name") != want:
+            continue
+        size = a.get("size")
+        algo, _, value = str(a.get("digest") or "").partition(":")
+        return {"name": want, "url": str(a.get("browser_download_url") or ""),
+                "size": size if isinstance(size, int) and size > 0 else None,
+                "sha256": value.lower() if algo.lower() == "sha256"
+                and re.fullmatch(r"[0-9a-fA-F]{64}", value) else None}
+    return None
 
 
 def update_status(wj, latest=None):
@@ -296,7 +320,165 @@ def update_status(wj, latest=None):
     else:
         text = f"Wabbajack {installed} installed, the newest release"
     return {"installed": installed, "latest": newest, "outdated": outdated, "url": url,
-            "text": text}
+            "text": text, "asset": (rel or {}).get("asset")}
+
+
+# The newest release, brought in the way Wabbajack's own launcher brings it:
+# the release's Windows build unpacked into a folder named for its version,
+# beside the one in use. The download and the half-unpacked folder have names
+# of their own, which no version folder has, until the whole program is
+# there; then the folder is renamed to the version, and prune_old_versions()
+# retires the old one the next time Wabbajack is looked at.
+UPDATE_TIMEOUT = 120
+UPDATE_CHUNK = 1 << 20
+UPDATE_SPARE = 1 << 30          # free space left over once it is unpacked
+
+
+def bring_up_to_date(wj, auto=True, on_line=None, keep=()):
+    """update_status() for `wj` - and when it is out of date and `auto` is
+    set (WABBAJACK_AUTO_UPDATE), update_wabbajack() first, then the new
+    version found and the one it superseded pruned. The one way every
+    install, new or an update, learns which Wabbajack to use.
+
+    Returns (wj, update, not_updated): the Wabbajack to use, how it stands
+    against the newest release, and why it was not updated when that was
+    tried and failed - None otherwise."""
+    say = on_line or (lambda _line: None)
+    update = update_status(wj)
+    if not (auto and wj and update.get("outdated")):
+        return wj, update, None
+    say(f"{update['text']}: updating it.")
+    ok, said = update_wabbajack(wj, update, on_line=say)
+    say(f"{said}.")
+    if not ok:
+        return wj, update, said
+    wj = find_wabbajack() or wj
+    for name in prune_old_versions(wj, keep=keep):
+        say(f"Removed Wabbajack {name}, superseded by {wj['version']}.")
+    return wj, update_status(wj), None
+
+
+def update_wabbajack(wj, update, on_line=None, running=None):
+    """Bring Wabbajack up to the newest release. Returns (ok, one sentence
+    saying what happened). Never raises.
+
+    `update` is update_status()'s answer. The download is held to the size
+    and SHA-256 GitHub publishes for it before anything is unpacked, and
+    nothing in use is touched: the version folder in use stays, and a folder
+    already bearing the new version's name is never written into. Not while
+    a Wabbajack process runs - its launcher may be fetching the same version -
+    nor when that cannot be told."""
+    say = on_line or (lambda _line: None)
+    update = update or {}
+    version, asset = update.get("latest"), update.get("asset")
+    if not wj or not wj.get("dir"):
+        return False, "Wabbajack was not found, so there is nothing to update"
+    if not version or not _VERSION_DIR.match(str(version)):
+        return False, "the newest Wabbajack release could not be looked up"
+    if wj.get("version") and version_key(version) <= version_key(wj["version"]):
+        return True, f"Wabbajack {wj['version']} is already the newest release"
+    if not asset or wj_paths.web_url_problem(asset.get("url")):
+        return False, f"Wabbajack {version} has no Windows build ({version}.zip) to download"
+    if running is None:
+        running = running_processes()
+    if running is None:
+        return False, "whether Wabbajack is running could not be checked, so it was not updated"
+    if running:
+        return False, "Wabbajack is running; close it, and it is updated at the next check"
+    root = wj["dir"]
+    dest = os.path.join(root, version)
+    if os.path.lexists(dest):
+        return False, (f"{dest} is already there without a whole Wabbajack in it; run "
+                       f"Wabbajack.exe to finish its own update, or remove that folder")
+    part = os.path.join(root, f"{version}.zip.part")
+    staging = os.path.join(root, f"{version}.unpacking")
+    try:
+        _discard(part, staging)         # what an earlier attempt left
+        free = _free_bytes(root)
+        if asset.get("size") and free is not None and free < asset["size"] + UPDATE_SPARE:
+            return False, f"there is not room in {root} for the {_mb(asset['size'])} download"
+        _download(asset["url"], part, asset.get("size"), asset.get("sha256"), version, say)
+        say(f"Unpacking Wabbajack {version}...")
+        wj_paths.move_folder(_unpack(part, staging), dest)
+    except Exception as e:          # the network, the disk, a damaged zip: said, never raised
+        return False, f"Wabbajack {version} could not be installed: {e}"
+    finally:
+        _discard(part, staging)
+    return True, f"Wabbajack {version} installed in {dest}"
+
+
+def _download(url, part, size, sha256, version, say):
+    """The release's zip to `part`, held to the size and hash it was published with."""
+    agent = getattr(CFG, "USER_AGENT", None) or "WabbajackWizard"
+    req = urllib.request.Request(url, headers={"User-Agent": agent})
+    digest, got, shown = hashlib.sha256(), 0, -1
+    with wj_paths.urlopen(req, timeout=UPDATE_TIMEOUT) as r, io.open(part, "xb") as f:
+        total = size or int(r.headers.get("Content-Length") or 0) or None
+        while True:
+            chunk = r.read(UPDATE_CHUNK)
+            if not chunk:
+                break
+            f.write(chunk)
+            digest.update(chunk)
+            got += len(chunk)
+            if size and got > size:
+                raise ValueError(f"the download is larger than the {size:,} bytes published")
+            if total and got * 10 // total > shown:
+                shown = got * 10 // total
+                say(f"Downloading Wabbajack {version}: {got * 100 // total}% of {_mb(total)}")
+    if size and got != size:
+        raise ValueError(f"the download stopped at {got:,} of {size:,} bytes")
+    if sha256 and digest.hexdigest() != sha256:
+        raise ValueError("the download's SHA-256 is not the one published with the release")
+
+
+def _unpack(zip_path, into):
+    """Unpack the release into `into`, and return the folder in it holding a
+    whole Wabbajack: `into` itself, or the one folder a zip wraps it in."""
+    with zipfile.ZipFile(zip_path) as z:
+        members = z.infolist()
+        for m in members:
+            parts = m.filename.replace("\\", "/").split("/")
+            if m.filename.startswith(("/", "\\")) or ":" in m.filename or ".." in parts:
+                raise ValueError(f"the zip names a file outside its own folder: {m.filename}")
+        need = sum(m.file_size for m in members)
+        free = _free_bytes(os.path.dirname(into))
+        if free is not None and free < need + UPDATE_SPARE:
+            raise ValueError(f"there is not room to unpack it ({_mb(need)})")
+        z.extractall(into)              # every byte is checked against its CRC on the way
+    if _whole(into):
+        return into
+    inner = [os.path.join(into, n) for n in os.listdir(into)]
+    if len(inner) == 1 and _whole(inner[0]):
+        return inner[0]
+    raise ValueError("the zip does not hold Wabbajack.exe and cli\\wabbajack-cli.exe")
+
+
+def _whole(folder):
+    return (os.path.isfile(os.path.join(folder, "Wabbajack.exe"))
+            and os.path.isfile(os.path.join(folder, "cli", "wabbajack-cli.exe")))
+
+
+def _discard(part, staging):
+    """An update's own download and half-unpacked folder: names no version
+    folder has, and nothing but update_wabbajack() writes."""
+    try:
+        if os.path.isfile(part):
+            os.remove(part)
+    except OSError:
+        pass
+    shutil.rmtree(staging, ignore_errors=True)
+
+
+def _free_bytes(path):
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
+def _mb(n):
+    return f"{n / 2 ** 20:.1f} MB"
 
 
 _GAMES_CACHE = {}
