@@ -1188,6 +1188,18 @@ try:
     check("one click checks Wabbajack, then carries on into the install",
           app.install_ctx and app.install_ctx["fn"] == "Keep.wabbajack" and len(ran) == 1,
           str((ran, DLG.calls)))
+    WB.run_install = lambda cli, manifest, downloads, into, on_line=None: on_line("Missing: x.7z") or 2
+    DLG.calls.clear()
+    app.prepare_install()
+    settle()
+    logs = [os.path.join(box.runtime, n) for n in os.listdir(box.runtime) if n.startswith("wj_install_")]
+    failed = [p for p in logs if "exited with 2" in io.open(p, encoding="utf-8").read()]
+    check("a failed install's warning names the log Wabbajack's output is kept in, which has it",
+          len(failed) == 1 and DLG.shown(failed[0])
+          and "Missing: x.7z" in io.open(failed[0], encoding="utf-8").read(),
+          str((logs, DLG.calls)))
+    check("  that log, and only the install's before it, are kept", len(logs) == 2, str(logs))
+    WB.run_install = lambda cli, manifest, downloads, into, on_line=None: ran.append(into) or 0
     WB.game_ready = lambda cli, game: (False, "no game here")
     app._offer_install("Keep.wabbajack")
     settle()

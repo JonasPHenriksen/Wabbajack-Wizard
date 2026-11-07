@@ -64,6 +64,7 @@ import json
 import sys
 import time
 import shutil
+import subprocess
 import textwrap
 from datetime import datetime, timezone
 
@@ -1822,7 +1823,7 @@ def install_update_step(state, rows):
         out("  wabbajack-cli.exe was not found, so the install cannot be driven from here.")
         return False
     for name in WB.prune_old_versions(wj, keep=[A.MANIFESTS]):
-        out(f"    Removed Wabbajack {name}, superseded by {wj['version']}.")
+        A.LOG.info("    Removed Wabbajack %s, superseded by %s.", name, wj["version"])
     wj, update, not_updated = bring_wabbajack_up_to_date(wj)
     game = (load_records().get(fn) or {}).get("game")
     ready, detail = WB.game_ready(wj.get("cli"), game)
@@ -2441,6 +2442,90 @@ def record_install(state, filename, target):
     return rec
 
 
+# What Wabbajack prints while it installs - thousands of lines for a large
+# list - is kept in a log of its own in the runtime folder, as the
+# downloader's and the sorter's are, with the previous install's beside it;
+# wj_autoupdate.log records the command, that log's name and the exit code.
+# It used to be shown and nothing else, so a failed install's reason went
+# with the window it had scrolled past in.
+INSTALL_LOG_PREFIX = "wj_install_"
+
+
+def prune_install_logs(folder, current=None, keep=1):
+    """Every install log in `folder` but `current` - the one just opened -
+    and the `keep` written to last before it: the previous install's.
+
+    By when each was written, not by name. A name is the first second free
+    from the moment it is made (wj_paths.create_stamped), so two installs in
+    one second push the second one's name into the next, and a name that
+    pruning frees can be taken again by a later log: by name, the newest log
+    could read as the oldest, and go."""
+    try:
+        logs = [os.path.join(folder, f) for f in os.listdir(folder)
+                if f.startswith(INSTALL_LOG_PREFIX) and f.endswith(".log")]
+    except OSError:
+        return
+    if current:
+        logs = [p for p in logs if os.path.normcase(p) != os.path.normcase(current)]
+
+    def written(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0
+    logs.sort(key=lambda p: (written(p), p))
+    for old in logs[:-keep] if keep else logs:
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+
+
+def install_with_wabbajack(cli, manifest, downloads, target, on_line):
+    """WB.run_install, kept: each line Wabbajack prints goes to `on_line` and
+    to runtime\\wj_install_<stamp>.log. Returns (the exit code, that log's
+    path) - None for the path when no log could be opened, and the install
+    runs all the same, as it does when the disk fills mid-way."""
+    folder = A.runtime_path()
+    try:
+        path, log = wj_paths.create_stamped(folder, INSTALL_LOG_PREFIX, ".log")
+    except OSError as e:
+        A.LOG.warning("[WARN] Could not open an install log in %s: %s", folder, e)
+        path, log = None, None
+    prune_install_logs(folder, current=path)
+    kept = [log]
+
+    def keep(text):
+        if kept[0] is None:
+            return
+        try:
+            kept[0].write(text)
+            kept[0].flush()             # an install is long: what it said so far is there
+        except (OSError, ValueError):
+            kept[0] = None
+
+    def both(line):
+        keep(line + "\n")
+        on_line(line)
+
+    cmd = subprocess.list2cmdline(WB.install_args(cli, manifest, downloads, target))
+    A.LOG.info("$ %s", cmd)
+    if path:
+        A.LOG.info("  Wabbajack's output is kept in %s", path)
+    try:
+        keep(f"$ {cmd}\n\n")
+        rc = WB.run_install(cli, manifest, downloads, target, on_line=both)
+        keep(f"\nexited with {rc}\n")
+    finally:
+        if log is not None:
+            try:
+                log.close()
+            except OSError:
+                pass
+    (A.LOG.info if rc == 0 else A.LOG.error)("Wabbajack exited with %d", rc)
+    return rc, path
+
+
 def install_status(state, ent, filename, changed):
     """For a tracked list: the install recorded for it and whether it is
     behind what is published, or None when none is recorded here. Behind is
@@ -2525,11 +2610,11 @@ def update_install(state, row, assist, wj):
     if problems:
         return False, "; ".join(problems)
     out(f"  4/4  Installing into {target} ...")
-    rc = WB.run_install(wj["cli"], manifest, downloads, target,
-                        on_line=lambda line: out("  | " + line))
+    rc, log = install_with_wabbajack(wj["cli"], manifest, downloads, target,
+                                     on_line=lambda line: out("  | " + line))
     if rc != 0:
-        return False, (f"Wabbajack exited {rc}; the staged folder is untouched, so "
-                       f"running it again is safe")
+        return False, (f"Wabbajack exited {rc}" + (f" (what it said is in {log})" if log else "")
+                       + "; the staged folder is untouched, so running it again is safe")
     rec = record_install(state, fn, target)
     return True, f"{stem} is installed at {target}, v{rec['version'] or '?'}"
 
@@ -2553,9 +2638,12 @@ def readme_read(stem, manifest):
 
 
 def bring_wabbajack_up_to_date(wj):
-    """WB.bring_up_to_date, as the console's settings and output have it."""
+    """WB.bring_up_to_date, as the console's settings have it. What it says
+    goes through the log - printed as ever, and kept in wj_autoupdate.log -
+    since it downloads a release and removes the folder of the one it
+    replaces."""
     return WB.bring_up_to_date(wj, getattr(CFG, "WABBAJACK_AUTO_UPDATE", True),
-                               keep=[A.MANIFESTS], on_line=lambda line: out("    " + line))
+                               keep=[A.MANIFESTS], on_line=lambda line: A.LOG.info("    %s", line))
 
 
 def offer_install(state, filename, st):
@@ -2581,7 +2669,7 @@ def offer_install(state, filename, st):
         out("  it is installed somewhere other than in or beside this folder.")
         return False
     for name in WB.prune_old_versions(wj, keep=[A.MANIFESTS]):
-        out(f"    Removed Wabbajack {name}, superseded by {wj['version']}.")
+        A.LOG.info("    Removed Wabbajack %s, superseded by %s.", name, wj["version"])
 
     downloads = os.path.join(A.WJ.resolve_game_dirs(st["game"])[0], stem)
     manifest = os.path.join(A.MANIFESTS, filename)
@@ -2687,15 +2775,16 @@ def offer_install(state, filename, st):
     out()
     out("  Running Wabbajack. This takes a while; its output follows.")
     rule()
-    rc = WB.run_install(wj["cli"], manifest, downloads, target,
-                        on_line=lambda l: out("  | " + l))
+    rc, log = install_with_wabbajack(wj["cli"], manifest, downloads, target,
+                                     on_line=lambda l: out("  | " + l))
     rule()
     if rc == 0:
         record_install(state, filename, target)
         out(f"  Wabbajack finished. {stem} is installed at {target}.")
     else:
-        out(f"  Wabbajack exited {rc}. Its output above says why; the staged "
-            f"folder is untouched, so re-running is safe.")
+        out(f"  Wabbajack exited {rc}. Its output above says why"
+            + (f", and is kept in {log}" if log else "")
+            + "; the staged folder is untouched, so re-running is safe.")
     return rc == 0
 
 

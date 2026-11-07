@@ -2184,14 +2184,16 @@ class App:
         Worker-thread code; it only writes to the log."""
         wj = WB.find_wabbajack()
         for name in WB.prune_old_versions(wj, keep=[A.MANIFESTS]):
-            W.out(f"  Removed Wabbajack {name}, superseded by {wj['version']}.")
+            A.LOG.info("  Removed Wabbajack %s, superseded by %s.", name, wj["version"])
         return wj
 
     def _bring_up_to_date(self, wj):
-        """WB.bring_up_to_date, as the window's settings and log have it.
-        Worker-thread code; it only writes to the log."""
+        """WB.bring_up_to_date, as the window's settings have it. What it says
+        goes through the log - to the pane, and kept in wj_autoupdate.log -
+        since it downloads a release and removes the folder of the one it
+        replaces. Worker-thread code; it only writes to the log."""
         return WB.bring_up_to_date(wj, CFG.WABBAJACK_AUTO_UPDATE, keep=[A.MANIFESTS],
-                                   on_line=lambda line: W.out("  " + line))
+                                   on_line=lambda line: A.LOG.info("  %s", line))
 
     def wabbajack_check(self, then=None):
         """Is Wabbajack there, and is it the newest release? Cheap: a folder
@@ -2313,18 +2315,20 @@ class App:
         A.save_state(self.state)
 
         def job():
-            return WB.run_install(ctx["wj"]["cli"], ctx["manifest"], ctx["downloads"], target,
-                                  on_line=lambda l: W.out("  | " + l))
+            return W.install_with_wabbajack(ctx["wj"]["cli"], ctx["manifest"], ctx["downloads"],
+                                            target, on_line=lambda l: W.out("  | " + l))
 
-        def done(rc):
+        def done(res):
+            rc, log = res
             if rc == 0:
                 W.record_install(self.state, ctx["fn"], target)
                 self.data_changed("records")
                 messagebox.showinfo("Install", f"Wabbajack finished. {stem} is installed at {target}.",
                                     parent=self.root)
             else:
-                messagebox.showwarning("Install", f"Wabbajack exited {rc}. The log says why; the staged "
-                                                  f"folder is untouched, so re-running is safe.",
+                said = f"What it said is kept in\n{log}\n\n" if log else "The log pane says why. "
+                messagebox.showwarning("Install", f"Wabbajack exited {rc}. {said}The staged folder is "
+                                                  f"untouched, so re-running is safe.",
                                        parent=self.root)
         self.run_job("Installing with Wabbajack", job, done)
 

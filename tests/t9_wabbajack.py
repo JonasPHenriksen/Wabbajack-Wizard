@@ -863,7 +863,35 @@ try:
 finally:
     WB.latest_release, WB.running_processes, WB.CFG.WABBAJACK_DIR = real
 
-print("\n      the console says when Wabbajack could not be updated")
+class Kept(logging.Handler):
+    """What reaches wj_autoupdate's log - the file, and the screen - kept for a check."""
+
+    def __init__(self):
+        super().__init__(logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append((record.levelname, record.getMessage()))
+
+    def text(self):
+        return "\n".join(m for _l, m in self.records)
+
+
+def keeping_the_log():
+    """A.LOG with a Kept handler alone on it, at every level; call what is
+    returned to put it back as it was."""
+    kept, saved = Kept(), (A.LOG.handlers[:], A.LOG.level)
+    A.LOG.handlers[:] = [kept]
+    A.LOG.setLevel(logging.DEBUG)
+
+    def restore():
+        A.LOG.handlers[:] = saved[0]
+        A.LOG.setLevel(saved[1])
+    kept.restore = restore
+    return kept
+
+
+print("\n      the console says when Wabbajack could not be updated, and the log keeps it")
 heard = []
 real_bits = (W.out, WB.find_wabbajack, WB.latest_release, WB.update_wabbajack)
 W.out = lambda msg="": heard.append(str(msg))
@@ -873,15 +901,89 @@ WB.latest_release = lambda force=False: {"version": "4.3.2.1", "url": "https://x
                                          "asset": {"url": "https://x/win"}}
 WB.update_wabbajack = lambda wj, update, on_line=None, running=None: (False, "the network is down")
 blocked_st = {"game": "SkyrimSpecialEdition", "missing": 0, "bytes": 0}
+log = keeping_the_log()
 try:
     W.offer_install({}, "Some_@@_list.wabbajack", blocked_st)   # BLOCKED: stops before asking
 finally:
+    log.restore()
     W.out, WB.find_wabbajack, WB.latest_release, WB.update_wabbajack = real_bits
 said_text = "\n".join(heard)
-check("it tries, and says what stopped it",
-      "updating it" in said_text and "the network is down" in said_text
-      and "Not updated, so run Wabbajack.exe" in said_text, said_text[:600])
+check("it tries, and says what stopped it - in wj_autoupdate.log too, not only on the screen",
+      "updating it" in log.text() and "the network is down" in log.text()
+      and "Not updated, so run Wabbajack.exe" in said_text, log.text() + "\n" + said_text[:600])
 srv.shutdown()
+
+print("\n      what Wabbajack says while it installs is kept, with the exit code")
+# Found 2026-11-07: an install's output went to the screen alone, so a failed
+# one's reason was gone with the window it scrolled past in.
+saved_here, real_run = A.HERE, WB.run_install
+A.HERE = os.path.join(BOX, "logbox")
+runtime = A.runtime_path()
+
+
+def talking_install(code):
+    def run(cli, manifest, downloads, into, on_line=None):
+        for line in ("Installing 3 archives", "Missing: Some Mod.7z"):
+            on_line(line)
+        return code
+    return run
+
+
+log = keeping_the_log()
+try:
+    shown = []
+    WB.run_install = talking_install(3)
+    rc, path = W.install_with_wabbajack(r"C:\WJ\cli\wabbajack-cli.exe", r"D:\Mod Lists\X.wabbajack",
+                                        r"D:\dl\X", r"C:\Games\X", shown.append)
+    kept_text = io.open(path, encoding="utf-8").read() if path else ""
+    check("the exit code comes back, with a log of its own in the runtime folder",
+          rc == 3 and path and os.path.dirname(path) == runtime
+          and os.path.basename(path).startswith("wj_install_"), str((rc, path)))
+    check("  holding the command, every line, and the exit code",
+          '"D:\\Mod Lists\\X.wabbajack"' in kept_text and "Missing: Some Mod.7z" in kept_text
+          and "exited with 3" in kept_text, kept_text)
+    check("  each line still shown as it comes", shown == ["Installing 3 archives",
+                                                           "Missing: Some Mod.7z"], str(shown))
+    check("  and wj_autoupdate.log has the command, where the output is, and the failure",
+          any(m.startswith("$ ") and "install" in m for _l, m in log.records)
+          and any(path in m for _l, m in log.records)
+          and ("ERROR", "Wabbajack exited with 3") in log.records, str(log.records))
+    WB.run_install = talking_install(0)
+    paths = [W.install_with_wabbajack("cli", "m.wabbajack", "dl", "out", shown.append)[1]
+             for _ in range(2)]
+    left = sorted(n for n in os.listdir(runtime) if n.startswith("wj_install_"))
+    check("only this install's log and the one before are kept",
+          left == sorted(os.path.basename(p) for p in paths), str((left, paths)))
+    check("  a finished install is said as such", ("INFO", "Wabbajack exited with 0") in log.records)
+    # Two installs in one second push the second's name into the next, and
+    # a name pruning frees can be taken again: the log just opened can bear
+    # the oldest name there is. Found by 15.22b on 2026-11-07.
+    odd = os.path.join(BOX, "odd-names")
+    os.makedirs(odd, exist_ok=True)
+    names = ["wj_install_20260101_000000.log", "wj_install_20260101_000001.log",
+             "wj_install_20260101_000002.log"]
+    for n, when in zip(names, (300, 100, 200)):           # written: the first one last
+        io.open(os.path.join(odd, n), "w").write("x")
+        os.utime(os.path.join(odd, n), (when, when))
+    W.prune_install_logs(odd, current=os.path.join(odd, names[0]))
+    check("the log just opened is kept though its name is the oldest, with the one written last "
+          "before it", sorted(os.listdir(odd)) == [names[0], names[2]], str(os.listdir(odd)))
+    real_create = W.wj_paths.create_stamped
+
+    def no_room(*a, **k):
+        raise OSError(28, "No space left on device")
+    W.wj_paths.create_stamped = no_room
+    shown.clear()
+    try:
+        rc, path = W.install_with_wabbajack("cli", "m.wabbajack", "dl", "out", shown.append)
+    finally:
+        W.wj_paths.create_stamped = real_create
+    check("with no log to be had, the install runs all the same, and says so",
+          rc == 0 and path is None and len(shown) == 2
+          and any(l == "WARNING" and "install log" in m for l, m in log.records), str(log.records[-3:]))
+finally:
+    log.restore()
+    WB.run_install, A.HERE = real_run, saved_here
 
 shutil.rmtree(BOX, ignore_errors=True)
 sys.exit(summary())

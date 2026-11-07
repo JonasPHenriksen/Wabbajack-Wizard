@@ -75,6 +75,8 @@ ALLOWED = {
     ("wj_wizard", "save_known_hashes"): ({"os.replace"},
         "the hashes staging has read, from its .tmp"),
     ("wj_sorter", "prune_old_logs"): ({"os.remove"}, "its own older logs"),
+    ("wj_wizard", "prune_install_logs"): ({"os.remove"},
+        "its own older wj_install_*.log in the runtime folder, the newest kept"),
     ("wj_merge_pool", "Record.close"): ({"os.remove"}, "its own record, when nothing was recorded"),
     ("wj_wizard", "DeletionRecord.close"): ({"os.remove"}, "its own record, when nothing was recorded"),
     # -- partial downloads, which are a tool's own until they are verified -------

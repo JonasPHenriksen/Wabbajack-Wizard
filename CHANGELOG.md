@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.5.5 — 2026-11-07
+
+### Fixed
+
+- **What Wabbajack said during an install was shown and not kept.** Its
+  output went to the log pane or the console and nowhere else, so a failed
+  install's reason was gone with the window it had scrolled past in. It is
+  now also kept in `runtime\wj_install_<timestamp>.log`, the previous
+  install's beside it, and `wj_autoupdate.log` records the command, that
+  log's name and the exit code. A failed install's message names the log.
+  An install whose log cannot be opened, or whose disk fills mid-way, runs
+  all the same.
+- **Bringing Wabbajack up to date left no trace in the log file.** The
+  download, the version installed and the old version's folder removed were
+  said on screen only. They go through `wj_autoupdate.log` now, from the
+  window and the console alike.
+
+Found on 2026-11-07: Wabbajack had gone from 4.2.3.0 to 4.3.2.1 and Welcome
+to Night City had been installed with it, and `wj_autoupdate.log` said
+neither.
+
+Tests: 1677 checks across 19 suites, up from 1667.
+
 ## 1.5.4 — 2026-10-31
 
 ### Fixed

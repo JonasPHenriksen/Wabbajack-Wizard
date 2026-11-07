@@ -1020,7 +1020,11 @@ hand it over, with `INSTALL_MODE`:
 - **`cli`** (default) — asks where to install, then runs
   `wabbajack-cli install --wabbajack … --downloads … --output …`. Both paths are
   ones this tooling already knows, so nothing is typed twice. The install
-  location is remembered per list.
+  location is remembered per list. What Wabbajack prints follows on screen and
+  is kept in `runtime\wj_install_<timestamp>.log`, the previous install's
+  beside it; `wj_autoupdate.log` records the command, that log's name and the
+  exit code, so a failed install's reason outlives the window it scrolled past
+  in.
 - **`gui`** — opens the Wabbajack window and prints the two paths to paste.
 - **`off`** — never offers.
 
@@ -1292,7 +1296,7 @@ recognised (if unfetchable) source rather than "unknown".
 | --- | --- |
 | `wj_config.py` | every setting's default, the archive layout, and the naming rules the rest share: reserved names, the `~N` suffix, which GameTypes share a folder |
 | `wj_settings.json` | your settings; `wj_settings.example.json` documents every key |
-| `runtime\` | what the tools write as they run: `wj_autoupdate.log` and the sorter's and downloader's logs; the state file and the manifest cache; `wj_hashes.json`, the archives staging has read; `wj_overview.json`, what the Start tab shows; the lock; the files an assist session shares with the `nxm://` handler, and the stop file the window leaves for a child it asks to stop; and the `deleted_`, `purged_trash_` and `merged_` records of what stage 5 took, each under a name of its own |
+| `runtime\` | what the tools write as they run: `wj_autoupdate.log`, the sorter's and downloader's logs, and the last two Wabbajack installs' output (`wj_install_<timestamp>.log`); the state file and the manifest cache; `wj_hashes.json`, the archives staging has read; `wj_overview.json`, what the Start tab shows; the lock; the files an assist session shares with the `nxm://` handler, and the stop file the window leaves for a child it asks to stop; and the `deleted_`, `purged_trash_` and `merged_` records of what stage 5 took, each under a name of its own |
 | `wj_wabbajack.py` | finding Wabbajack, whether it is the newest release, the game preflight, and the hand-over |
 | `wj_autoupdate.py` | orchestrator: feeds, tracking, state, manifests |
 | `wj_gallery.py` | the published gallery and its validation reports: what exists, and how much of it you hold |
@@ -1315,7 +1319,7 @@ recognised (if unfetchable) source rather than "unknown".
 ```
 
 (or `.venv-win\Scripts\python.exe` where a machine-wide Python made that
-environment instead). 1667 checks across nineteen suites. None of them touch the live archive pools:
+environment instead). 1677 checks across nineteen suites. None of them touch the live archive pools:
 `ARCHIVE_ROOT` is `"../Mod Archive"` resolved against the *script* folder, so
 each suite copies the scripts into a temporary directory where they operate on
 a temporary pool, with no changes to the code under test. The suites that
