@@ -151,13 +151,15 @@ can be moved or copied as it is. The one path that does reach outside it is
 `ARCHIVE_ROOT`, `../Mod Archive` by default, so a move that separates the tools
 from the archives needs that set in `wj_settings.json`. The same goes for git: a
 [MinGit](https://github.com/git-for-windows/git/releases) zip unpacked into
-`.mingit\`, the portable
-[Git Credential Manager](https://github.com/git-ecosystem/git-credential-manager/releases)
-zip unpacked into its `mingw64\libexec\git-core\` (where MinGit's default
-`credential.helper = manager` finds it), and a `git.bat` in this folder in
-front of it, is a complete git for this checkout. Its settings are
-`.mingit\etc\gitconfig`, which also has to mark the checkout safe because files
-on a share read as foreign-owned. Both folders and the wrapper are gitignored.
+`.mingit\`, with a `git.bat` in this folder in front of it, is a complete git
+for this checkout. MinGit carries Git Credential Manager in its `ucrt64\bin\`,
+where its default `credential.helper = manager` finds it, so nothing else needs
+unpacking. Its settings are `.mingit\etc\gitconfig`, which marks this checkout
+safe and no other directory (`safe.directory = <folder>`; a checkout opened from
+a network share needs the share path instead, as
+`%(prefix)///SERVER/share/WabbajackWizard`), and leaves out MinGit's stock
+`[include]` of `C:/Program Files/Git/etc/gitconfig`, so no setting from outside
+the folder applies. Both folders and the wrapper are gitignored.
 
 This checkout pushes over SSH, with MinGit's own `ssh` and a GitHub deploy key:
 a key that reaches this one repository and nothing else, unlike the token the
