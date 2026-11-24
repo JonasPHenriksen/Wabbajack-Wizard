@@ -886,6 +886,15 @@ check still confirms they agree.
 
 ## Nexus accounts
 
+Wabbajack Wizard is a personal tool, published to read and reuse, and it is not
+registered with Nexus Mods as an application. It talks to the Nexus API with
+your own personal API key, which Nexus's
+[API Acceptable Use Policy](https://help.nexusmods.com/article/114-api-acceptable-use-policy)
+allows for personal use; an application offered to the public is expected to be
+registered with Nexus instead. Every request carries the tool's own name and
+version (`WabbajackWizard/<version>`), never another application's, and on a
+free account every Nexus file still takes your own click on *Slow download*.
+
 Nexus only mints automated download links for Premium accounts. On a free
 account the website mints one per click, which assist mode captures: it
 registers itself as the `nxm://` handler, shows each mod's download page in
